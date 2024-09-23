@@ -1,0 +1,32 @@
+[package]
+name = "maivin-fusion"
+description = "Maivin Fusion"
+repository = "https://bitbucket.org/au-zone/maivin-fusion"
+license = "CLOSED"
+version = "0.0.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+debug = false
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = true
+
+[dependencies]
+async-std = {version = "1.12", features = ["attributes"] }
+cdr = "0.2"
+clap = { version = "4.4", features = ["derive", "env"] }
+serde = "1.0"
+serde_json = "1.0"
+zenoh = "0.10.0-rc"
+zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
+log = "0.4.20"
+edgefirst-schemas = "1.1"
+env_logger = "0.10"
+zstd = { version = "0.13", features = ["experimental"] }
+ndarray = "0.16.1"
