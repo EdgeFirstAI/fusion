@@ -21,6 +21,8 @@ mod setup;
 
 struct ParsedPoint {
     fields: HashMap<String, f64>,
+    angle: f64,
+    range: f64,
 }
 
 const SIZE_OF_DATATYPE: [usize; 9] = [
@@ -33,10 +35,13 @@ const SIZE_OF_DATATYPE: [usize; 9] = [
     4, // pub const FLOAT32: u8 = 7;
     8, //pub const FLOAT64: u8 = 8;
 ];
+const DEFAULT_PCD_RANGE: f64 = 100000.0;
 
 fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
     let mut p = ParsedPoint {
         fields: HashMap::new(),
+        angle: 0.0,
+        range: DEFAULT_PCD_RANGE,
     };
     for f in fields {
         let start = f.offset as usize;
@@ -97,12 +102,20 @@ fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
         };
         p.fields.insert(f.name.clone(), val);
     }
+    if p.fields.contains_key("x") && p.fields.contains_key("y") && p.fields.contains_key("z") {
+        p.range = (p.fields["x"].powi(2) + p.fields["y"].powi(2) + p.fields["z"].powi(2)).sqrt()
+    }
+    if p.fields.contains_key("x") && p.fields.contains_key("y") {
+        p.angle = p.fields["y"].atan2(p.fields["x"]);
+    }
     p
 }
 
 fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
     let mut p = ParsedPoint {
         fields: HashMap::new(),
+        angle: 0.0,
+        range: DEFAULT_PCD_RANGE,
     };
     for f in fields {
         let start = f.offset as usize;
@@ -161,6 +174,12 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             }
         };
         p.fields.insert(f.name.clone(), val);
+    }
+    if p.fields.contains_key("x") && p.fields.contains_key("y") && p.fields.contains_key("z") {
+        p.range = (p.fields["x"].powi(2) + p.fields["y"].powi(2) + p.fields["z"].powi(2)).sqrt()
+    }
+    if p.fields.contains_key("x") && p.fields.contains_key("y") {
+        p.angle = p.fields["y"].atan2(p.fields["x"]);
     }
     p
 }
@@ -283,6 +302,8 @@ mod projection_test {
         let mut points = Vec::new();
         points.push(ParsedPoint {
             fields: HashMap::new(),
+            angle: 0.0,
+            range: DEFAULT_PCD_RANGE,
         });
         points[0].fields.insert("x".to_string(), 10.0);
         points[0].fields.insert("y".to_string(), 20.0);
@@ -290,6 +311,8 @@ mod projection_test {
 
         points.push(ParsedPoint {
             fields: HashMap::new(),
+            angle: 0.0,
+            range: DEFAULT_PCD_RANGE,
         });
         points[1].fields.insert("x".to_string(), 1.0);
         points[1].fields.insert("y".to_string(), 2.0);
@@ -476,34 +499,61 @@ async fn main() {
         // project points onto mask
         let point_proj = project_point(&points, &cam_mtx, &[0.0, 0.0, 0.0]);
         for i in 0..points.len() {
+            points[i].fields.insert("class".to_string(), 0.0);
             let mask_coord = (
                 ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
                 (point_proj[i].1 * mask_height as f64).round() as i64,
             );
-            points[i].fields.insert("class".to_string(), 0.0);
-            if mask_coord.0 < 0 || mask_coord.0 >= mask_width as i64 {
-                continue;
-            }
 
-            if mask_coord.1 < 0 || mask_coord.1 >= mask_height as i64 {
-                continue;
-            }
-            let start = mask_coord.1 as usize * mask_width * mask_classes
-                + mask_coord.0 as usize * mask_classes;
-            let end = start + mask_classes;
-            let scores = &mask[start..end];
-            let mut max = 0;
-            let mut argmax = 0;
-            for j in 0..scores.len() {
-                if scores[j] > max {
-                    max = scores[j];
-                    argmax = j;
+            // first do the center of the point, then 8 points around circumference
+            // negative -45 represetns the center
+            for angle in (-45..360).step_by(45) {
+                let range = if angle < 0 {
+                    0.0
+                } else {
+                    mask_width.max(mask_height) as f64 * 0.02
+                };
+                let x = mask_coord.0 + (range * (angle as f64).to_radians().sin()) as i64;
+                let y = mask_coord.1 + (range * (angle as f64).to_radians().cos()) as i64;
+                if x < 0 || x >= mask_width as i64 {
+                    continue;
+                }
+                if y < 0 || y >= mask_height as i64 {
+                    continue;
+                }
+                let start = y as usize * mask_width * mask_classes + x as usize * mask_classes;
+                let end = start + mask_classes;
+                let scores = &mask[start..end];
+                let mut max = 0;
+                let mut argmax = 0;
+                for j in 0..scores.len() {
+                    if scores[j] > max {
+                        max = scores[j];
+                        argmax = j;
+                    }
+                }
+                if argmax != 0 {
+                    points[i]
+                        .fields
+                        .insert(CLASS_FIELD.to_string(), argmax as f64);
+                    break;
                 }
             }
+        }
 
-            points[i]
-                .fields
-                .insert(CLASS_FIELD.to_string(), argmax as f64);
+        // filter occlusiosn
+        points.sort_by(|p, q| p.range.total_cmp(&q.range));
+        for i in 0..points.len() {
+            if points[i].fields["class"] <= 0.0 {
+                continue;
+            }
+            for j in (i + 1)..points.len() {
+                if (points[j].angle - points[i].angle).abs() < args.occ_angle_limit.to_radians()
+                    && points[j].range - points[i].range > args.occ_range_limit
+                {
+                    points[j].fields.insert("class".to_string(), 0.0);
+                }
+            }
         }
 
         let data = serialize_pcd(&points, &pcd.fields);
