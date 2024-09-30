@@ -1,5 +1,4 @@
 use clap::Parser;
-use std::path::PathBuf;
 
 #[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
 pub enum LabelSetting {
@@ -48,4 +47,34 @@ pub struct Args {
     /// occlusion angle limit
     #[arg(long, env, default_value = "1.0")]
     pub occ_range_limit: f64,
+
+    /// occupancy output topic
+    #[arg(long, env, default_value = "rt/fusion/occupancy")]
+    pub occupancy_topic: String,
+
+    /// occupancy threshold
+    #[arg(long, env, default_value = "2")]
+    pub occupancy_threshold: u32,
+
+    /// range_bin_limit
+    #[arg(long, env, num_args = 2, value_delimiter = ' ', default_value = "0 20")]
+    pub range_bin_limit: Vec<f64>,
+
+    /// range_bin_width
+    #[arg(long, env, default_value = "0.5")]
+    pub range_bin_width: f64,
+
+    /// angle_bin_limit, 0 degrees is forwards
+    #[arg(
+        long,
+        env,
+        num_args = 2,
+        value_delimiter = ' ',
+        default_value = "-70 70"
+    )]
+    pub angle_bin_limit: Vec<f64>,
+
+    /// angle_bin_width in degrees
+    #[arg(long, env, default_value = "10")]
+    pub angle_bin_width: f64,
 }

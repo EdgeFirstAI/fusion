@@ -9,14 +9,14 @@ use log::{error, info, trace};
 use setup::Args;
 use zenoh::{
     config::Config,
-    prelude::{r#async::*, sync::SyncResolve},
+    prelude::r#async::*,
 };
 
 use std::{
-    collections::HashMap, error::Error, panic, str::FromStr, sync::Arc, thread::spawn, usize,
+    collections::HashMap, panic, str::FromStr, sync::Arc, usize,
 };
 
-use ndarray::{self, Array2, Shape};
+use ndarray::{self, Array2};
 mod setup;
 
 struct ParsedPoint {
@@ -333,6 +333,22 @@ mod projection_test {
     }
 }
 
+fn clear_bins(bins: &mut Vec<Vec<u32>>) {
+    for i in bins {
+        i.fill(0);
+    }
+}
+
+fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
+    pcd.fields.push(PointField {
+        name: new_field.name,
+        offset: pcd.point_step,
+        datatype: new_field.datatype,
+        count: new_field.count,
+    });
+    pcd.point_step += SIZE_OF_DATATYPE[new_field.datatype as usize] as u32 * new_field.count;
+}
+
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
@@ -414,7 +430,26 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh publisher");
 
+    let grid_publ = session
+        .declare_publisher(args.occupancy_topic.clone())
+        .res_async()
+        .await
+        .expect("Failed to declare Zenoh publisher");
+
     let mut zstd_decomp = zstd::bulk::Decompressor::new().unwrap();
+    let mut bins = Vec::new();
+    let mut i = args.angle_bin_limit[0];
+    while i < args.angle_bin_limit[1] {
+        let mut range_bins = Vec::new();
+        let mut j = args.range_bin_limit[0];
+        while j < args.range_bin_limit[1] {
+            range_bins.push(0);
+            j += args.range_bin_width
+        }
+        bins.push(range_bins);
+        i += args.angle_bin_width;
+    }
+
     loop {
         let msgs = radar_sub.drain();
         let s = match msgs.last() {
@@ -444,13 +479,15 @@ async fn main() {
         let mut points = parse_pcd(&pcd);
 
         // Add a field to the end of the point fields
-        pcd.fields.push(PointField {
-            name: CLASS_FIELD.to_string(),
-            offset: pcd.point_step,
-            datatype: point_field::FLOAT32,
-            count: 1,
-        });
-        pcd.point_step += SIZE_OF_DATATYPE[point_field::FLOAT32 as usize] as u32;
+        insert_field(
+            &mut pcd,
+            PointField {
+                name: CLASS_FIELD.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
 
         // get mask data
         let guard = block_on(mask.lock());
@@ -571,5 +608,89 @@ async fn main() {
             Ok(_) => trace!("PointCloud2 Message Sent"),
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
         }
+
+        for p in points {
+            let mut angle = p.angle;
+            let mut range = p.range;
+            if angle < args.angle_bin_limit[0] {
+                angle = args.angle_bin_limit[0]
+            }
+            if angle > args.angle_bin_limit[1] {
+                angle = args.angle_bin_limit[1]
+            }
+            if range < args.range_bin_limit[0] {
+                range = args.range_bin_limit[0];
+            }
+            if range > args.range_bin_limit[1] {
+                range = args.range_bin_limit[1];
+            }
+            let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
+            let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
+            bins[i][j] += 1
+        }
+
+        let mut grid_points = Vec::new();
+
+        for i in 0..bins.len() {
+            for j in 0..bins[i].len() {
+                if bins[i][j] > args.occupancy_threshold {
+                    let mut grid_point = ParsedPoint {
+                        fields: HashMap::new(),
+                        angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
+                        range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
+                    };
+
+                    grid_point.fields.insert(
+                        "x".to_string(),
+                        grid_point.angle.to_radians().cos() * grid_point.range,
+                    );
+                    grid_point.fields.insert(
+                        "y".to_string(),
+                        grid_point.angle.to_radians().sin() * grid_point.range,
+                    );
+                    grid_point.fields.insert("z".to_string(), 0.0);
+
+                    grid_points.push(grid_point);
+                    // don't check more ranges
+                    break;
+                }
+            }
+        }
+        let mut grid_pcd = PointCloud2 {
+            header: pcd.header.clone(),
+            height: 1,
+            width: grid_points.len() as u32,
+            is_bigendian: cfg!(target_endian = "big"),
+            is_dense: true,
+            fields: Vec::new(), // will be set by insert_field
+            point_step: 0,      // will be set by insert_field
+            data: Vec::new(),
+            row_step: 0,
+        };
+        for char in ["x", "y", "z"] {
+            insert_field(
+                &mut grid_pcd,
+                PointField {
+                    name: char.to_string(),
+                    offset: 0, // offset is calculated by the insert field function
+                    datatype: point_field::FLOAT32,
+                    count: 1,
+                },
+            );
+        }
+
+        let data = serialize_pcd(&grid_points, &grid_pcd.fields);
+        grid_pcd.row_step = data.len() as u32;
+        grid_pcd.data = data;
+
+        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap()).encoding(
+            Encoding::WithSuffix(
+                KnownEncoding::AppOctetStream,
+                "sensor_msgs/msg/PointCloud2".into(),
+            ),
+        );
+
+        grid_publ.put(encoded);
+        clear_bins(&mut bins);
     }
 }
