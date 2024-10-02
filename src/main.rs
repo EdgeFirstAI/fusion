@@ -7,14 +7,9 @@ use edgefirst_schemas::{
 };
 use log::{error, info, trace};
 use setup::Args;
-use zenoh::{
-    config::Config,
-    prelude::r#async::*,
-};
+use zenoh::{config::Config, prelude::r#async::*};
 
-use std::{
-    collections::HashMap, panic, str::FromStr, sync::Arc, usize,
-};
+use std::{collections::HashMap, panic, str::FromStr, sync::Arc, usize};
 
 use ndarray::{self, Array2};
 mod setup;
@@ -106,7 +101,7 @@ fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
         p.range = (p.fields["x"].powi(2) + p.fields["y"].powi(2) + p.fields["z"].powi(2)).sqrt()
     }
     if p.fields.contains_key("x") && p.fields.contains_key("y") {
-        p.angle = p.fields["y"].atan2(p.fields["x"]);
+        p.angle = p.fields["y"].atan2(p.fields["x"]).to_degrees();
     }
     p
 }
@@ -179,7 +174,7 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
         p.range = (p.fields["x"].powi(2) + p.fields["y"].powi(2) + p.fields["z"].powi(2)).sqrt()
     }
     if p.fields.contains_key("x") && p.fields.contains_key("y") {
-        p.angle = p.fields["y"].atan2(p.fields["x"]);
+        p.angle = p.fields["y"].atan2(p.fields["x"]).to_degrees();
     }
     p
 }
@@ -339,6 +334,45 @@ fn clear_bins(bins: &mut Vec<Vec<u32>>) {
     }
 }
 
+fn get_val_in_bin(bins: &Vec<Vec<u32>>, i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
+    if i + offset_i < 0 {
+        return 0;
+    }
+    if i + offset_i >= bins.len() as i32 {
+        return 0;
+    }
+
+    if j + offset_j < 0 {
+        return 0;
+    }
+    if j + offset_j > bins[0].len() as i32 {
+        return 0;
+    }
+    return bins[(i + offset_i) as usize][(j + offset_j) as usize];
+}
+
+fn mark_grid(bins: &Vec<Vec<u32>>, i: usize, j: usize, args: &Args) -> ParsedPoint {
+    let mut grid_point = ParsedPoint {
+        fields: HashMap::new(),
+        angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
+        range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
+    };
+
+    grid_point.fields.insert(
+        "x".to_string(),
+        grid_point.angle.to_radians().cos() * grid_point.range,
+    );
+    grid_point.fields.insert(
+        "y".to_string(),
+        grid_point.angle.to_radians().sin() * grid_point.range,
+    );
+    grid_point.fields.insert("z".to_string(), 0.0);
+    grid_point
+        .fields
+        .insert("count".to_string(), bins[i][j] as f64);
+    return grid_point;
+}
+
 fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
     pcd.fields.push(PointField {
         name: new_field.name,
@@ -392,7 +426,6 @@ async fn main() {
                 None => return,
             };
             *guard = Some(new_info);
-            println!("Getting mask");
         })
         .res_async()
         .await
@@ -412,7 +445,6 @@ async fn main() {
             };
             let mut guard = block_on(mask_clone.lock());
             *guard = Some(new_mask);
-            println!("Getting mask");
         })
         .res_async()
         .await
@@ -585,7 +617,7 @@ async fn main() {
                 continue;
             }
             for j in (i + 1)..points.len() {
-                if (points[j].angle - points[i].angle).abs() < args.occ_angle_limit.to_radians()
+                if (points[j].angle - points[i].angle).abs() < args.occ_angle_limit
                     && points[j].range - points[i].range > args.occ_range_limit
                 {
                     points[j].fields.insert("class".to_string(), 0.0);
@@ -594,9 +626,10 @@ async fn main() {
         }
 
         let data = serialize_pcd(&points, &pcd.fields);
+        pcd.row_step = data.len() as u32;
         pcd.data = data;
         pcd.is_bigendian = cfg!(target_endian = "big");
-
+        pcd.header.frame_id = "radar".to_string(); // to fix the data recorded
         let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap()).encoding(
             Encoding::WithSuffix(
                 KnownEncoding::AppOctetStream,
@@ -610,6 +643,9 @@ async fn main() {
         }
 
         for p in points {
+            if p.fields["class"] <= 0.0 {
+                continue;
+            }
             let mut angle = p.angle;
             let mut range = p.range;
             if angle < args.angle_bin_limit[0] {
@@ -626,36 +662,92 @@ async fn main() {
             }
             let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
             let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
-            bins[i][j] += 1
+            bins[i][j] += 1;
         }
-
         let mut grid_points = Vec::new();
 
+        let mut angleFoundOccupied = vec![false; bins.len()];
         for i in 0..bins.len() {
             for j in 0..bins[i].len() {
-                if bins[i][j] > args.occupancy_threshold {
-                    let mut grid_point = ParsedPoint {
-                        fields: HashMap::new(),
-                        angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
-                        range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
-                    };
-
-                    grid_point.fields.insert(
-                        "x".to_string(),
-                        grid_point.angle.to_radians().cos() * grid_point.range,
-                    );
-                    grid_point.fields.insert(
-                        "y".to_string(),
-                        grid_point.angle.to_radians().sin() * grid_point.range,
-                    );
-                    grid_point.fields.insert("z".to_string(), 0.0);
-
-                    grid_points.push(grid_point);
+                let sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
+                let sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
+                let sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
+                if sum0 >= args.occupancy_threshold {
+                    grid_points.push(mark_grid(&bins, i, j, &args));
+                    angleFoundOccupied[i] = true;
+                    // don't check more ranges
+                    break;
+                }
+                if sum0 + sum1 >= args.occupancy_threshold {
+                    grid_points.push(mark_grid(&bins, i, j - 1, &args));
+                    angleFoundOccupied[i] = true;
+                    // don't check more ranges
+                    break;
+                }
+                if sum0 + sum1 + sum2 >= args.occupancy_threshold {
+                    grid_points.push(mark_grid(&bins, i, j - 2, &args));
+                    angleFoundOccupied[i] = true;
                     // don't check more ranges
                     break;
                 }
             }
         }
+
+        for i in 0..bins.len() {
+            for j in 0..bins[i].len() {
+                let mut sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
+                let mut sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
+                let mut sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
+                if 0 <= i - 1 && !angleFoundOccupied[i - 1] {
+                    sum0 += get_val_in_bin(&bins, i as i32, j as i32, -1, 0);
+                    sum1 += get_val_in_bin(&bins, i as i32, j as i32, -1, -1);
+                    sum2 += get_val_in_bin(&bins, i as i32, j as i32, -1, -2);
+                }
+                if i + 1 < bins.len() && !angleFoundOccupied[i + 1] {
+                    sum0 += get_val_in_bin(&bins, i as i32, j as i32, 1, 0);
+                    sum1 += get_val_in_bin(&bins, i as i32, j as i32, 1, -1);
+                    sum2 += get_val_in_bin(&bins, i as i32, j as i32, 1, -2);
+                }
+
+                if sum0 >= args.occupancy_threshold {
+                    grid_points.push(mark_grid(&bins, i, j, &args));
+                    angleFoundOccupied[i] = true;
+                    if 0 <= i - 1 {
+                        angleFoundOccupied[i - 1] = true;
+                    }
+                    if i + 1 < bins.len() {
+                        angleFoundOccupied[i + 1] = true;
+                    }
+                    // don't check more ranges
+                    break;
+                }
+                if sum0 + sum1 >= args.occupancy_threshold {
+                    grid_points.push(mark_grid(&bins, i, j - 1, &args));
+                    angleFoundOccupied[i] = true;
+                    if 0 <= i - 1 {
+                        angleFoundOccupied[i - 1] = true;
+                    }
+                    if i + 1 < bins.len() {
+                        angleFoundOccupied[i + 1] = true;
+                    }
+                    // don't check more ranges
+                    break;
+                }
+                if sum0 + sum1 + sum2 >= args.occupancy_threshold {
+                    grid_points.push(mark_grid(&bins, i, j - 2, &args));
+                    angleFoundOccupied[i] = true;
+                    if 0 <= i - 1 {
+                        angleFoundOccupied[i - 1] = true;
+                    }
+                    if i + 1 < bins.len() {
+                        angleFoundOccupied[i + 1] = true;
+                    }
+                    // don't check more ranges
+                    break;
+                }
+            }
+        }
+
         let mut grid_pcd = PointCloud2 {
             header: pcd.header.clone(),
             height: 1,
@@ -667,7 +759,7 @@ async fn main() {
             data: Vec::new(),
             row_step: 0,
         };
-        for char in ["x", "y", "z"] {
+        for char in ["x", "y", "z", "count"] {
             insert_field(
                 &mut grid_pcd,
                 PointField {
@@ -683,14 +775,16 @@ async fn main() {
         grid_pcd.row_step = data.len() as u32;
         grid_pcd.data = data;
 
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap()).encoding(
-            Encoding::WithSuffix(
+        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&grid_pcd, Infinite).unwrap())
+            .encoding(Encoding::WithSuffix(
                 KnownEncoding::AppOctetStream,
                 "sensor_msgs/msg/PointCloud2".into(),
-            ),
-        );
+            ));
 
-        grid_publ.put(encoded);
+        match grid_publ.put(encoded).res_async().await {
+            Ok(_) => trace!("PointCloud2 Grid Message Sent"),
+            Err(e) => error!("PointCloud2 Message Error: {:?}", e),
+        }
         clear_bins(&mut bins);
     }
 }

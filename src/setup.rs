@@ -53,7 +53,7 @@ pub struct Args {
     pub occupancy_topic: String,
 
     /// occupancy threshold
-    #[arg(long, env, default_value = "2")]
+    #[arg(long, env, default_value = "1")]
     pub occupancy_threshold: u32,
 
     /// range_bin_limit
