@@ -9,7 +9,7 @@ use log::{error, info, trace};
 use setup::Args;
 use zenoh::{config::Config, prelude::r#async::*};
 
-use std::{collections::HashMap, panic, str::FromStr, sync::Arc, usize};
+use std::{collections::HashMap, panic, str::FromStr, sync::Arc, u128, usize};
 
 use ndarray::{self, Array2};
 mod setup;
@@ -328,13 +328,18 @@ mod projection_test {
     }
 }
 
-fn clear_bins(bins: &mut Vec<Vec<u32>>) {
+fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
     for i in bins {
-        i.fill(0);
+        for j in i {
+            j.count = 0;
+            if j.last_masked + (args.bin_delay as u128) < curr {
+                j.first_marked = 0;
+            }
+        }
     }
 }
 
-fn get_val_in_bin(bins: &Vec<Vec<u32>>, i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
+fn get_val_in_bin(bins: &Vec<Vec<Bin>>, i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
     if i + offset_i < 0 {
         return 0;
     }
@@ -348,10 +353,17 @@ fn get_val_in_bin(bins: &Vec<Vec<u32>>, i: i32, j: i32, offset_i: i32, offset_j:
     if j + offset_j > bins[0].len() as i32 {
         return 0;
     }
-    return bins[(i + offset_i) as usize][(j + offset_j) as usize];
+    return bins[(i + offset_i) as usize][(j + offset_j) as usize].count;
 }
 
-fn mark_grid(bins: &Vec<Vec<u32>>, i: usize, j: usize, args: &Args) -> ParsedPoint {
+fn mark_grid(bin: &mut Bin, curr: u128) {
+    bin.last_masked = curr;
+    if bin.first_marked == u128::MAX {
+        bin.first_marked = curr;
+    }
+}
+
+fn draw_point(bins: &Vec<Vec<Bin>>, i: usize, j: usize, args: &Args) -> ParsedPoint {
     let mut grid_point = ParsedPoint {
         fields: HashMap::new(),
         angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
@@ -369,7 +381,7 @@ fn mark_grid(bins: &Vec<Vec<u32>>, i: usize, j: usize, args: &Args) -> ParsedPoi
     grid_point.fields.insert("z".to_string(), 0.0);
     grid_point
         .fields
-        .insert("count".to_string(), bins[i][j] as f64);
+        .insert("count".to_string(), bins[i][j].count as f64);
     return grid_point;
 }
 
@@ -383,6 +395,11 @@ fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
     pcd.point_step += SIZE_OF_DATATYPE[new_field.datatype as usize] as u32 * new_field.count;
 }
 
+struct Bin {
+    count: u32,
+    last_masked: u128,
+    first_marked: u128,
+}
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
@@ -470,12 +487,17 @@ async fn main() {
 
     let mut zstd_decomp = zstd::bulk::Decompressor::new().unwrap();
     let mut bins = Vec::new();
+    let mut frame_index = 0;
     let mut i = args.angle_bin_limit[0];
     while i < args.angle_bin_limit[1] {
         let mut range_bins = Vec::new();
         let mut j = args.range_bin_limit[0];
         while j < args.range_bin_limit[1] {
-            range_bins.push(0);
+            range_bins.push(Bin {
+                count: 0,
+                last_masked: 0,
+                first_marked: u128::MAX,
+            });
             j += args.range_bin_width
         }
         bins.push(range_bins);
@@ -662,31 +684,31 @@ async fn main() {
             }
             let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
             let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
-            bins[i][j] += 1;
+            bins[i][j].count += 1;
         }
         let mut grid_points = Vec::new();
 
-        let mut angleFoundOccupied = vec![false; bins.len()];
+        let mut angle_found_occupied = vec![false; bins.len()];
         for i in 0..bins.len() {
             for j in 0..bins[i].len() {
                 let sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
                 let sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
                 let sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
                 if sum0 >= args.occupancy_threshold {
-                    grid_points.push(mark_grid(&bins, i, j, &args));
-                    angleFoundOccupied[i] = true;
+                    mark_grid(&mut bins[i][j], frame_index);
+                    angle_found_occupied[i] = true;
                     // don't check more ranges
                     break;
                 }
                 if sum0 + sum1 >= args.occupancy_threshold {
-                    grid_points.push(mark_grid(&bins, i, j - 1, &args));
-                    angleFoundOccupied[i] = true;
+                    mark_grid(&mut bins[i][j - 1], frame_index);
+                    angle_found_occupied[i] = true;
                     // don't check more ranges
                     break;
                 }
                 if sum0 + sum1 + sum2 >= args.occupancy_threshold {
-                    grid_points.push(mark_grid(&bins, i, j - 2, &args));
-                    angleFoundOccupied[i] = true;
+                    mark_grid(&mut bins[i][j - 2], frame_index);
+                    angle_found_occupied[i] = true;
                     // don't check more ranges
                     break;
                 }
@@ -698,52 +720,71 @@ async fn main() {
                 let mut sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
                 let mut sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
                 let mut sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
-                if 0 <= i - 1 && !angleFoundOccupied[i - 1] {
+                if 0 < i && !angle_found_occupied[i - 1] {
                     sum0 += get_val_in_bin(&bins, i as i32, j as i32, -1, 0);
                     sum1 += get_val_in_bin(&bins, i as i32, j as i32, -1, -1);
                     sum2 += get_val_in_bin(&bins, i as i32, j as i32, -1, -2);
                 }
-                if i + 1 < bins.len() && !angleFoundOccupied[i + 1] {
+                if i + 1 < bins.len() && !angle_found_occupied[i + 1] {
                     sum0 += get_val_in_bin(&bins, i as i32, j as i32, 1, 0);
                     sum1 += get_val_in_bin(&bins, i as i32, j as i32, 1, -1);
                     sum2 += get_val_in_bin(&bins, i as i32, j as i32, 1, -2);
                 }
 
                 if sum0 >= args.occupancy_threshold {
-                    grid_points.push(mark_grid(&bins, i, j, &args));
-                    angleFoundOccupied[i] = true;
-                    if 0 <= i - 1 {
-                        angleFoundOccupied[i - 1] = true;
+                    mark_grid(&mut bins[i][j], frame_index);
+                    angle_found_occupied[i] = true;
+                    if 0 < i {
+                        angle_found_occupied[i - 1] = true;
                     }
                     if i + 1 < bins.len() {
-                        angleFoundOccupied[i + 1] = true;
+                        angle_found_occupied[i + 1] = true;
                     }
                     // don't check more ranges
                     break;
                 }
                 if sum0 + sum1 >= args.occupancy_threshold {
-                    grid_points.push(mark_grid(&bins, i, j - 1, &args));
-                    angleFoundOccupied[i] = true;
-                    if 0 <= i - 1 {
-                        angleFoundOccupied[i - 1] = true;
+                    mark_grid(&mut bins[i][j - 1], frame_index);
+                    angle_found_occupied[i] = true;
+                    if 0 < i {
+                        angle_found_occupied[i - 1] = true;
                     }
                     if i + 1 < bins.len() {
-                        angleFoundOccupied[i + 1] = true;
+                        angle_found_occupied[i + 1] = true;
                     }
                     // don't check more ranges
                     break;
                 }
                 if sum0 + sum1 + sum2 >= args.occupancy_threshold {
-                    grid_points.push(mark_grid(&bins, i, j - 2, &args));
-                    angleFoundOccupied[i] = true;
-                    if 0 <= i - 1 {
-                        angleFoundOccupied[i - 1] = true;
+                    mark_grid(&mut bins[i][j - 2], frame_index);
+                    angle_found_occupied[i] = true;
+                    if 0 < i {
+                        angle_found_occupied[i - 1] = true;
                     }
                     if i + 1 < bins.len() {
-                        angleFoundOccupied[i + 1] = true;
+                        angle_found_occupied[i + 1] = true;
                     }
                     // don't check more ranges
                     break;
+                }
+            }
+        }
+        let mut angle_found_marked = vec![false; bins.len()];
+        for thresh in 0..=args.bin_delay {
+            for i in 0..bins.len() {
+                if angle_found_marked[i] {
+                    continue;
+                }
+                for j in 0..bins[i].len() {
+                    if bins[i][j].first_marked != u128::MAX
+                        && frame_index - bins[i][j].first_marked >= args.bin_delay
+                        && frame_index - bins[i][j].last_masked <= thresh
+                    {
+                        grid_points.push(draw_point(&bins, i, j, &args));
+                        angle_found_marked[i] = true;
+                        // don't check more ranges
+                        break;
+                    }
                 }
             }
         }
@@ -785,6 +826,7 @@ async fn main() {
             Ok(_) => trace!("PointCloud2 Grid Message Sent"),
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
         }
-        clear_bins(&mut bins);
+        clear_bins(&mut bins, frame_index, &args);
+        frame_index += 1;
     }
 }

@@ -77,4 +77,8 @@ pub struct Args {
     /// angle_bin_width in degrees
     #[arg(long, env, default_value = "10")]
     pub angle_bin_width: f64,
+
+    /// bin delay in radar message count
+    #[arg(long, env, default_value = "3")]
+    pub bin_delay: u128,
 }
