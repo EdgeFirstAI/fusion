@@ -593,7 +593,7 @@ async fn main() {
             points[i].fields.insert("class".to_string(), 0.0);
             let mask_coord = (
                 ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
-                (point_proj[i].1 * mask_height as f64).round() as i64,
+                ((1.0 - point_proj[i].1) * mask_height as f64).round() as i64,
             );
 
             // first do the center of the point, then 8 points around circumference
