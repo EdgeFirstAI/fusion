@@ -480,7 +480,7 @@ async fn main() {
         .expect("Failed to declare Zenoh publisher");
 
     let grid_publ = session
-        .declare_publisher(args.occupancy_topic.clone())
+        .declare_publisher(args.occ_topic.clone())
         .res_async()
         .await
         .expect("Failed to declare Zenoh publisher");
@@ -694,19 +694,19 @@ async fn main() {
                 let sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
                 let sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
                 let sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
-                if sum0 >= args.occupancy_threshold {
+                if sum0 >= args.threshold {
                     mark_grid(&mut bins[i][j], frame_index);
                     angle_found_occupied[i] = true;
                     // don't check more ranges
                     break;
                 }
-                if sum0 + sum1 >= args.occupancy_threshold {
+                if sum0 + sum1 >= args.threshold {
                     mark_grid(&mut bins[i][j - 1], frame_index);
                     angle_found_occupied[i] = true;
                     // don't check more ranges
                     break;
                 }
-                if sum0 + sum1 + sum2 >= args.occupancy_threshold {
+                if sum0 + sum1 + sum2 >= args.threshold {
                     mark_grid(&mut bins[i][j - 2], frame_index);
                     angle_found_occupied[i] = true;
                     // don't check more ranges
@@ -731,7 +731,7 @@ async fn main() {
                     sum2 += get_val_in_bin(&bins, i as i32, j as i32, 1, -2);
                 }
 
-                if sum0 >= args.occupancy_threshold {
+                if sum0 >= args.threshold {
                     mark_grid(&mut bins[i][j], frame_index);
                     angle_found_occupied[i] = true;
                     if 0 < i {
@@ -743,7 +743,7 @@ async fn main() {
                     // don't check more ranges
                     break;
                 }
-                if sum0 + sum1 >= args.occupancy_threshold {
+                if sum0 + sum1 >= args.threshold {
                     mark_grid(&mut bins[i][j - 1], frame_index);
                     angle_found_occupied[i] = true;
                     if 0 < i {
@@ -755,7 +755,7 @@ async fn main() {
                     // don't check more ranges
                     break;
                 }
-                if sum0 + sum1 + sum2 >= args.occupancy_threshold {
+                if sum0 + sum1 + sum2 >= args.threshold {
                     mark_grid(&mut bins[i][j - 2], frame_index);
                     angle_found_occupied[i] = true;
                     if 0 < i {
