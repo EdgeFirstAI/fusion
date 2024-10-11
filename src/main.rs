@@ -8,9 +8,8 @@ use edgefirst_schemas::{
 use env_logger;
 use log::{error, info, trace};
 use setup::Args;
-use zenoh::{config::Config, prelude::r#async::*};
-
 use std::{collections::HashMap, panic, str::FromStr, sync::Arc, u128, usize};
+use zenoh::{config::Config, prelude::r#async::*};
 
 use ndarray::{self, Array2};
 mod setup;
@@ -650,6 +649,35 @@ async fn main() {
             }
         }
 
+        // points with the same cluster_id get the same class
+        let mut cluster_ids = HashMap::new();
+        for i in 0..points.len() {
+            if points[i].fields.contains_key("cluster_id") {
+                let id = points[i].fields["cluster_id"].round() as i32;
+                if !cluster_ids.contains_key(&id) {
+                    cluster_ids.insert(id, Vec::new());
+                }
+                cluster_ids.get_mut(&id).unwrap().push(i);
+            }
+        }
+        for id in cluster_ids {
+            let mut classes = Vec::new();
+            for index in &id.1 {
+                let class = points[*index].fields["class"].round() as i32;
+                if class <= 0 {
+                    continue;
+                }
+                classes.push(class)
+            }
+
+            let class = mode_slice(classes.as_slice()).unwrap_or(0);
+            for index in &id.1 {
+                points[*index]
+                    .fields
+                    .insert("class".to_string(), class as f64);
+            }
+        }
+
         let data = serialize_pcd(&points, &pcd.fields);
         pcd.row_step = data.len() as u32;
         pcd.data = data;
@@ -832,4 +860,17 @@ async fn main() {
         clear_bins(&mut bins, frame_index, &args);
         frame_index += 1;
     }
+}
+
+/* Returns the mode of the slice. Returns None if the slice is empty.
+ *
+ */
+fn mode_slice(numbers: &[i32]) -> Option<i32> {
+    let mut counts = HashMap::new();
+
+    numbers.iter().copied().max_by_key(|&n| {
+        let count = counts.entry(n).or_insert(0);
+        *count += 1;
+        *count
+    })
 }
