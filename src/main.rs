@@ -654,6 +654,10 @@ async fn main() {
         for i in 0..points.len() {
             if points[i].fields.contains_key("cluster_id") {
                 let id = points[i].fields["cluster_id"].round() as i32;
+                if id == 0 {
+                    // we ignore noise points
+                    continue;
+                }
                 if !cluster_ids.contains_key(&id) {
                     cluster_ids.insert(id, Vec::new());
                 }
