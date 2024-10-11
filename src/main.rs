@@ -489,10 +489,10 @@ async fn main() {
     let mut bins = Vec::new();
     let mut frame_index = 0;
     let mut i = args.angle_bin_limit[0];
-    while i < args.angle_bin_limit[1] {
+    while i <= args.angle_bin_limit[1] {
         let mut range_bins = Vec::new();
         let mut j = args.range_bin_limit[0];
-        while j < args.range_bin_limit[1] {
+        while j <= args.range_bin_limit[1] {
             range_bins.push(Bin {
                 count: 0,
                 last_masked: 0,
@@ -674,13 +674,13 @@ async fn main() {
                 angle = args.angle_bin_limit[0]
             }
             if angle > args.angle_bin_limit[1] {
-                angle = args.angle_bin_limit[1]
+                angle = args.angle_bin_limit[1] - 0.001;
             }
             if range < args.range_bin_limit[0] {
                 range = args.range_bin_limit[0];
             }
             if range > args.range_bin_limit[1] {
-                range = args.range_bin_limit[1];
+                range = args.range_bin_limit[1] - 0.001;
             }
             let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
             let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
