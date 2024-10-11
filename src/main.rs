@@ -5,6 +5,7 @@ use edgefirst_schemas::{
     edgefirst_msgs::Mask,
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
 };
+use env_logger;
 use log::{error, info, trace};
 use setup::Args;
 use zenoh::{config::Config, prelude::r#async::*};
@@ -403,6 +404,8 @@ struct Bin {
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
+    env_logger::init();
+
     let args = Args::parse();
 
     let mut config = Config::default();
