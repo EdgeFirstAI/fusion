@@ -29,7 +29,7 @@ pub struct Args {
     pub radar_input_topic: String,
 
     /// mask topic
-    #[arg(long, env, default_value = "rt/detect/mask")]
+    #[arg(long, env, default_value = "rt/model/mask")]
     pub mask_topic: String,
 
     /// camera info topic
