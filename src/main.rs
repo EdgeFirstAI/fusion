@@ -5,10 +5,18 @@ use edgefirst_schemas::{
     edgefirst_msgs::Mask,
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
 };
-use env_logger;
 use log::{error, info, trace};
 use setup::Args;
-use std::{collections::HashMap, panic, str::FromStr, sync::Arc, u128, usize};
+use std::{
+    collections::{
+        hash_map::{Entry, VacantEntry},
+        HashMap,
+    },
+    panic,
+    str::FromStr,
+    sync::Arc,
+    u128, usize,
+};
 use zenoh::{config::Config, prelude::r#async::*};
 
 use ndarray::{self, Array2};
@@ -651,15 +659,15 @@ async fn main() {
 
         // points with the same cluster_id get the same class
         let mut cluster_ids = HashMap::new();
-        for i in 0..points.len() {
-            if points[i].fields.contains_key("cluster_id") {
-                let id = points[i].fields["cluster_id"].round() as i32;
+        for point in points.iter_mut() {
+            if point.fields.contains_key("cluster_id") {
+                let id = point.fields["cluster_id"].round() as i32;
                 if id == 0 {
                     // we ignore noise points
                     continue;
                 }
-                if !cluster_ids.contains_key(&id) {
-                    cluster_ids.insert(id, Vec::new());
+                if let Entry::Vacant(v) = cluster_ids.entry(&id) {
+                    v.insert(Vec::new());
                 }
                 cluster_ids.get_mut(&id).unwrap().push(i);
             }
