@@ -659,14 +659,14 @@ async fn main() {
 
         // points with the same cluster_id get the same class
         let mut cluster_ids = HashMap::new();
-        for point in points.iter_mut() {
+        for (i, point) in points.iter_mut().enumerate() {
             if point.fields.contains_key("cluster_id") {
                 let id = point.fields["cluster_id"].round() as i32;
                 if id == 0 {
                     // we ignore noise points
                     continue;
                 }
-                if let Entry::Vacant(v) = cluster_ids.entry(&id) {
+                if let Entry::Vacant(v) = cluster_ids.entry(id) {
                     v.insert(Vec::new());
                 }
                 cluster_ids.get_mut(&id).unwrap().push(i);
@@ -875,7 +875,7 @@ async fn main() {
 }
 
 /* Returns the mode of the slice. Returns None if the slice is empty.
- *
+ * https://stackoverflow.com/a/50000027
  */
 fn mode_slice(numbers: &[i32]) -> Option<i32> {
     let mut counts = HashMap::new();
