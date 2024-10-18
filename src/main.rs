@@ -8,14 +8,10 @@ use edgefirst_schemas::{
 use log::{error, info, trace};
 use setup::Args;
 use std::{
-    collections::{
-        hash_map::{Entry, VacantEntry},
-        HashMap,
-    },
+    collections::{hash_map::Entry, HashMap},
     panic,
     str::FromStr,
     sync::Arc,
-    u128, usize,
 };
 use zenoh::{config::Config, prelude::r#async::*};
 
