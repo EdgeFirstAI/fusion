@@ -10,6 +10,7 @@ use log::{error, info, trace};
 use setup::Args;
 use std::{
     collections::{hash_map::Entry, HashMap},
+    hash::Hash,
     panic,
     str::FromStr,
     sync::Arc,
@@ -336,7 +337,7 @@ mod projection_test {
 fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
     for i in bins {
         for j in i {
-            j.count = 0;
+            j.classes.clear();
             if j.last_masked + (args.bin_delay as u128) < curr {
                 j.first_marked = 0;
             }
@@ -358,7 +359,9 @@ fn get_val_in_bin(bins: &Vec<Vec<Bin>>, i: i32, j: i32, offset_i: i32, offset_j:
     if j + offset_j > bins[0].len() as i32 {
         return 0;
     }
-    return bins[(i + offset_i) as usize][(j + offset_j) as usize].count;
+    return bins[(i + offset_i) as usize][(j + offset_j) as usize]
+        .classes
+        .len() as u32;
 }
 
 fn mark_grid(bin: &mut Bin, curr: u128) {
@@ -374,6 +377,11 @@ fn draw_point(bins: &Vec<Vec<Bin>>, i: usize, j: usize, args: &Args) -> ParsedPo
         angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
         range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
     };
+    let class = if let Some(mode) = mode_slice(bins[i][j].classes.as_slice()) {
+        mode.clone()
+    } else {
+        0
+    };
 
     grid_point.fields.insert(
         "x".to_string(),
@@ -384,9 +392,10 @@ fn draw_point(bins: &Vec<Vec<Bin>>, i: usize, j: usize, args: &Args) -> ParsedPo
         grid_point.angle.to_radians().sin() * grid_point.range,
     );
     grid_point.fields.insert("z".to_string(), 0.0);
+    grid_point.fields.insert("class".to_string(), class as f64);
     grid_point
         .fields
-        .insert("count".to_string(), bins[i][j].count as f64);
+        .insert("count".to_string(), bins[i][j].classes.len() as f64);
     return grid_point;
 }
 
@@ -401,7 +410,7 @@ fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
 }
 
 struct Bin {
-    count: u32,
+    classes: Vec<usize>,
     last_masked: u128,
     first_marked: u128,
 }
@@ -501,7 +510,7 @@ async fn main() {
         let mut j = args.range_bin_limit[0];
         while j <= args.range_bin_limit[1] {
             range_bins.push(Bin {
-                count: 0,
+                classes: Vec::new(),
                 last_masked: 0,
                 first_marked: u128::MAX,
             });
@@ -681,7 +690,12 @@ async fn main() {
                 classes.push(class)
             }
 
-            let class = mode_slice(classes.as_slice()).unwrap_or(0);
+            let class = if let Some(mode) = mode_slice(classes.as_slice()) {
+                mode.clone()
+            } else {
+                0
+            };
+
             for index in id.1 {
                 points[*index]
                     .fields
@@ -734,7 +748,8 @@ fn get_occupied_cluster(
         if id.1.len() == 0 {
             continue;
         }
-        if points[id.1[0]].fields["class"] == 0.0 {
+        let class = points[id.1[0]].fields["class"];
+        if class == 0.0 {
             continue;
         }
         let mut pos = id.1.iter().fold([0.0, 0.0, 0.0], |mut xyz, ind| {
@@ -751,9 +766,11 @@ fn get_occupied_cluster(
             angle: 0.0,
             range: DEFAULT_PCD_RANGE,
         };
+
         p.fields.insert("x".to_string(), pos[0]);
         p.fields.insert("y".to_string(), pos[1]);
         p.fields.insert("z".to_string(), pos[2]);
+        p.fields.insert("class".to_string(), class);
         p.fields.insert("count".to_string(), id.1.len() as f64);
         centroid_points.push(p);
     }
@@ -769,7 +786,7 @@ fn get_occupied_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in ["x", "y", "z", "count"] {
+    for char in ["x", "y", "z", "class", "count"] {
         insert_field(
             &mut centroid_pcd,
             PointField {
@@ -821,7 +838,8 @@ fn get_occupied_no_cluster(
         }
         let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
         let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
-        bins[i][j].count += 1;
+        let class = p.fields["class"] as usize;
+        bins[i][j].classes.push(class);
     }
     let mut grid_points = Vec::new();
 
@@ -964,10 +982,10 @@ fn get_occupied_no_cluster(
 /* Returns the mode of the slice. Returns None if the slice is empty.
  * https://stackoverflow.com/a/50000027
  */
-fn mode_slice(numbers: &[i32]) -> Option<i32> {
+fn mode_slice<T: Ord + Hash>(numbers: &[T]) -> Option<&T> {
     let mut counts = HashMap::new();
 
-    numbers.iter().copied().max_by_key(|&n| {
+    numbers.iter().max_by_key(|&n| {
         let count = counts.entry(n).or_insert(0);
         *count += 1;
         *count
