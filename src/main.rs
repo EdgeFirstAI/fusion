@@ -753,9 +753,6 @@ fn get_occupied_cluster(
             continue;
         }
         let class = points[id.1[0]].fields["class"];
-        if class == 0.0 {
-            continue;
-        }
         let mut xyzv = id.1.iter().fold([0.0, 0.0, 0.0, 0.0], |mut xyzv, ind| {
             xyzv[0] += points[*ind].fields["x"];
             xyzv[1] += points[*ind].fields["y"];
