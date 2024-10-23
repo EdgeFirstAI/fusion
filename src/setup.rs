@@ -1,14 +1,5 @@
 use clap::Parser;
 
-#[derive(clap::ValueEnum, Clone, Debug, PartialEq, Copy)]
-pub enum LabelSetting {
-    Index,
-    Label,
-    Score,
-    LabelScore,
-    Track,
-}
-
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -44,27 +35,31 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/fusion/occupancy")]
     pub occ_topic: String,
 
-    /// occupancy threshold
+    /// occupancy threshold. Only used if input PCD does not have cluster_id
+    /// field
     #[arg(long, env, default_value = "1")]
     pub threshold: u32,
 
-    /// occlusion angle limit in degrees
+    /// occlusion angle limit in degrees. Only used if input PCD does not have
+    /// cluster_id field
     #[arg(long, env, default_value = "20")]
     pub occ_angle_limit: f64,
 
-    /// occlusion range limit
+    /// occlusion range limit. Only used if input PCD does not have cluster_id
+    /// field
     #[arg(long, env, default_value = "1.0")]
     pub occ_range_limit: f64,
 
-    /// range_bin_limit
+    /// range_bin_limit. Only used if input PCD does not have cluster_id field
     #[arg(long, env, num_args = 2, value_delimiter = ' ', default_value = "0 20")]
     pub range_bin_limit: Vec<f64>,
 
-    /// range_bin_width
+    /// range_bin_width. Only used if input PCD does not have cluster_id field
     #[arg(long, env, default_value = "0.5")]
     pub range_bin_width: f64,
 
-    /// angle_bin_limit, 0 degrees is forwards
+    /// angle_bin_limit, 0 degrees is forwards. Only used if input PCD does not
+    /// have cluster_id field
     #[arg(
         long,
         env,
@@ -74,13 +69,15 @@ pub struct Args {
     )]
     pub angle_bin_limit: Vec<f64>,
 
-    /// angle_bin_width in degrees
+    /// angle_bin_width in degrees. Only used if input PCD does not have
+    /// cluster_id field
     #[arg(long, env, default_value = "10")]
     pub angle_bin_width: f64,
 
     /// bin delay in radar message count (grid needs to be valid for `BIN_DELAY`
     /// frames before it is drawn. grid stops being drawn after being invalid
-    /// for `BIN_DELAY` frames)
+    /// for `BIN_DELAY` frames). Only used if input PCD does not have
+    /// cluster_id field
     #[arg(long, env, default_value = "3")]
     pub bin_delay: u128,
 }

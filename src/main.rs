@@ -4,12 +4,18 @@ use clap::Parser;
 use edgefirst_schemas::{
     edgefirst_msgs::Mask,
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
+    std_msgs::Header,
 };
 use log::{error, info, trace};
 use setup::Args;
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    hash::Hash,
+    panic,
+    str::FromStr,
+    sync::Arc,
+};
 use zenoh::{config::Config, prelude::r#async::*};
-
-use std::{collections::HashMap, panic, str::FromStr, sync::Arc, u128, usize};
 
 use ndarray::{self, Array2};
 mod setup;
@@ -88,7 +94,7 @@ fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
                     .try_into()
                     .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                f64::from_be_bytes(bytes) as f64
+                f64::from_be_bytes(bytes)
             }
             d => {
                 error!("Unknown datatype in PointField: {}", d);
@@ -161,7 +167,7 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
                     .try_into()
                     .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                f64::from_le_bytes(bytes) as f64
+                f64::from_le_bytes(bytes)
             }
             d => {
                 error!("Unknown datatype in PointField: {}", d);
@@ -247,7 +253,7 @@ fn serialize_pcd(points: &Vec<ParsedPoint>, fields: &Vec<PointField>) -> Vec<u8>
                     buf[start..end].clone_from_slice(&d);
                 }
                 point_field::FLOAT64 => {
-                    let d = (*val as f64).to_ne_bytes();
+                    let d = (*val).to_ne_bytes();
                     buf[start..end].clone_from_slice(&d);
                 }
                 d => {
@@ -261,11 +267,7 @@ fn serialize_pcd(points: &Vec<ParsedPoint>, fields: &Vec<PointField>) -> Vec<u8>
     buf
 }
 
-fn project_point(
-    points: &Vec<ParsedPoint>,
-    cam_mtx: &[f64; 9],
-    offset: &[f64; 3],
-) -> Vec<(f64, f64)> {
+fn project_point(points: &[ParsedPoint], cam_mtx: &[f64; 9], offset: &[f64; 3]) -> Vec<(f64, f64)> {
     let mtx = Array2::from_shape_fn([3, 3], |(i, j)| cam_mtx[i * 3 + j]);
     // println!("mtx={:?}", mtx);
     // convert from normal ROS conventions to optical conventions
@@ -331,15 +333,15 @@ mod projection_test {
 fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
     for i in bins {
         for j in i {
-            j.count = 0;
-            if j.last_masked + (args.bin_delay as u128) < curr {
+            j.classes.clear();
+            if j.last_masked + args.bin_delay < curr {
                 j.first_marked = 0;
             }
         }
     }
 }
 
-fn get_val_in_bin(bins: &Vec<Vec<Bin>>, i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
+fn get_val_in_bin(bins: &[Vec<Bin>], i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
     if i + offset_i < 0 {
         return 0;
     }
@@ -353,7 +355,9 @@ fn get_val_in_bin(bins: &Vec<Vec<Bin>>, i: i32, j: i32, offset_i: i32, offset_j:
     if j + offset_j > bins[0].len() as i32 {
         return 0;
     }
-    return bins[(i + offset_i) as usize][(j + offset_j) as usize].count;
+    bins[(i + offset_i) as usize][(j + offset_j) as usize]
+        .classes
+        .len() as u32
 }
 
 fn mark_grid(bin: &mut Bin, curr: u128) {
@@ -363,11 +367,16 @@ fn mark_grid(bin: &mut Bin, curr: u128) {
     }
 }
 
-fn draw_point(bins: &Vec<Vec<Bin>>, i: usize, j: usize, args: &Args) -> ParsedPoint {
+fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint {
     let mut grid_point = ParsedPoint {
         fields: HashMap::new(),
         angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
         range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
+    };
+    let class = if let Some(mode) = mode_slice(bins[i][j].classes.as_slice()) {
+        *mode
+    } else {
+        0
     };
 
     grid_point.fields.insert(
@@ -379,10 +388,17 @@ fn draw_point(bins: &Vec<Vec<Bin>>, i: usize, j: usize, args: &Args) -> ParsedPo
         grid_point.angle.to_radians().sin() * grid_point.range,
     );
     grid_point.fields.insert("z".to_string(), 0.0);
+    grid_point.fields.insert("class".to_string(), class as f64);
     grid_point
         .fields
-        .insert("count".to_string(), bins[i][j].count as f64);
-    return grid_point;
+        .insert("count".to_string(), bins[i][j].classes.len() as f64);
+    let speed = if !bins[i][j].speeds.is_empty() {
+        bins[i][j].speeds.iter().fold(0.0, |a, b| a + b) / bins[i][j].speeds.len() as f64
+    } else {
+        0.0
+    };
+    grid_point.fields.insert("speed".to_string(), speed);
+    grid_point
 }
 
 fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
@@ -396,13 +412,16 @@ fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
 }
 
 struct Bin {
-    count: u32,
+    classes: Vec<usize>,
+    speeds: Vec<f64>,
     last_masked: u128,
     first_marked: u128,
 }
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
+    env_logger::init();
+
     let args = Args::parse();
 
     let mut config = Config::default();
@@ -489,12 +508,13 @@ async fn main() {
     let mut bins = Vec::new();
     let mut frame_index = 0;
     let mut i = args.angle_bin_limit[0];
-    while i < args.angle_bin_limit[1] {
+    while i <= args.angle_bin_limit[1] {
         let mut range_bins = Vec::new();
         let mut j = args.range_bin_limit[0];
-        while j < args.range_bin_limit[1] {
+        while j <= args.range_bin_limit[1] {
             range_bins.push(Bin {
-                count: 0,
+                classes: Vec::new(),
+                speeds: Vec::new(),
                 last_masked: 0,
                 first_marked: u128::MAX,
             });
@@ -617,9 +637,9 @@ async fn main() {
                 let scores = &mask[start..end];
                 let mut max = 0;
                 let mut argmax = 0;
-                for j in 0..scores.len() {
-                    if scores[j] > max {
-                        max = scores[j];
+                for (j, val) in scores.iter().enumerate() {
+                    if *val > max {
+                        max = *val;
                         argmax = j;
                     }
                 }
@@ -647,6 +667,46 @@ async fn main() {
             }
         }
 
+        let mut has_cluster_id = false;
+        // points with the same cluster_id get the same class
+        let mut cluster_ids = HashMap::new();
+        for (i, point) in points.iter_mut().enumerate() {
+            if point.fields.contains_key("cluster_id") {
+                has_cluster_id = true;
+                let id = point.fields["cluster_id"].round() as i32;
+                if id == 0 {
+                    // we ignore noise points
+                    continue;
+                }
+                if let Entry::Vacant(v) = cluster_ids.entry(id) {
+                    v.insert(Vec::new());
+                }
+                cluster_ids.get_mut(&id).unwrap().push(i);
+            }
+        }
+        for id in cluster_ids.iter() {
+            let mut classes = Vec::new();
+            for index in id.1 {
+                let class = points[*index].fields["class"].round() as i32;
+                if class <= 0 {
+                    continue;
+                }
+                classes.push(class)
+            }
+
+            let class = if let Some(mode) = mode_slice(classes.as_slice()) {
+                *mode
+            } else {
+                0
+            };
+
+            for index in id.1 {
+                points[*index]
+                    .fields
+                    .insert("class".to_string(), class as f64);
+            }
+        }
+
         let data = serialize_pcd(&points, &pcd.fields);
         pcd.row_step = data.len() as u32;
         pcd.data = data;
@@ -664,163 +724,11 @@ async fn main() {
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
         }
 
-        for p in points {
-            if p.fields["class"] <= 0.0 {
-                continue;
-            }
-            let mut angle = p.angle;
-            let mut range = p.range;
-            if angle < args.angle_bin_limit[0] {
-                angle = args.angle_bin_limit[0]
-            }
-            if angle > args.angle_bin_limit[1] {
-                angle = args.angle_bin_limit[1]
-            }
-            if range < args.range_bin_limit[0] {
-                range = args.range_bin_limit[0];
-            }
-            if range > args.range_bin_limit[1] {
-                range = args.range_bin_limit[1];
-            }
-            let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
-            let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
-            bins[i][j].count += 1;
-        }
-        let mut grid_points = Vec::new();
-
-        let mut angle_found_occupied = vec![false; bins.len()];
-        for i in 0..bins.len() {
-            for j in 0..bins[i].len() {
-                let sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
-                let sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
-                let sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
-                if sum0 >= args.threshold {
-                    mark_grid(&mut bins[i][j], frame_index);
-                    angle_found_occupied[i] = true;
-                    // don't check more ranges
-                    break;
-                }
-                if sum0 + sum1 >= args.threshold {
-                    mark_grid(&mut bins[i][j - 1], frame_index);
-                    angle_found_occupied[i] = true;
-                    // don't check more ranges
-                    break;
-                }
-                if sum0 + sum1 + sum2 >= args.threshold {
-                    mark_grid(&mut bins[i][j - 2], frame_index);
-                    angle_found_occupied[i] = true;
-                    // don't check more ranges
-                    break;
-                }
-            }
-        }
-
-        for i in 0..bins.len() {
-            for j in 0..bins[i].len() {
-                let mut sum0 = get_val_in_bin(&bins, i as i32, j as i32, 0, 0);
-                let mut sum1 = get_val_in_bin(&bins, i as i32, j as i32, 0, -1);
-                let mut sum2 = get_val_in_bin(&bins, i as i32, j as i32, 0, -2);
-                if 0 < i && !angle_found_occupied[i - 1] {
-                    sum0 += get_val_in_bin(&bins, i as i32, j as i32, -1, 0);
-                    sum1 += get_val_in_bin(&bins, i as i32, j as i32, -1, -1);
-                    sum2 += get_val_in_bin(&bins, i as i32, j as i32, -1, -2);
-                }
-                if i + 1 < bins.len() && !angle_found_occupied[i + 1] {
-                    sum0 += get_val_in_bin(&bins, i as i32, j as i32, 1, 0);
-                    sum1 += get_val_in_bin(&bins, i as i32, j as i32, 1, -1);
-                    sum2 += get_val_in_bin(&bins, i as i32, j as i32, 1, -2);
-                }
-
-                if sum0 >= args.threshold {
-                    mark_grid(&mut bins[i][j], frame_index);
-                    angle_found_occupied[i] = true;
-                    if 0 < i {
-                        angle_found_occupied[i - 1] = true;
-                    }
-                    if i + 1 < bins.len() {
-                        angle_found_occupied[i + 1] = true;
-                    }
-                    // don't check more ranges
-                    break;
-                }
-                if sum0 + sum1 >= args.threshold {
-                    mark_grid(&mut bins[i][j - 1], frame_index);
-                    angle_found_occupied[i] = true;
-                    if 0 < i {
-                        angle_found_occupied[i - 1] = true;
-                    }
-                    if i + 1 < bins.len() {
-                        angle_found_occupied[i + 1] = true;
-                    }
-                    // don't check more ranges
-                    break;
-                }
-                if sum0 + sum1 + sum2 >= args.threshold {
-                    mark_grid(&mut bins[i][j - 2], frame_index);
-                    angle_found_occupied[i] = true;
-                    if 0 < i {
-                        angle_found_occupied[i - 1] = true;
-                    }
-                    if i + 1 < bins.len() {
-                        angle_found_occupied[i + 1] = true;
-                    }
-                    // don't check more ranges
-                    break;
-                }
-            }
-        }
-        let mut angle_found_marked = vec![false; bins.len()];
-        for thresh in 0..=args.bin_delay {
-            for i in 0..bins.len() {
-                if angle_found_marked[i] {
-                    continue;
-                }
-                for j in 0..bins[i].len() {
-                    if bins[i][j].first_marked != u128::MAX
-                        && frame_index - bins[i][j].first_marked >= args.bin_delay
-                        && frame_index - bins[i][j].last_masked <= thresh
-                    {
-                        grid_points.push(draw_point(&bins, i, j, &args));
-                        angle_found_marked[i] = true;
-                        // don't check more ranges
-                        break;
-                    }
-                }
-            }
-        }
-
-        let mut grid_pcd = PointCloud2 {
-            header: pcd.header.clone(),
-            height: 1,
-            width: grid_points.len() as u32,
-            is_bigendian: cfg!(target_endian = "big"),
-            is_dense: true,
-            fields: Vec::new(), // will be set by insert_field
-            point_step: 0,      // will be set by insert_field
-            data: Vec::new(),
-            row_step: 0,
+        let encoded = if has_cluster_id {
+            get_occupied_cluster(pcd.header.clone(), &points, &cluster_ids)
+        } else {
+            get_occupied_no_cluster(pcd.header.clone(), &points, &mut bins, frame_index, &args)
         };
-        for char in ["x", "y", "z", "count"] {
-            insert_field(
-                &mut grid_pcd,
-                PointField {
-                    name: char.to_string(),
-                    offset: 0, // offset is calculated by the insert field function
-                    datatype: point_field::FLOAT32,
-                    count: 1,
-                },
-            );
-        }
-
-        let data = serialize_pcd(&grid_points, &grid_pcd.fields);
-        grid_pcd.row_step = data.len() as u32;
-        grid_pcd.data = data;
-
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&grid_pcd, Infinite).unwrap())
-            .encoding(Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "sensor_msgs/msg/PointCloud2".into(),
-            ));
 
         match grid_publ.put(encoded).res_async().await {
             Ok(_) => trace!("PointCloud2 Grid Message Sent"),
@@ -829,4 +737,266 @@ async fn main() {
         clear_bins(&mut bins, frame_index, &args);
         frame_index += 1;
     }
+}
+
+// Return the centroid of clusters that have class_id. All points in a class
+// should have the same class_id
+fn get_occupied_cluster(
+    header: Header,
+    points: &[ParsedPoint],
+    cluster_ids: &HashMap<i32, Vec<usize>>,
+) -> Value {
+    let mut centroid_points = Vec::new();
+    for id in cluster_ids {
+        // sanity check, should not have cluster_ids with no points
+        if id.1.is_empty() {
+            continue;
+        }
+        let class = points[id.1[0]].fields["class"];
+        let mut xyzv = id.1.iter().fold([0.0, 0.0, 0.0, 0.0], |mut xyzv, ind| {
+            xyzv[0] += points[*ind].fields["x"];
+            xyzv[1] += points[*ind].fields["y"];
+            xyzv[2] += points[*ind].fields["z"];
+            if let Some(v) = points[*ind].fields.get("speed") {
+                xyzv[3] += v;
+            }
+            xyzv
+        });
+        for v in xyzv.iter_mut() {
+            *v /= id.1.len() as f64
+        }
+        let mut p = ParsedPoint {
+            fields: HashMap::new(),
+            angle: 0.0,
+            range: DEFAULT_PCD_RANGE,
+        };
+
+        p.fields.insert("x".to_string(), xyzv[0]);
+        p.fields.insert("y".to_string(), xyzv[1]);
+        p.fields.insert("z".to_string(), xyzv[2]);
+        p.fields.insert("speed".to_string(), xyzv[3]);
+        p.fields.insert("class".to_string(), class);
+        p.fields.insert("count".to_string(), id.1.len() as f64);
+        centroid_points.push(p);
+    }
+
+    let mut centroid_pcd = PointCloud2 {
+        header,
+        height: 1,
+        width: centroid_points.len() as u32,
+        is_bigendian: cfg!(target_endian = "big"),
+        is_dense: true,
+        fields: Vec::new(), // will be set by insert_field
+        point_step: 0,      // will be set by insert_field
+        data: Vec::new(),
+        row_step: 0,
+    };
+    for char in ["x", "y", "z", "class", "speed", "count"] {
+        insert_field(
+            &mut centroid_pcd,
+            PointField {
+                name: char.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
+    }
+
+    let data = serialize_pcd(&centroid_points, &centroid_pcd.fields);
+    centroid_pcd.row_step = data.len() as u32;
+    centroid_pcd.data = data;
+
+    Value::from(cdr::serialize::<_, _, CdrLe>(&centroid_pcd, Infinite).unwrap()).encoding(
+        Encoding::WithSuffix(
+            KnownEncoding::AppOctetStream,
+            "sensor_msgs/msg/PointCloud2".into(),
+        ),
+    )
+}
+
+// Do a grid and highlight the grid based on point classes
+fn get_occupied_no_cluster(
+    header: Header,
+    points: &Vec<ParsedPoint>,
+    bins: &mut [Vec<Bin>],
+    frame_index: u128,
+    args: &Args,
+) -> Value {
+    for p in points {
+        if p.fields["class"] <= 0.0 {
+            continue;
+        }
+        let mut angle = p.angle;
+        let mut range = p.range;
+        if angle < args.angle_bin_limit[0] {
+            angle = args.angle_bin_limit[0]
+        }
+        if angle > args.angle_bin_limit[1] {
+            angle = args.angle_bin_limit[1] - 0.001;
+        }
+        if range < args.range_bin_limit[0] {
+            range = args.range_bin_limit[0];
+        }
+        if range > args.range_bin_limit[1] {
+            range = args.range_bin_limit[1] - 0.001;
+        }
+        let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
+        let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
+        let class = p.fields["class"] as usize;
+        bins[i][j].classes.push(class);
+
+        if let Some(speed) = p.fields.get("speed") {
+            bins[i][j].speeds.push(*speed);
+        }
+    }
+    let mut grid_points = Vec::new();
+
+    let mut angle_found_occupied = vec![false; bins.len()];
+    for i in 0..bins.len() {
+        for j in 0..bins[i].len() {
+            let sum0 = get_val_in_bin(bins, i as i32, j as i32, 0, 0);
+            let sum1 = get_val_in_bin(bins, i as i32, j as i32, 0, -1);
+            let sum2 = get_val_in_bin(bins, i as i32, j as i32, 0, -2);
+            if sum0 >= args.threshold {
+                mark_grid(&mut bins[i][j], frame_index);
+                angle_found_occupied[i] = true;
+                // don't check more ranges
+                break;
+            }
+            if sum0 + sum1 >= args.threshold {
+                mark_grid(&mut bins[i][j - 1], frame_index);
+                angle_found_occupied[i] = true;
+                // don't check more ranges
+                break;
+            }
+            if sum0 + sum1 + sum2 >= args.threshold {
+                mark_grid(&mut bins[i][j - 2], frame_index);
+                angle_found_occupied[i] = true;
+                // don't check more ranges
+                break;
+            }
+        }
+    }
+
+    for i in 0..bins.len() {
+        for j in 0..bins[i].len() {
+            let mut sum0 = get_val_in_bin(bins, i as i32, j as i32, 0, 0);
+            let mut sum1 = get_val_in_bin(bins, i as i32, j as i32, 0, -1);
+            let mut sum2 = get_val_in_bin(bins, i as i32, j as i32, 0, -2);
+            if 0 < i && !angle_found_occupied[i - 1] {
+                sum0 += get_val_in_bin(bins, i as i32, j as i32, -1, 0);
+                sum1 += get_val_in_bin(bins, i as i32, j as i32, -1, -1);
+                sum2 += get_val_in_bin(bins, i as i32, j as i32, -1, -2);
+            }
+            if i + 1 < bins.len() && !angle_found_occupied[i + 1] {
+                sum0 += get_val_in_bin(bins, i as i32, j as i32, 1, 0);
+                sum1 += get_val_in_bin(bins, i as i32, j as i32, 1, -1);
+                sum2 += get_val_in_bin(bins, i as i32, j as i32, 1, -2);
+            }
+
+            if sum0 >= args.threshold {
+                mark_grid(&mut bins[i][j], frame_index);
+                angle_found_occupied[i] = true;
+                if 0 < i {
+                    angle_found_occupied[i - 1] = true;
+                }
+                if i + 1 < bins.len() {
+                    angle_found_occupied[i + 1] = true;
+                }
+                // don't check more ranges
+                break;
+            }
+            if sum0 + sum1 >= args.threshold {
+                mark_grid(&mut bins[i][j - 1], frame_index);
+                angle_found_occupied[i] = true;
+                if 0 < i {
+                    angle_found_occupied[i - 1] = true;
+                }
+                if i + 1 < bins.len() {
+                    angle_found_occupied[i + 1] = true;
+                }
+                // don't check more ranges
+                break;
+            }
+            if sum0 + sum1 + sum2 >= args.threshold {
+                mark_grid(&mut bins[i][j - 2], frame_index);
+                angle_found_occupied[i] = true;
+                if 0 < i {
+                    angle_found_occupied[i - 1] = true;
+                }
+                if i + 1 < bins.len() {
+                    angle_found_occupied[i + 1] = true;
+                }
+                // don't check more ranges
+                break;
+            }
+        }
+    }
+    let mut angle_found_marked = vec![false; bins.len()];
+    for thresh in 0..=args.bin_delay {
+        for i in 0..bins.len() {
+            if angle_found_marked[i] {
+                continue;
+            }
+            for j in 0..bins[i].len() {
+                if bins[i][j].first_marked != u128::MAX
+                    && frame_index - bins[i][j].first_marked >= args.bin_delay
+                    && frame_index - bins[i][j].last_masked <= thresh
+                {
+                    grid_points.push(draw_point(bins, i, j, args));
+                    angle_found_marked[i] = true;
+                    // don't check more ranges
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut grid_pcd = PointCloud2 {
+        header,
+        height: 1,
+        width: grid_points.len() as u32,
+        is_bigendian: cfg!(target_endian = "big"),
+        is_dense: true,
+        fields: Vec::new(), // will be set by insert_field
+        point_step: 0,      // will be set by insert_field
+        data: Vec::new(),
+        row_step: 0,
+    };
+    for char in ["x", "y", "z", "class", "speed", "count"] {
+        insert_field(
+            &mut grid_pcd,
+            PointField {
+                name: char.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
+    }
+
+    let data = serialize_pcd(&grid_points, &grid_pcd.fields);
+    grid_pcd.row_step = data.len() as u32;
+    grid_pcd.data = data;
+
+    Value::from(cdr::serialize::<_, _, CdrLe>(&grid_pcd, Infinite).unwrap()).encoding(
+        Encoding::WithSuffix(
+            KnownEncoding::AppOctetStream,
+            "sensor_msgs/msg/PointCloud2".into(),
+        ),
+    )
+}
+
+/* Returns the mode of the slice. Returns None if the slice is empty.
+ * https://stackoverflow.com/a/50000027
+ */
+fn mode_slice<T: Ord + Hash>(numbers: &[T]) -> Option<&T> {
+    let mut counts = HashMap::new();
+
+    numbers.iter().max_by_key(|&n| {
+        let count = counts.entry(n).or_insert(0);
+        *count += 1;
+        *count
+    })
 }
