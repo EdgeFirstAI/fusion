@@ -6,6 +6,7 @@ use edgefirst_schemas::{
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
     std_msgs::Header,
 };
+use fusion_model::spawn_fusion_model_thread;
 use log::{error, info, trace};
 use setup::Args;
 use std::{
@@ -18,6 +19,7 @@ use std::{
 use zenoh::{config::Config, prelude::r#async::*};
 
 use ndarray::{self, Array2};
+mod fusion_model;
 mod setup;
 
 struct ParsedPoint {
@@ -417,6 +419,7 @@ struct Bin {
     last_masked: u128,
     first_marked: u128,
 }
+type Grid = Vec<Vec<bool>>;
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
@@ -503,6 +506,9 @@ async fn main() {
         .res_async()
         .await
         .expect("Failed to declare Zenoh publisher");
+
+    let grid: Arc<Mutex<Option<Grid>>> = Arc::new(Mutex::new(None));
+    spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
 
     let mut zstd_decomp = zstd::bulk::Decompressor::new().unwrap();
     let mut bins = Vec::new();
@@ -725,9 +731,16 @@ async fn main() {
         }
 
         let encoded = if has_cluster_id {
-            get_occupied_cluster(pcd.header.clone(), &points, &cluster_ids)
+            get_occupied_cluster(pcd.header.clone(), &points, &cluster_ids, &grid, &args)
         } else {
-            get_occupied_no_cluster(pcd.header.clone(), &points, &mut bins, frame_index, &args)
+            get_occupied_no_cluster(
+                pcd.header.clone(),
+                &points,
+                &mut bins,
+                frame_index,
+                &grid,
+                &args,
+            )
         };
 
         match grid_publ.put(encoded).res_async().await {
@@ -739,12 +752,73 @@ async fn main() {
     }
 }
 
+fn grid_points_radar(
+    points: &mut Vec<ParsedPoint>,
+    grid: &Arc<Mutex<Option<Grid>>>,
+    args: &Args,
+) -> Vec<usize> {
+    let mut class = Vec::new();
+    for _ in 0..points.len() {
+        class.push(0);
+    }
+    let guard = block_on(grid.lock());
+    if guard.is_none() {
+        return class;
+    }
+    let g = guard.as_ref().unwrap();
+    let mut new_points = Vec::new();
+    for i in 0..g.len() {
+        for j in 0..g[i].len() {
+            if !g[i][j] {
+                continue;
+            }
+            // center of grid
+            let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
+            let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+            println!("{}", angle);
+            let x = (-angle).to_radians().cos() * range;
+            let y = (-angle).to_radians().sin() * range;
+
+            // find closest point
+            let mut min_dist = 9999999.9;
+            let mut min_point_ind = 0;
+            for ind in 0..points.len() {
+                let p = &points[i];
+                let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
+                if dist < min_dist {
+                    min_dist = dist;
+                    min_point_ind = ind;
+                }
+            }
+            class[min_point_ind] = 1;
+
+            let mut p = ParsedPoint {
+                fields: HashMap::new(),
+                angle: 0.0,
+                range: DEFAULT_PCD_RANGE,
+            };
+
+            p.fields.insert("x".to_string(), x);
+            p.fields.insert("y".to_string(), y);
+            p.fields.insert("z".to_string(), 0.0);
+            p.fields.insert("speed".to_string(), 0.0);
+            p.fields.insert("class".to_string(), 10.0);
+            p.fields.insert("count".to_string(), 10.0);
+            new_points.push(p);
+        }
+    }
+    points.append(&mut new_points);
+    return class;
+}
+
 // Return the centroid of clusters that have class_id. All points in a class
 // should have the same class_id
 fn get_occupied_cluster(
     header: Header,
     points: &[ParsedPoint],
     cluster_ids: &HashMap<i32, Vec<usize>>,
+    grid: &Arc<Mutex<Option<Grid>>>,
+    args: &Args,
 ) -> Value {
     let mut centroid_points = Vec::new();
     for id in cluster_ids {
@@ -780,6 +854,15 @@ fn get_occupied_cluster(
         centroid_points.push(p);
     }
 
+    let radar_only = grid_points_radar(&mut centroid_points, grid, args);
+    for i in 0..radar_only.len() {
+        if radar_only[i] > 0 {
+            let new_class = centroid_points[i].fields["class"] + 1.0;
+            centroid_points[i]
+                .fields
+                .insert("class".to_string(), new_class);
+        }
+    }
     let mut centroid_pcd = PointCloud2 {
         header,
         height: 1,
@@ -821,6 +904,7 @@ fn get_occupied_no_cluster(
     points: &Vec<ParsedPoint>,
     bins: &mut [Vec<Bin>],
     frame_index: u128,
+    grid: &Arc<Mutex<Option<Grid>>>,
     args: &Args,
 ) -> Value {
     for p in points {
@@ -950,6 +1034,14 @@ fn get_occupied_no_cluster(
                     break;
                 }
             }
+        }
+    }
+
+    let radar_only = grid_points_radar(&mut grid_points, grid, args);
+    for i in 0..radar_only.len() {
+        if radar_only[i] > 0 {
+            let new_class = grid_points[i].fields["class"] + 1.0;
+            grid_points[i].fields.insert("class".to_string(), new_class);
         }
     }
 

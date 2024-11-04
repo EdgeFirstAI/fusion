@@ -1,3 +1,4 @@
+use async_std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Debug, Clone, Parser)]
@@ -35,6 +36,18 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/fusion/occupancy")]
     pub occ_topic: String,
 
+    /// model
+    #[arg(short, long, env, required = true)]
+    pub model: PathBuf,
+
+    /// engine for model context
+    #[arg(long, env, default_value = "npu")]
+    pub engine: String,
+
+    /// radarcube input topic
+    #[arg(long, env, default_value = "rt/radar/cube")]
+    pub radarcube_topic: String,
+
     /// occupancy threshold. Only used if input PCD does not have cluster_id
     /// field
     #[arg(long, env, default_value = "1")]
@@ -51,11 +64,11 @@ pub struct Args {
     pub occ_range_limit: f64,
 
     /// range_bin_limit. Only used if input PCD does not have cluster_id field
-    #[arg(long, env, num_args = 2, value_delimiter = ' ', default_value = "0 20")]
+    #[arg(long, env, num_args = 2, value_delimiter = ' ', default_value = "0 16")]
     pub range_bin_limit: Vec<f64>,
 
     /// range_bin_width. Only used if input PCD does not have cluster_id field
-    #[arg(long, env, default_value = "0.5")]
+    #[arg(long, env, default_value = "1.0")]
     pub range_bin_width: f64,
 
     /// angle_bin_limit, 0 degrees is forwards. Only used if input PCD does not
@@ -65,13 +78,13 @@ pub struct Args {
         env,
         num_args = 2,
         value_delimiter = ' ',
-        default_value = "-70 70"
+        default_value = "-55 55"
     )]
     pub angle_bin_limit: Vec<f64>,
 
     /// angle_bin_width in degrees. Only used if input PCD does not have
     /// cluster_id field
-    #[arg(long, env, default_value = "10")]
+    #[arg(long, env, default_value = "6.875")]
     pub angle_bin_width: f64,
 
     /// bin delay in radar message count (grid needs to be valid for `BIN_DELAY`
