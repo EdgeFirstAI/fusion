@@ -645,18 +645,14 @@ checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
 
 [[package]]
 name = "deepviewrt"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4e6852a4ce843155f582ce1eaa1f217c98f2fb632036fa23880ef8bc18b5a12"
+version = "0.0.0"
 dependencies = [
  "deepviewrt-sys",
 ]
 
 [[package]]
 name = "deepviewrt-sys"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d368cf2f773e1467f291c573d6ee738e01670c9e01281141a34b87139ac176aa"
+version = "0.0.0"
 dependencies = [
  "libc",
 ]
@@ -2750,9 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "vaal"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed86310e34cc2b46ed0f1599265d9fcb8d3abfeca5e3afcd9e244c44b4f64a4f"
+version = "0.0.0"
 dependencies = [
  "deepviewrt",
  "vaal-sys",
@@ -2760,9 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "vaal-sys"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c4cf4b84d83da60b05cb8bb8def68a28fb12b8807f0e561ca29139d13544252"
+version = "0.0.0"
 dependencies = [
  "libc",
 ]

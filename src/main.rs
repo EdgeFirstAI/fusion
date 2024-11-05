@@ -568,17 +568,18 @@ async fn main() {
                 count: 1,
             },
         );
-
         let mask_only = classify_points_mask_proj(&mask, &info, &mut points, &mut zstd_decomp);
         let radar_only = grid_points_radar(&grid, &mut points, &args);
 
         for i in 0..points.len() {
-            if radar_only[i] > 0 || mask_only[i] > 0 {
-                let new_class = radar_only[i] + mask_only[i];
-                points[i]
-                    .fields
-                    .insert("class".to_string(), new_class as f64);
-            }
+            let new_class = if radar_only[i] > 0 || mask_only[i] > 0 {
+                radar_only[i] + mask_only[i]
+            } else {
+                0
+            };
+            points[i]
+                .fields
+                .insert("class".to_string(), new_class as f64);
         }
         // filter occlusions
         // points.sort_by(|p, q| p.range.total_cmp(&q.range));
@@ -676,7 +677,7 @@ async fn main() {
 fn classify_points_mask_proj(
     mask: &Arc<Mutex<Option<Mask>>>,
     info: &Arc<Mutex<Option<CameraInfo>>>,
-    points: &mut Vec<ParsedPoint>,
+    points: &Vec<ParsedPoint>,
     zstd_decomp: &mut zstd::bulk::Decompressor<'_>,
 ) -> Vec<usize> {
     let mut class = Vec::new();
@@ -730,7 +731,6 @@ fn classify_points_mask_proj(
     // project points onto mask
     let point_proj = project_point(&points, &cam_mtx, &[0.0, 0.0, 0.0]);
     for i in 0..points.len() {
-        points[i].fields.insert("class".to_string(), 0.0);
         let mask_coord = (
             ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
             ((1.0 - point_proj[i].1) * mask_height as f64).round() as i64,
@@ -794,7 +794,6 @@ fn grid_points_radar(
             // center of grid
             let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
             let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-            println!("{}", angle);
             let x = (-angle).to_radians().cos() * range;
             let y = (-angle).to_radians().sin() * range;
 
@@ -802,7 +801,7 @@ fn grid_points_radar(
             let mut min_dist = 9999999.9;
             let mut min_point_ind = 0;
             for ind in 0..points.len() {
-                let p = &points[i];
+                let p = &points[ind];
                 let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
                 if dist < min_dist {
                     min_dist = dist;

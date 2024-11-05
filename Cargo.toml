@@ -33,5 +33,5 @@ edgefirst-schemas = "1.1"
 env_logger = "0.10"
 zstd = { version = "0.13", features = ["experimental"] }
 ndarray = {version ="0.16.1", features= ["rayon"] }
-vaal = "0.3.4"
-deepviewrt = "0.5.0"
+vaal = { path = "../vaal-rs" } 
+deepviewrt = { path = "../deepviewrt-rs" } 
