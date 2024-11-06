@@ -71,6 +71,20 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         }
     };
 
+    let input_tensor_index = model::inputs(backbone.model().unwrap()).unwrap();
+    let input_shape: Vec<_> = match backbone
+        .dvrt_context()
+        .unwrap()
+        .tensor_index_mut(input_tensor_index[0] as usize)
+    {
+        Ok(v) => v.shape().into_iter().map(|v| *v as usize).collect(),
+        Err(e) => {
+            error!("Could not get input 0 from model: {:?}", e);
+            return;
+        }
+    };
+    debug!("got input tensor shape");
+
     let timeout = Duration::from_millis(2000);
     loop {
         let sample = if let Some(v) = sub_radarcube.drain().last() {
@@ -110,11 +124,11 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         )
         .unwrap();
 
-        let cube = preprocess_cube(&mut cube);
+        let cube = preprocess_cube(&mut cube, &input_shape);
         let cube = cube.to_owned().into_flat();
         let cube = cube.as_slice().unwrap();
         debug!("preprocessed radarcube: len={:?}", cube.len());
-        let input_tensor_index = model::inputs(backbone.model().unwrap()).unwrap();
+
         let input_tensor = match backbone
             .dvrt_context()
             .unwrap()
@@ -126,7 +140,6 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 return;
             }
         };
-        debug!("got input tensor");
         let mut input_tensor_map = input_tensor.maprw_f32().unwrap();
         debug!("mapped input tensor: len={:?}", input_tensor_map.len());
         input_tensor_map.copy_from_slice(cube);
@@ -189,6 +202,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
 
 fn preprocess_cube<'a>(
     cube: &'a mut ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 5]>>,
+    input_size: &[usize],
 ) -> ArrayBase<ndarray::CowRepr<'a, f32>, ndarray::Dim<[usize; 4]>> {
     // need to convert axis (0, 1, 2, 3, 4) into (0, 2, 4, 1, 3)
 
@@ -202,7 +216,7 @@ fn preprocess_cube<'a>(
 
     let mut cube = cube.to_shape([1, 2 * 4 * 2, 200, 128]).unwrap();
     cube.par_mapv_inplace(|v| v.tanh());
-    let mut cube = cube.slice_move(s![.., .., ..128, ..]);
+
     // need to convert axis (0, 1, 2, 3) into (0, 2, 3, 1)
 
     // (0, 1, 2, 3)
@@ -211,6 +225,19 @@ fn preprocess_cube<'a>(
     cube.swap_axes(3, 2);
     // (0, 2, 3, 1)
 
+    if input_size.len() != 4 {
+        error!("Model input size was: {:?}. Expected 4 dims", input_size);
+        return cube;
+    }
+    if input_size[1] > cube.dim().1 {
+        error!(
+            "Model second dim was: {:?}. Expected to be <= {}",
+            input_size[1],
+            cube.dim().1
+        );
+        return cube;
+    }
+    cube = cube.slice_move(s![.., ..input_size[1], .., ..]);
     cube
 }
 
@@ -219,20 +246,47 @@ mod swap_axes_test {
     use super::*;
 
     #[test]
+    fn test_range_crop() {
+        let mut cube = Array::from_shape_vec(
+            [2, 200, 4, 256 / 2, 2],
+            (0..(2 * 200 * 4 * 256)).map(|v| v as f32).collect(),
+        )
+        .unwrap();
+        let input_size = [1, 128, 128, 16];
+        let cube = preprocess_cube(&mut cube, &input_size);
+        assert_eq!(
+            cube.dim(),
+            [1, 128, 128, 16].into(),
+            "Dims was not (1, 128, 128, 16)"
+        );
+        println!("{}", cube.flatten());
+        assert_eq!(
+            cube.flatten()[1],
+            0.7615942,
+            "Second value was not 0.7615942"
+        );
+        println!("len={}", cube.flatten().as_slice().unwrap().len())
+    }
+    #[test]
     fn test_basic() {
         let mut cube = Array::from_shape_vec(
             [2, 200, 4, 256 / 2, 2],
             (0..(2 * 200 * 4 * 256)).map(|v| v as f32).collect(),
         )
         .unwrap();
-
-        let cube = preprocess_cube(&mut cube);
+        let input_size = [1, 200, 128, 16];
+        let cube = preprocess_cube(&mut cube, &input_size);
         assert_eq!(
             cube.dim(),
-            (1, 128, 128, 16),
-            "Dims was not (1, 128, 128, 16)"
+            [1, 200, 128, 16].into(),
+            "Dims was not (1, 200, 128, 16)"
         );
         println!("{}", cube.flatten());
+        assert_eq!(
+            cube.flatten()[1],
+            0.7615942,
+            "Second value was not 0.7615942"
+        );
         println!("len={}", cube.flatten().as_slice().unwrap().len())
     }
 }
