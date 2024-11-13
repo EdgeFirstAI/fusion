@@ -949,10 +949,18 @@ fn grid_points_radar(
                 continue;
             }
             // center of grid
-            let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
-            let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-            let x = (-angle).to_radians().cos() * range;
-            let y = (-angle).to_radians().sin() * range;
+            let (x, y) = if args.model_polar {
+                let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
+                let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+                let x = (-angle).to_radians().cos() * range;
+                let y = (-angle).to_radians().sin() * range;
+                (x, y)
+            } else {
+                let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+                let y = args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
+                    + args.range_bin_width * (j as f64 + 0.5);
+                (x, y)
+            };
 
             // find closest point
             let mut min_dist = 9999999.9;
