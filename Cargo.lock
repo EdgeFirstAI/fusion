@@ -663,13 +663,29 @@ name = "deepviewrt"
 version = "0.0.0"
 source = "git+https://github.com/Charlie-AuZone/deepviewrt-rs.git?branch=EDGEAI-364#2ca0d71c3c20baa5fd9888a7da2a7dd2faafc54a"
 dependencies = [
- "deepviewrt-sys",
+ "deepviewrt-sys 0.0.0 (git+https://github.com/Charlie-AuZone/deepviewrt-rs.git?branch=EDGEAI-364)",
+]
+
+[[package]]
+name = "deepviewrt"
+version = "0.0.0"
+source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#bc57d9b35101c8e36e2136bc366d957bfcaa885b"
+dependencies = [
+ "deepviewrt-sys 0.0.0 (git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main)",
 ]
 
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
 source = "git+https://github.com/Charlie-AuZone/deepviewrt-rs.git?branch=EDGEAI-364#2ca0d71c3c20baa5fd9888a7da2a7dd2faafc54a"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "deepviewrt-sys"
+version = "0.0.0"
+source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#bc57d9b35101c8e36e2136bc366d957bfcaa885b"
 dependencies = [
  "libc",
 ]
@@ -1384,7 +1400,7 @@ dependencies = [
  "async-std",
  "cdr",
  "clap 4.5.17",
- "deepviewrt",
+ "deepviewrt 0.0.0 (git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main)",
  "edgefirst-schemas",
  "env_logger",
  "lapjv",
@@ -2880,16 +2896,16 @@ dependencies = [
 [[package]]
 name = "vaal"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cfd16713572ee83e8a2c54b4fdd86fcedfcb8d63"
+source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#c00cd868f8e22a500fc92c6a16534453d0e56dbd"
 dependencies = [
- "deepviewrt",
+ "deepviewrt 0.0.0 (git+https://github.com/Charlie-AuZone/deepviewrt-rs.git?branch=EDGEAI-364)",
  "vaal-sys",
 ]
 
 [[package]]
 name = "vaal-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cfd16713572ee83e8a2c54b4fdd86fcedfcb8d63"
+source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#c00cd868f8e22a500fc92c6a16534453d0e56dbd"
 dependencies = [
  "libc",
 ]

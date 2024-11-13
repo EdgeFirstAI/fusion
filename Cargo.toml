@@ -34,7 +34,7 @@ env_logger = "0.10"
 zstd = { version = "0.13", features = ["experimental"] }
 ndarray = {version ="0.16.1", features= ["rayon"] }
 vaal = { git = "https://github.com/Charlie-AuZone/vaal-rs.git", branch = "EDGEAI-364" } 
-deepviewrt = { git = "https://github.com/Charlie-AuZone/deepviewrt-rs.git", branch = "EDGEAI-364" } 
+deepviewrt = { git = "https://github.com/DeepViewML/deepviewrt-rs.git", branch = "main" } 
 lapjv = "0.2.1"
 uuid = { version = "1.11.0", features = ["v4"] }
 nalgebra = "0.33.2"
