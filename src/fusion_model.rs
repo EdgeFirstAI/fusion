@@ -34,12 +34,17 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     };
     info!("Opened DeepViewRT Context on {}", args.engine);
 
-    let filename = match args.model.to_str() {
+    if args.model.is_none() {
+        info!("No radar model was given");
+        return;
+    }
+    let filepath = args.model.unwrap().clone();
+    let filename = match filepath.to_str() {
         Some(v) => v,
         None => {
             error!(
                 "Cannot use file {:?}, please use only utf8 characters in file path",
-                args.model
+                filepath
             );
             return;
         }
@@ -195,8 +200,10 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 occupied[i].push(item)
             }
         }
+        let timestamp = radarcube.header.stamp.nanosec as u64
+            + radarcube.header.stamp.sec as u64 * 1_000_000_000;
         let mut guard = block_on(grid.lock());
-        *guard = Some(occupied);
+        *guard = Some((occupied, timestamp));
     }
 }
 
