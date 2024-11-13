@@ -661,6 +661,7 @@ checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
 [[package]]
 name = "deepviewrt"
 version = "0.0.0"
+source = "git+https://github.com/Charlie-AuZone/deepviewrt-rs.git?branch=EDGEAI-364#2ca0d71c3c20baa5fd9888a7da2a7dd2faafc54a"
 dependencies = [
  "deepviewrt-sys",
 ]
@@ -668,6 +669,7 @@ dependencies = [
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
+source = "git+https://github.com/Charlie-AuZone/deepviewrt-rs.git?branch=EDGEAI-364#2ca0d71c3c20baa5fd9888a7da2a7dd2faafc54a"
 dependencies = [
  "libc",
 ]
@@ -2867,6 +2869,7 @@ dependencies = [
 [[package]]
 name = "vaal"
 version = "0.0.0"
+source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cfd16713572ee83e8a2c54b4fdd86fcedfcb8d63"
 dependencies = [
  "deepviewrt",
  "vaal-sys",
@@ -2875,6 +2878,7 @@ dependencies = [
 [[package]]
 name = "vaal-sys"
 version = "0.0.0"
+source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cfd16713572ee83e8a2c54b4fdd86fcedfcb8d63"
 dependencies = [
  "libc",
 ]
