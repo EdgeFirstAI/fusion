@@ -577,11 +577,11 @@ async fn main() {
         );
         points.sort_by(|p, q| p.range.total_cmp(&q.range));
 
-        let mut mask_only = classify_points_mask_proj(&mask, &info, &mut points, &mut zstd_decomp);
+        let mut mask_only = classify_points_mask_proj(&mask, &info, &points, &mut zstd_decomp);
 
         // filter occlusions
         for i in 0..points.len() {
-            if mask_only[i] <= 0 {
+            if mask_only[i] == 0 {
                 continue;
             }
             for j in (i + 1)..points.len() {
@@ -596,14 +596,14 @@ async fn main() {
         let radar_only = if args.track {
             grid_points_radar_tracked(
                 &grid,
-                &mut points,
+                &points,
                 &mut tracker,
                 &args,
                 #[cfg(feature = "model_output")]
                 session.clone(),
             )
         } else {
-            grid_points_radar(&grid, &mut points, &args)
+            grid_points_radar(&grid, &points, &args)
         };
 
         for i in 0..points.len() {
@@ -719,13 +719,10 @@ async fn main() {
 fn classify_points_mask_proj(
     mask: &Arc<Mutex<Option<Mask>>>,
     info: &Arc<Mutex<Option<CameraInfo>>>,
-    points: &Vec<ParsedPoint>,
+    points: &[ParsedPoint],
     zstd_decomp: &mut zstd::bulk::Decompressor<'_>,
 ) -> Vec<usize> {
-    let mut class = Vec::new();
-    for _ in 0..points.len() {
-        class.push(0);
-    }
+    let mut class = vec![0; points.len()];
     // get mask data
     let guard = block_on(mask.lock());
     let mask_msg = match guard.as_ref() {
@@ -771,7 +768,7 @@ fn classify_points_mask_proj(
     cam_mtx[5] /= cam_height;
 
     // project points onto mask
-    let point_proj = project_point(&points, &cam_mtx, &[0.0, 0.0, 0.0]);
+    let point_proj = project_point(points, &cam_mtx, &[0.0, 0.0, 0.0]);
     for i in 0..points.len() {
         let mask_coord = (
             ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
@@ -821,11 +818,8 @@ fn grid_points_radar_tracked(
     args: &Args,
     #[cfg(feature = "model_output")] session: Arc<Session>,
 ) -> Vec<usize> {
-    let mut class = Vec::new();
-    for _ in 0..points.len() {
-        class.push(0);
-    }
-    if points.len() == 0 {
+    let mut class = vec![0; points.len()];
+    if points.is_empty() {
         return class;
     }
     let guard = block_on(grid.lock());
@@ -834,9 +828,9 @@ fn grid_points_radar_tracked(
     }
     let (g, timestamp) = guard.as_ref().unwrap();
     let mut boxes = Vec::new();
-    for i in 0..g.len() {
-        for j in 0..g[i].len() {
-            if !g[i][j] {
+    for (i, g_i) in g.iter().enumerate() {
+        for (j, g_ij) in g_i.iter().enumerate() {
+            if !g_ij {
                 continue;
             }
             boxes.push(VAALBox {
@@ -912,8 +906,7 @@ fn grid_points_radar_tracked(
         // find closest point
         let mut min_dist = 9999999.9;
         let mut min_point_ind = 0;
-        for ind in 0..points.len() {
-            let p = &points[ind];
+        for (ind, p) in points.iter().enumerate() {
             let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
             if dist < min_dist {
                 min_dist = dist;
@@ -923,7 +916,7 @@ fn grid_points_radar_tracked(
         class[min_point_ind] = 1;
     }
 
-    return class;
+    class
 }
 
 fn grid_points_radar(
@@ -931,11 +924,8 @@ fn grid_points_radar(
     points: &[ParsedPoint],
     args: &Args,
 ) -> Vec<usize> {
-    let mut class = Vec::new();
-    for _ in 0..points.len() {
-        class.push(0);
-    }
-    if points.len() == 0 {
+    let mut class = vec![0; points.len()];
+    if points.is_empty() {
         return class;
     }
     let guard = block_on(grid.lock());
@@ -943,9 +933,9 @@ fn grid_points_radar(
         return class;
     }
     let (g, _) = guard.as_ref().unwrap();
-    for i in 0..g.len() {
-        for j in 0..g[i].len() {
-            if !g[i][j] {
+    for (i, g_i) in g.iter().enumerate() {
+        for (j, g_ij) in g_i.iter().enumerate() {
+            if !g_ij {
                 continue;
             }
             // center of grid
@@ -965,8 +955,7 @@ fn grid_points_radar(
             // find closest point
             let mut min_dist = 9999999.9;
             let mut min_point_ind = 0;
-            for ind in 0..points.len() {
-                let p = &points[ind];
+            for (ind, p) in points.iter().enumerate() {
                 let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
                 if dist < min_dist {
                     min_dist = dist;
@@ -976,7 +965,7 @@ fn grid_points_radar(
             class[min_point_ind] = 1;
         }
     }
-    return class;
+    class
 }
 
 // fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut

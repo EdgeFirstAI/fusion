@@ -43,7 +43,7 @@ impl Tracklet {
             label: self.prev_boxes.label,
         };
         xyah_to_vaalbox(predicted_xyah, &mut expected);
-        return expected;
+        expected
     }
 }
 

@@ -82,7 +82,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         .unwrap()
         .tensor_index_mut(input_tensor_index[0] as usize)
     {
-        Ok(v) => v.shape().into_iter().map(|v| *v as usize).collect(),
+        Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
         Err(e) => {
             error!("Could not get input 0 from model: {:?}", e);
             return;
