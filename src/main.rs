@@ -636,7 +636,7 @@ async fn main() {
                 },
             );
         }
-
+        // add_grid_as_points(&grid, &mut points, &args);
         let mut has_cluster_id = false;
         // points with the same cluster_id get the same class
         let mut cluster_ids = HashMap::new();
@@ -898,10 +898,18 @@ fn grid_points_radar_tracked(
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
-        let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
-        let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-        let x = (-angle).to_radians().cos() * range;
-        let y = (-angle).to_radians().sin() * range;
+        let (x, y) = if args.model_polar {
+            let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
+            let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+            let x = (-angle).to_radians().cos() * range;
+            let y = (-angle).to_radians().sin() * range;
+            (x, y)
+        } else {
+            let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+            let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
+                + args.range_bin_width * (j as f64 + 0.5));
+            (x, y)
+        };
 
         // find closest point
         let mut min_dist = 9999999.9;
@@ -947,8 +955,8 @@ fn grid_points_radar(
                 (x, y)
             } else {
                 let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-                let y = args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
-                    + args.range_bin_width * (j as f64 + 0.5);
+                let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
+                    + args.range_bin_width * (j as f64 + 0.5));
                 (x, y)
             };
 
@@ -973,21 +981,30 @@ fn grid_points_radar(
 //     if guard.is_none() {
 //         return;
 //     }
-//     let g = guard.as_ref().unwrap();
+//     let (g, _) = guard.as_ref().unwrap();
 //     for i in 0..g.len() {
 //         for j in 0..g[i].len() {
 //             if !g[i][j] {
 //                 continue;
 //             }
 //             // center of grid
-//             let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j
-// as f64 + 0.5);             let range = args.range_bin_limit[0] +
-// args.range_bin_width * (i as f64 + 0.5);             let x =
-// (-angle).to_radians().cos() * range;             let y =
-// (-angle).to_radians().sin() * range;             let mut p = ParsedPoint {
+//             let (x, y) = if args.model_polar {
+//                 let angle = args.angle_bin_limit[0] + args.angle_bin_width *
+// (j as f64 + 0.5);                 let range = args.range_bin_limit[0] +
+// args.range_bin_width * (i as f64 + 0.5);                 let x =
+// (-angle).to_radians().cos() * range;                 let y =
+// (-angle).to_radians().sin() * range;                 (x, y)
+//             } else {
+//                 let x = args.range_bin_limit[0] + args.range_bin_width * (i
+// as f64 + 0.5);                 let y = -(args.range_bin_limit[0] -
+// args.range_bin_limit[1] / 2.0
+//                     + args.range_bin_width * (j as f64 + 0.5));
+//                 (x, y)
+//             };
+//             let mut p = ParsedPoint {
 //                 fields: HashMap::new(),
-//                 angle,
-//                 range,
+//                 angle: 0.0,
+//                 range: 0.0,
 //             };
 //             p.fields.insert("x".to_string(), x);
 //             p.fields.insert("y".to_string(), y);
@@ -996,6 +1013,7 @@ fn grid_points_radar(
 //             p.fields.insert("class".to_string(), 10.0);
 //             p.fields.insert("count".to_string(), 1.0);
 //             p.fields.insert("cluster_id".to_string(), 0.0);
+//             p.fields.insert("radar_class".to_string(), 10.0);
 //             points.push(p);
 //         }
 //     }

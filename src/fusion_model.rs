@@ -210,46 +210,44 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
 fn preprocess_cube<'a>(
     cube: &'a mut ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<[usize; 5]>>,
     input_size: &[usize],
-) -> ArrayBase<ndarray::CowRepr<'a, f32>, ndarray::Dim<[usize; 4]>> {
-    // need to convert axis (0, 1, 2, 3, 4) into (0, 2, 4, 1, 3)
+) -> ArrayBase<ndarray::CowRepr<'a, f32>, ndarray::Dim<[usize; 3]>> {
+    // need to convert axis (0, 1, 2, 3, 4) into (1, 3, 0, 2, 4)
 
     // (0, 1, 2, 3, 4)
-    cube.swap_axes(2, 1);
-    // (0, 2, 1, 3, 4)
-    cube.swap_axes(4, 2);
-    // (0, 2, 4, 3, 1)
-    cube.swap_axes(4, 3);
-    // (0, 2, 4, 1, 3)
+    cube.swap_axes(0, 1);
+    // (1, 0, 2, 3, 4)
+    cube.swap_axes(1, 3);
+    // (1, 3, 2, 0, 4)
+    cube.swap_axes(2, 3);
+    // (1, 3, 0, 2, 4)
 
-    let mut cube = cube.to_shape([1, 2 * 4 * 2, 200, 128]).unwrap();
+    let mut cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap();
     cube.par_mapv_inplace(|v| v.tanh());
-
-    // need to convert axis (0, 1, 2, 3) into (0, 2, 3, 1)
-
-    // (0, 1, 2, 3)
-    cube.swap_axes(2, 1);
-    // (0, 2, 1, 3)
-    cube.swap_axes(3, 2);
-    // (0, 2, 3, 1)
 
     if input_size.len() != 4 {
         error!("Model input size was: {:?}. Expected 4 dims", input_size);
         return cube;
     }
-    if input_size[1] > cube.dim().1 {
+    if input_size[1] > cube.dim().0 {
         error!(
             "Model second dim was: {:?}. Expected to be <= {}",
             input_size[1],
-            cube.dim().1
+            cube.dim().0
         );
         return cube;
     }
-    cube = cube.slice_move(s![.., ..input_size[1], .., ..]);
+    cube = cube.slice_move(s![..input_size[1], .., ..]);
     cube
 }
 
 #[cfg(test)]
 mod swap_axes_test {
+
+    use std::{
+        fs::{self, File},
+        io::{BufRead, BufReader},
+    };
+
     use super::*;
 
     #[test]
@@ -263,7 +261,7 @@ mod swap_axes_test {
         let cube = preprocess_cube(&mut cube, &input_size);
         assert_eq!(
             cube.dim(),
-            [1, 128, 128, 16].into(),
+            [128, 128, 16].into(),
             "Dims was not (1, 128, 128, 16)"
         );
         println!("{}", cube.flatten());
@@ -285,8 +283,8 @@ mod swap_axes_test {
         let cube = preprocess_cube(&mut cube, &input_size);
         assert_eq!(
             cube.dim(),
-            [1, 200, 128, 16].into(),
-            "Dims was not (1, 200, 128, 16)"
+            [200, 128, 16].into(),
+            "Dims was not (200, 128, 16)"
         );
         println!("{}", cube.flatten());
         assert_eq!(
@@ -295,5 +293,55 @@ mod swap_axes_test {
             "Second value was not 0.7615942"
         );
         println!("len={}", cube.flatten().as_slice().unwrap().len())
+    }
+
+    #[test]
+    fn test_data() {
+        println!(
+            "{}",
+            env!("CARGO_MANIFEST_DIR").to_owned() + "/src/testdata/before_radar.txt"
+        );
+        let file =
+            File::open(env!("CARGO_MANIFEST_DIR").to_owned() + "/src/testdata/before_radar.txt")
+                .unwrap();
+        let reader = BufReader::new(file);
+        let flat_cube: Vec<f32> = reader
+            .lines()
+            .map(|s| s.unwrap().parse().unwrap())
+            .collect();
+        let mut cube = Array::from_shape_vec([2, 200, 4, 256 / 2, 2], flat_cube).unwrap();
+        let input_size = [1, 200, 128, 16];
+        let cube = preprocess_cube(&mut cube, &input_size);
+        assert_eq!(
+            cube.dim(),
+            [200, 128, 16].into(),
+            "Dims was not (200, 128, 16)"
+        );
+
+        let file =
+            File::open(env!("CARGO_MANIFEST_DIR").to_owned() + "/src/testdata/after_radar.txt")
+                .unwrap();
+        let reader = BufReader::new(file);
+        let flat_output: Vec<f32> = reader
+            .lines()
+            .map(|s| s.unwrap().parse().unwrap())
+            .collect();
+        let flat_out: Vec<f32> = flat_output.iter().map(|v| *v).collect();
+
+        let flat = cube.flatten();
+        let flat_cube: Vec<f32> = flat.as_slice().unwrap().iter().map(|v| *v).collect();
+        assert!(
+            vec_compare(&flat_cube, &flat_out),
+            "Output not equal:\nRust: {:?}\nNump: {:?}",
+            flat_cube,
+            flat_out
+        );
+    }
+
+    fn vec_compare(va: &[f32], vb: &[f32]) -> bool {
+        (va.len() == vb.len()) &&  // zip stops at the shortest
+     va.iter()
+       .zip(vb)
+       .all(|(a,b)| *a-*b < 0.0001)
     }
 }
