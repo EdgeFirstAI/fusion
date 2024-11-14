@@ -6,6 +6,7 @@ use edgefirst_schemas::{
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
     std_msgs::Header,
 };
+use fusion_model::spawn_fusion_model_thread;
 use log::{error, info, trace};
 use setup::Args;
 use std::{
@@ -15,10 +16,17 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
+use tracker::ByteTrack;
+use vaal::VAALBox;
+#[cfg(feature = "model_output")]
+use zenoh::prelude::sync::*;
 use zenoh::{config::Config, prelude::r#async::*};
 
 use ndarray::{self, Array2};
+mod fusion_model;
+mod kalman;
 mod setup;
+mod tracker;
 
 struct ParsedPoint {
     fields: HashMap<String, f64>,
@@ -417,6 +425,7 @@ struct Bin {
     last_masked: u128,
     first_marked: u128,
 }
+type Grid = (Vec<Vec<bool>>, u64);
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
@@ -445,7 +454,7 @@ async fn main() {
     .into_arc();
     info!("Opened Zenoh session");
 
-    let info: Arc<Mutex<Option<CameraInfo>>> = Arc::new(Mutex::new(None));
+    let info = Arc::new(Mutex::new(None));
     let info_clone = info.clone();
     let _info_sub = session
         .declare_subscriber(args.info_topic.clone())
@@ -467,7 +476,7 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let mask: Arc<Mutex<Option<Mask>>> = Arc::new(Mutex::new(None));
+    let mask = Arc::new(Mutex::new(None));
     let mask_clone = mask.clone();
     let _mask_sub = session
         .declare_subscriber(args.mask_topic.clone())
@@ -504,6 +513,9 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh publisher");
 
+    let grid: Arc<Mutex<Option<Grid>>> = Arc::new(Mutex::new(None));
+    spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
+
     let mut zstd_decomp = zstd::bulk::Decompressor::new().unwrap();
     let mut bins = Vec::new();
     let mut frame_index = 0;
@@ -524,6 +536,7 @@ async fn main() {
         i += args.angle_bin_width;
     }
 
+    let mut tracker = ByteTrack::new();
     loop {
         let msgs = radar_sub.drain();
         let s = match msgs.last() {
@@ -562,111 +575,68 @@ async fn main() {
                 count: 1,
             },
         );
-
-        // get mask data
-        let guard = block_on(mask.lock());
-        let mask_msg = match guard.as_ref() {
-            Some(v) => v,
-            None => {
-                continue;
-            }
-        };
-
-        // this holds the memory if we need to decompress the mask
-        let mut mask_mem = None;
-
-        let mask_width = mask_msg.width as usize;
-        let mask_height = mask_msg.height as usize;
-        // let mask_length = mask_msg.length as usize;
-        let mask = if mask_msg.encoding == "zstd" {
-            // accepts a maximum of 32 classes
-            let m = mask_mem.insert(
-                zstd_decomp
-                    .decompress(&mask_msg.mask, mask_width * mask_height * 32)
-                    .unwrap(),
-            );
-            drop(guard);
-            m
-        } else {
-            &mask_msg.mask
-        };
-        let mask_classes = mask.len() as f32 / mask_width as f32 / mask_height as f32;
-        let mask_classes = mask_classes.round() as usize;
-        let (mut cam_mtx, cam_width, cam_height) = match block_on(info.lock()).as_ref() {
-            Some(v) => (v.k, v.width as f64, v.height as f64),
-            None => {
-                continue;
-            }
-        };
-
-        // create normalized camera matrix
-        cam_mtx[0] /= cam_width;
-        cam_mtx[1] /= cam_width;
-        cam_mtx[2] /= cam_width;
-        cam_mtx[3] /= cam_height;
-        cam_mtx[4] /= cam_height;
-        cam_mtx[5] /= cam_height;
-
-        // project points onto mask
-        let point_proj = project_point(&points, &cam_mtx, &[0.0, 0.0, 0.0]);
-        for i in 0..points.len() {
-            points[i].fields.insert("class".to_string(), 0.0);
-            let mask_coord = (
-                ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
-                ((1.0 - point_proj[i].1) * mask_height as f64).round() as i64,
-            );
-
-            // first do the center of the point, then 8 points around circumference
-            // negative -45 represetns the center
-            for angle in (-45..360).step_by(45) {
-                let range = if angle < 0 {
-                    0.0
-                } else {
-                    mask_width.max(mask_height) as f64 * 0.02
-                };
-                let x = mask_coord.0 + (range * (angle as f64).to_radians().sin()) as i64;
-                let y = mask_coord.1 + (range * (angle as f64).to_radians().cos()) as i64;
-                if x < 0 || x >= mask_width as i64 {
-                    continue;
-                }
-                if y < 0 || y >= mask_height as i64 {
-                    continue;
-                }
-                let start = y as usize * mask_width * mask_classes + x as usize * mask_classes;
-                let end = start + mask_classes;
-                let scores = &mask[start..end];
-                let mut max = 0;
-                let mut argmax = 0;
-                for (j, val) in scores.iter().enumerate() {
-                    if *val > max {
-                        max = *val;
-                        argmax = j;
-                    }
-                }
-                if argmax != 0 {
-                    points[i]
-                        .fields
-                        .insert(CLASS_FIELD.to_string(), argmax as f64);
-                    break;
-                }
-            }
-        }
-
-        // filter occlusiosn
         points.sort_by(|p, q| p.range.total_cmp(&q.range));
+
+        let mut mask_only = classify_points_mask_proj(&mask, &info, &points, &mut zstd_decomp);
+
+        // filter occlusions
         for i in 0..points.len() {
-            if points[i].fields["class"] <= 0.0 {
+            if mask_only[i] == 0 {
                 continue;
             }
             for j in (i + 1)..points.len() {
                 if (points[j].angle - points[i].angle).abs() < args.occ_angle_limit
                     && points[j].range - points[i].range > args.occ_range_limit
                 {
-                    points[j].fields.insert("class".to_string(), 0.0);
+                    mask_only[j] = 0;
                 }
             }
         }
 
+        let radar_only = if args.track {
+            grid_points_radar_tracked(
+                &grid,
+                &points,
+                &mut tracker,
+                &args,
+                #[cfg(feature = "model_output")]
+                session.clone(),
+            )
+        } else {
+            grid_points_radar(&grid, &points, &args)
+        };
+
+        for i in 0..points.len() {
+            let new_class = if radar_only[i] > 0 || mask_only[i] > 0 {
+                radar_only[i] + mask_only[i]
+            } else {
+                0
+            };
+            points[i]
+                .fields
+                .insert("class".to_string(), new_class as f64);
+        }
+
+        #[cfg(feature = "model_output")]
+        {
+            for i in 0..points.len() {
+                let new_class = if radar_only[i] > 0 { radar_only[i] } else { 0 };
+                points[i]
+                    .fields
+                    .insert("radar_class".to_string(), new_class as f64);
+            }
+            // Add a field to the end of the point fields
+            insert_field(
+                &mut pcd,
+                PointField {
+                    name: "radar_class".to_string(),
+                    offset: 0, // offset is calculated by the insert field function
+                    datatype: point_field::FLOAT32,
+                    count: 1,
+                },
+            );
+        }
+        // add_grid_as_points(&grid, &mut points, &args);
         let mut has_cluster_id = false;
         // points with the same cluster_id get the same class
         let mut cluster_ids = HashMap::new();
@@ -694,8 +664,14 @@ async fn main() {
                 classes.push(class)
             }
 
-            let class = if let Some(mode) = mode_slice(classes.as_slice()) {
-                *mode
+            // let class = if let Some(mode) = mode_slice(classes.as_slice()) {
+            //     *mode
+            // } else {
+            //     0
+            // };
+
+            let class = if let Some(max) = max_slice(classes.as_slice()) {
+                *max
             } else {
                 0
             };
@@ -707,6 +683,7 @@ async fn main() {
             }
         }
 
+        // add_grid_as_points(&grid, &mut points, &args);
         let data = serialize_pcd(&points, &pcd.fields);
         pcd.row_step = data.len() as u32;
         pcd.data = data;
@@ -738,6 +715,309 @@ async fn main() {
         frame_index += 1;
     }
 }
+
+fn classify_points_mask_proj(
+    mask: &Arc<Mutex<Option<Mask>>>,
+    info: &Arc<Mutex<Option<CameraInfo>>>,
+    points: &[ParsedPoint],
+    zstd_decomp: &mut zstd::bulk::Decompressor<'_>,
+) -> Vec<usize> {
+    let mut class = vec![0; points.len()];
+    // get mask data
+    let guard = block_on(mask.lock());
+    let mask_msg = match guard.as_ref() {
+        Some(v) => v,
+        None => {
+            return class;
+        }
+    };
+
+    // this holds the memory if we need to decompress the mask
+    let mut mask_mem = None;
+
+    let mask_width = mask_msg.width as usize;
+    let mask_height = mask_msg.height as usize;
+    // let mask_length = mask_msg.length as usize;
+    let mask = if mask_msg.encoding == "zstd" {
+        // accepts a maximum of 32 classes
+        let m = mask_mem.insert(
+            zstd_decomp
+                .decompress(&mask_msg.mask, mask_width * mask_height * 32)
+                .unwrap(),
+        );
+        drop(guard);
+        m
+    } else {
+        &mask_msg.mask
+    };
+    let mask_classes = mask.len() as f32 / mask_width as f32 / mask_height as f32;
+    let mask_classes = mask_classes.round() as usize;
+    let (mut cam_mtx, cam_width, cam_height) = match block_on(info.lock()).as_ref() {
+        Some(v) => (v.k, v.width as f64, v.height as f64),
+        None => {
+            return class;
+        }
+    };
+
+    // create normalized camera matrix
+    cam_mtx[0] /= cam_width;
+    cam_mtx[1] /= cam_width;
+    cam_mtx[2] /= cam_width;
+    cam_mtx[3] /= cam_height;
+    cam_mtx[4] /= cam_height;
+    cam_mtx[5] /= cam_height;
+
+    // project points onto mask
+    let point_proj = project_point(points, &cam_mtx, &[0.0, 0.0, 0.0]);
+    for i in 0..points.len() {
+        let mask_coord = (
+            ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
+            ((1.0 - point_proj[i].1) * mask_height as f64).round() as i64,
+        );
+
+        // first do the center of the point, then 8 points around circumference
+        // negative -45 represetns the center
+        for angle in (-45..360).step_by(45) {
+            let range = if angle < 0 {
+                0.0
+            } else {
+                mask_width.max(mask_height) as f64 * 0.02
+            };
+            let x = mask_coord.0 + (range * (angle as f64).to_radians().sin()) as i64;
+            let y = mask_coord.1 + (range * (angle as f64).to_radians().cos()) as i64;
+            if x < 0 || x >= mask_width as i64 {
+                continue;
+            }
+            if y < 0 || y >= mask_height as i64 {
+                continue;
+            }
+            let start = y as usize * mask_width * mask_classes + x as usize * mask_classes;
+            let end = start + mask_classes;
+            let scores = &mask[start..end];
+            let mut max = 0;
+            let mut argmax = 0;
+            for (j, val) in scores.iter().enumerate() {
+                if *val > max {
+                    max = *val;
+                    argmax = j;
+                }
+            }
+            if argmax != 0 {
+                class[i] = argmax;
+                break;
+            }
+        }
+    }
+    class
+}
+
+fn grid_points_radar_tracked(
+    grid: &Arc<Mutex<Option<Grid>>>,
+    points: &[ParsedPoint],
+    tracker: &mut ByteTrack,
+    args: &Args,
+    #[cfg(feature = "model_output")] session: Arc<Session>,
+) -> Vec<usize> {
+    let mut class = vec![0; points.len()];
+    if points.is_empty() {
+        return class;
+    }
+    let guard = block_on(grid.lock());
+    if guard.is_none() {
+        return class;
+    }
+    let (g, timestamp) = guard.as_ref().unwrap();
+    let mut boxes = Vec::new();
+    for (i, g_i) in g.iter().enumerate() {
+        for (j, g_ij) in g_i.iter().enumerate() {
+            if !g_ij {
+                continue;
+            }
+            boxes.push(VAALBox {
+                xmin: j as f32 - 1.0,
+                ymin: i as f32 - 1.0,
+                xmax: j as f32 + 1.0,
+                ymax: i as f32 + 1.0,
+                score: 1.0,
+                label: 1,
+            });
+        }
+    }
+    if *timestamp > tracker.timestamp {
+        tracker.update(args, &mut boxes, *timestamp);
+    }
+
+    #[cfg(feature = "model_output")]
+    {
+        let height = g.len();
+        let width = g[0].len();
+        let mut tracked_g = vec![vec![0.0; width]; g.len()];
+        for tracklet in tracker.get_tracklets() {
+            if tracklet.count < 3 {
+                continue;
+            }
+            let pred = tracklet.get_predicted_location();
+            let i = ((pred.ymin + pred.ymax) / 2.0).round() as i32;
+            let j = ((pred.xmin + pred.xmax) / 2.0).round() as i32;
+            if i < 0 || i >= height as i32 {
+                continue;
+            }
+            if j < 0 || j >= width as i32 {
+                continue;
+            }
+            tracked_g[i as usize][j as usize] = 1.0
+        }
+
+        let mask = tracked_g
+            .iter()
+            .flatten()
+            .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
+            .collect();
+        let msg = Mask {
+            height: height as u32,
+            width: width as u32,
+            length: 1,
+            encoding: "".to_string(),
+            mask,
+        };
+        let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
+            Encoding::WithSuffix(
+                KnownEncoding::AppOctetStream,
+                "edgefirst_msgs/msg/Mask".into(),
+            ),
+        );
+        let _ = session.put("rt/fusion/mask_test_tracked", val).res_sync();
+    }
+
+    for tracklet in tracker.get_tracklets() {
+        if tracklet.count < 2 {
+            continue;
+        }
+        let pred = tracklet.get_predicted_location();
+        let i = (pred.ymin + pred.ymax) / 2.0;
+        let j = (pred.xmin + pred.xmax) / 2.0;
+
+        // center of grid
+        let (x, y) = if args.model_polar {
+            let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
+            let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+            let x = (-angle).to_radians().cos() * range;
+            let y = (-angle).to_radians().sin() * range;
+            (x, y)
+        } else {
+            let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+            let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
+                + args.range_bin_width * (j as f64 + 0.5));
+            (x, y)
+        };
+
+        // find closest point
+        let mut min_dist = 9999999.9;
+        let mut min_point_ind = 0;
+        for (ind, p) in points.iter().enumerate() {
+            let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
+            if dist < min_dist {
+                min_dist = dist;
+                min_point_ind = ind;
+            }
+        }
+        class[min_point_ind] = 1;
+    }
+
+    class
+}
+
+fn grid_points_radar(
+    grid: &Arc<Mutex<Option<Grid>>>,
+    points: &[ParsedPoint],
+    args: &Args,
+) -> Vec<usize> {
+    let mut class = vec![0; points.len()];
+    if points.is_empty() {
+        return class;
+    }
+    let guard = block_on(grid.lock());
+    if guard.is_none() {
+        return class;
+    }
+    let (g, _) = guard.as_ref().unwrap();
+    for (i, g_i) in g.iter().enumerate() {
+        for (j, g_ij) in g_i.iter().enumerate() {
+            if !g_ij {
+                continue;
+            }
+            // center of grid
+            let (x, y) = if args.model_polar {
+                let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
+                let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+                let x = (-angle).to_radians().cos() * range;
+                let y = (-angle).to_radians().sin() * range;
+                (x, y)
+            } else {
+                let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
+                let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
+                    + args.range_bin_width * (j as f64 + 0.5));
+                (x, y)
+            };
+
+            // find closest point
+            let mut min_dist = 9999999.9;
+            let mut min_point_ind = 0;
+            for (ind, p) in points.iter().enumerate() {
+                let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
+                if dist < min_dist {
+                    min_dist = dist;
+                    min_point_ind = ind;
+                }
+            }
+            class[min_point_ind] = 1;
+        }
+    }
+    class
+}
+
+// fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut
+// Vec<ParsedPoint>, args: &Args) {     let guard = block_on(grid.lock());
+//     if guard.is_none() {
+//         return;
+//     }
+//     let (g, _) = guard.as_ref().unwrap();
+//     for i in 0..g.len() {
+//         for j in 0..g[i].len() {
+//             if !g[i][j] {
+//                 continue;
+//             }
+//             // center of grid
+//             let (x, y) = if args.model_polar {
+//                 let angle = args.angle_bin_limit[0] + args.angle_bin_width *
+// (j as f64 + 0.5);                 let range = args.range_bin_limit[0] +
+// args.range_bin_width * (i as f64 + 0.5);                 let x =
+// (-angle).to_radians().cos() * range;                 let y =
+// (-angle).to_radians().sin() * range;                 (x, y)
+//             } else {
+//                 let x = args.range_bin_limit[0] + args.range_bin_width * (i
+// as f64 + 0.5);                 let y = -(args.range_bin_limit[0] -
+// args.range_bin_limit[1] / 2.0
+//                     + args.range_bin_width * (j as f64 + 0.5));
+//                 (x, y)
+//             };
+//             let mut p = ParsedPoint {
+//                 fields: HashMap::new(),
+//                 angle: 0.0,
+//                 range: 0.0,
+//             };
+//             p.fields.insert("x".to_string(), x);
+//             p.fields.insert("y".to_string(), y);
+//             p.fields.insert("z".to_string(), 0.0);
+//             p.fields.insert("speed".to_string(), 0.0);
+//             p.fields.insert("class".to_string(), 10.0);
+//             p.fields.insert("count".to_string(), 1.0);
+//             p.fields.insert("cluster_id".to_string(), 0.0);
+//             p.fields.insert("radar_class".to_string(), 10.0);
+//             points.push(p);
+//         }
+//     }
+// }
 
 // Return the centroid of clusters that have class_id. All points in a class
 // should have the same class_id
@@ -999,4 +1279,14 @@ fn mode_slice<T: Ord + Hash>(numbers: &[T]) -> Option<&T> {
         *count += 1;
         *count
     })
+}
+
+fn max_slice<T: Ord>(numbers: &[T]) -> Option<&T> {
+    match argmax_slice(numbers) {
+        Some(v) => Some(v.1),
+        None => None,
+    }
+}
+fn argmax_slice<T: Ord>(numbers: &[T]) -> Option<(usize, &T)> {
+    numbers.iter().enumerate().max_by(|(_, a), (_, b)| a.cmp(b))
 }

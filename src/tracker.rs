@@ -1,0 +1,351 @@
+use crate::{kalman::ConstantVelocityXYAHModel2, setup::Args};
+use lapjv::{lapjv, Matrix};
+use log::{debug, trace};
+use nalgebra::{Dyn, OMatrix, U4};
+use uuid::Uuid;
+use vaal::VAALBox;
+
+#[allow(dead_code)]
+pub struct ByteTrack {
+    // tracklets;
+    pub tracklets: Vec<Tracklet>,
+    pub lost_tracks: Vec<Tracklet>,
+    pub removed_tracks: Vec<Tracklet>,
+    pub frame_count: i32,
+    pub timestamp: u64,
+}
+#[derive(Debug, Clone)]
+pub struct Tracklet {
+    pub id: Uuid,
+    pub prev_boxes: vaal::VAALBox,
+    pub filter: ConstantVelocityXYAHModel2<f32>,
+    pub expiry: u64,
+    pub count: i32,
+    pub created: u64,
+}
+
+impl Tracklet {
+    fn update(&mut self, vaalbox: &VAALBox, s: &Args, ts: u64) {
+        self.count += 1;
+        self.expiry = ts + (s.track_extra_lifespan * 1e9) as u64;
+        self.prev_boxes = *vaalbox;
+        self.filter.update(&vaalbox_to_xyah(vaalbox));
+    }
+
+    pub fn get_predicted_location(&self) -> VAALBox {
+        let predicted_xyah = self.filter.mean.as_slice();
+        let mut expected = VAALBox {
+            xmin: 0.0,
+            xmax: 0.0,
+            ymin: 0.0,
+            ymax: 0.0,
+            score: self.prev_boxes.score,
+            label: self.prev_boxes.label,
+        };
+        xyah_to_vaalbox(predicted_xyah, &mut expected);
+        expected
+    }
+}
+
+fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
+    let x = (vaal_box.xmax + vaal_box.xmin) / 2.0;
+    let y = (vaal_box.ymax + vaal_box.ymin) / 2.0;
+    let w = (vaal_box.xmax - vaal_box.xmin).max(EPSILON);
+    let h = (vaal_box.ymax - vaal_box.ymin).max(EPSILON);
+    let a = w / h;
+
+    [x, y, a, h]
+}
+
+fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
+    if xyah.len() < 4 {
+        return;
+    }
+    let x_ = xyah[0];
+    let y_ = xyah[1];
+    let a_ = xyah[2];
+    let h_ = xyah[3];
+    let w_ = h_ * a_;
+    vaal_box.xmin = x_ - w_ / 2.0;
+    vaal_box.xmax = x_ + w_ / 2.0;
+    vaal_box.ymin = y_ - h_ / 2.0;
+    vaal_box.ymax = y_ + h_ / 2.0;
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct TrackInfo {
+    pub uuid: Uuid,
+    pub count: i32,
+    pub created: u64,
+}
+const INVALID_MATCH: f32 = 1000000.0;
+const EPSILON: f32 = 0.00001;
+
+fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
+    let intersection = (box1.xmax.min(box2.xmax) - box1.xmin.max(box2.xmin)).max(0.0)
+        * (box1.ymax.min(box2.ymax) - box1.ymin.max(box2.ymin)).max(0.0);
+
+    if intersection <= EPSILON {
+        return 0.0;
+    }
+
+    let union = (box1.xmax - box1.xmin) * (box1.ymax - box1.ymin)
+        + (box2.xmax - box2.xmin) * (box2.ymax - box2.ymin)
+        - intersection;
+
+    if union <= EPSILON {
+        return 0.0;
+    }
+
+    intersection / union
+}
+
+fn box_cost(
+    track: &Tracklet,
+    new_box: &VAALBox,
+    distance: f32,
+    score_threshold: f32,
+    iou_threshold: f32,
+) -> f32 {
+    let _ = distance;
+
+    if new_box.score < score_threshold {
+        return INVALID_MATCH;
+    }
+
+    // use iou between predicted box and real box:
+    let predicted_xyah = track.filter.mean.as_slice();
+    let mut expected = VAALBox {
+        xmin: 0.0,
+        xmax: 0.0,
+        ymin: 0.0,
+        ymax: 0.0,
+        score: 0.0,
+        label: 0,
+    };
+    xyah_to_vaalbox(predicted_xyah, &mut expected);
+    let iou = iou(&expected, new_box);
+    if iou < iou_threshold {
+        return INVALID_MATCH;
+    }
+    (1.5 - new_box.score) + (1.5 - iou)
+}
+
+impl ByteTrack {
+    pub fn new() -> ByteTrack {
+        ByteTrack {
+            tracklets: vec![],
+            lost_tracks: vec![],
+            removed_tracks: vec![],
+            frame_count: 0,
+            timestamp: 0,
+        }
+    }
+
+    fn compute_costs(
+        &mut self,
+        boxes: &[VAALBox],
+        score_threshold: f32,
+        iou_threshold: f32,
+        box_filter: &[bool],
+        track_filter: &[bool],
+    ) -> Matrix<f32> {
+        // costs matrix must be square
+        let dims = boxes.len().max(self.tracklets.len());
+        let mut measurements = OMatrix::<f32, Dyn, U4>::from_element(boxes.len(), 0.0);
+        for (i, mut row) in measurements.row_iter_mut().enumerate() {
+            row.copy_from_slice(&vaalbox_to_xyah(&boxes[i]));
+        }
+
+        // TODO: use matrix math for IOU, should speed up computation, and store it in
+        // distances
+
+        Matrix::from_shape_fn((dims, dims), |(x, y)| {
+            if x < boxes.len() && y < self.tracklets.len() {
+                if box_filter[x] || track_filter[y] {
+                    INVALID_MATCH
+                } else {
+                    box_cost(
+                        &self.tracklets[y],
+                        &boxes[x],
+                        // distances[(x, y)],
+                        0.0,
+                        score_threshold,
+                        iou_threshold,
+                    )
+                }
+            } else {
+                0.0
+            }
+        })
+    }
+
+    pub fn update(
+        &mut self,
+        s: &Args,
+        boxes: &mut [VAALBox],
+        timestamp: u64,
+    ) -> Vec<Option<TrackInfo>> {
+        self.frame_count += 1;
+        let high_conf_ind = (0..boxes.len())
+            .filter(|x| boxes[*x].score >= s.track_high_conf)
+            .collect::<Vec<usize>>();
+        let mut matched = vec![false; boxes.len()];
+        let mut tracked = vec![false; self.tracklets.len()];
+        let mut matched_info = vec![None; boxes.len()];
+        if !self.tracklets.is_empty() {
+            for track in &mut self.tracklets {
+                track.filter.predict();
+            }
+            let costs =
+                self.compute_costs(boxes, s.track_high_conf, s.track_iou, &matched, &tracked);
+            // With m boxes and n tracks, we compute a m x n array of costs for
+            // association cost is based on distance computed by the Kalman Filter
+            // Then we use lapjv (linear assignment) to minimize the cost of
+            // matching tracks to boxes
+            // The linear assignment will still assign some tracks to out of threshold
+            // scores/filtered tracks/filtered boxes But it will try to minimize
+            // the number of "invalid" assignments, since those are just very high costs
+            let ans = lapjv(&costs).unwrap();
+            for i in 0..ans.0.len() {
+                let x = ans.0[i];
+                if i < boxes.len() && x < self.tracklets.len() {
+                    // We need to filter out those "invalid" assignments
+                    if costs[(i, ans.0[i])] >= INVALID_MATCH {
+                        continue;
+                    }
+                    matched[i] = true;
+                    matched_info[i] = Some(TrackInfo {
+                        uuid: self.tracklets[x].id,
+                        count: self.tracklets[x].count,
+                        created: self.tracklets[x].created,
+                    });
+                    assert!(!tracked[x]);
+                    tracked[x] = true;
+
+                    let observed_box = boxes[i];
+
+                    let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
+                    xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
+                    self.tracklets[x].update(&observed_box, s, timestamp);
+                }
+            }
+        }
+
+        // try to match unmatched tracklets to low score detections as well
+        if !self.tracklets.is_empty() {
+            let costs = self.compute_costs(boxes, 0.0, s.track_iou, &matched, &tracked);
+            let ans = lapjv(&costs).unwrap();
+            for i in 0..ans.0.len() {
+                let x = ans.0[i];
+                if i < boxes.len() && x < self.tracklets.len() {
+                    // matched tracks
+                    // We need to filter out those "invalid" assignments
+                    if matched[i] || tracked[x] || (costs[(i, x)] >= INVALID_MATCH) {
+                        continue;
+                    }
+                    matched[i] = true;
+                    matched_info[i] = Some(TrackInfo {
+                        uuid: self.tracklets[x].id,
+                        count: self.tracklets[x].count,
+                        created: self.tracklets[x].created,
+                    });
+                    trace!(
+                        "Cost: {} Box: {:#?} UUID: {} Mean: {}",
+                        costs[(i, x)],
+                        boxes[i],
+                        self.tracklets[x].id,
+                        self.tracklets[x].filter.mean
+                    );
+                    assert!(!tracked[x]);
+                    tracked[x] = true;
+                    let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
+                    let x_ = predicted_xyah[0];
+                    let y_ = predicted_xyah[1];
+                    let a_ = predicted_xyah[2];
+                    let h_ = predicted_xyah[3];
+
+                    self.tracklets[x].update(&boxes[i], s, timestamp);
+
+                    let w_ = h_ * a_;
+                    boxes[i].xmin = x_ - w_ / 2.0;
+                    boxes[i].xmax = x_ + w_ / 2.0;
+                    boxes[i].ymin = y_ - h_ / 2.0;
+                    boxes[i].ymax = y_ + h_ / 2.0;
+                }
+            }
+        }
+
+        // move tracklets that don't have lifespan to the removed tracklets
+        // must iterate from the back
+        for i in (0..self.tracklets.len()).rev() {
+            if self.tracklets[i].expiry < timestamp {
+                debug!("Tracklet removed: {:?}", self.tracklets[i].id);
+                let _ = self.tracklets.swap_remove(i);
+            }
+        }
+
+        // unmatched high score boxes are then used to make new tracks
+        for i in high_conf_ind {
+            if !matched[i] {
+                let id = Uuid::new_v4();
+                matched_info[i] = Some(TrackInfo {
+                    uuid: id,
+                    count: 1,
+                    created: timestamp,
+                });
+                self.tracklets.push(Tracklet {
+                    id,
+                    prev_boxes: boxes[i],
+                    filter: ConstantVelocityXYAHModel2::new(
+                        &vaalbox_to_xyah(&boxes[i]),
+                        s.track_update,
+                    ),
+                    expiry: timestamp + (s.track_extra_lifespan * 1e9) as u64,
+                    count: 1,
+                    created: timestamp,
+                });
+            }
+        }
+        matched_info
+    }
+
+    pub fn get_tracklets(&self) -> &Vec<Tracklet> {
+        &self.tracklets
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use vaal::VAALBox;
+
+    use super::{vaalbox_to_xyah, xyah_to_vaalbox};
+
+    #[test]
+    fn filter() {
+        let box1 = VAALBox {
+            xmin: 0.02135,
+            xmax: 0.12438,
+            ymin: 0.0134,
+            ymax: 0.691,
+            score: 0.0,
+            label: 0,
+        };
+        let xyah = vaalbox_to_xyah(&box1);
+        let mut box2 = VAALBox {
+            xmin: 0.0,
+            xmax: 0.0,
+            ymin: 0.0,
+            ymax: 0.0,
+            score: 0.0,
+            label: 0,
+        };
+        xyah_to_vaalbox(&xyah, &mut box2);
+
+        assert!((box1.xmax - box2.xmax).abs() < f32::EPSILON);
+        assert!((box1.ymax - box2.ymax).abs() < f32::EPSILON);
+        assert!((box1.xmin - box2.xmin).abs() < f32::EPSILON);
+        assert!((box1.ymin - box2.ymin).abs() < f32::EPSILON);
+    }
+}
