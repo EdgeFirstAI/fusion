@@ -919,13 +919,36 @@ fn grid_points_radar_tracked(
             let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
             let x = (-angle).to_radians().cos() * range;
             let y = (-angle).to_radians().sin() * range;
-            (x - args.occ_range_limit / 2.0, y)
+            (x, y)
         } else {
             let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
             let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
                 + args.range_bin_width * (j as f64 + 0.5));
-            (x - args.occ_range_limit / 2.0, y)
+            (x, y)
         };
+        let mut points_in_grid = Vec::new();
+        // find all points in grid
+        for (ind, p) in points.iter().enumerate() {
+            if p.fields["x"] < x - args.range_bin_width * 0.5 {
+                continue;
+            }
+            if x + args.range_bin_width * 0.5 < p.fields["x"] {
+                continue;
+            }
+            if p.fields["y"] < y - args.range_bin_width * 0.5 {
+                continue;
+            }
+            if y + args.range_bin_width * 0.5 < p.fields["y"] {
+                continue;
+            }
+            points_in_grid.push(ind);
+        }
+        if points_in_grid.len() > 0 {
+            for ind in points_in_grid {
+                class[ind] = 1;
+            }
+            return class;
+        }
 
         // find closest point
         let mut min_dist = 9999999.9;
