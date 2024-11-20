@@ -545,7 +545,7 @@ async fn main() {
     let mut point_tracker = ByteTrack::new_with_settings(ByteTrackSettings {
         track_high_conf: 0.5,
         track_extra_lifespan: 0.5,
-        track_iou: 0.1,
+        track_iou: 0.01,
         track_update: 0.5,
     });
     loop {
@@ -919,12 +919,12 @@ fn grid_points_radar_tracked(
             let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
             let x = (-angle).to_radians().cos() * range;
             let y = (-angle).to_radians().sin() * range;
-            (x, y)
+            (x - args.occ_range_limit / 2.0, y)
         } else {
             let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
             let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
                 + args.range_bin_width * (j as f64 + 0.5));
-            (x, y)
+            (x - args.occ_range_limit / 2.0, y)
         };
 
         // find closest point
@@ -937,7 +937,9 @@ fn grid_points_radar_tracked(
                 min_point_ind = ind;
             }
         }
-        class[min_point_ind] = 1;
+        if min_dist < 2.0 {
+            class[min_point_ind] = 1;
+        }
     }
 
     class
@@ -1083,10 +1085,10 @@ fn get_occupied_cluster(
         .iter()
         // .filter(|p| p.fields["class"] > 0.0)
         .map(|p| VAALBox {
-            xmin: p.fields["x"] as f32 - 0.3,
-            xmax: p.fields["x"] as f32 + 0.3,
-            ymin: p.fields["y"] as f32 - 0.3,
-            ymax: p.fields["y"] as f32 + 0.3,
+            xmin: p.fields["x"] as f32 - 0.5,
+            xmax: p.fields["x"] as f32 + 0.5,
+            ymin: p.fields["y"] as f32 - 0.5,
+            ymax: p.fields["y"] as f32 + 0.5,
             score: if p.fields["class"] > 0.0 { 1.0 } else { 0.3 },
             label: p.fields["class"].round() as i32,
         })

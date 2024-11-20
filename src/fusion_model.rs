@@ -221,13 +221,13 @@ fn preprocess_cube(
     cube.swap_axes(2, 3);
     // (1, 3, 0, 2, 4)
 
-    let cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap();
-    // cube.par_mapv_inplace(|v| v.tanh());
-    let mut cube = cube.signum() * (cube.abs() + 1.0).log(E) / 10.0;
+    let mut cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap();
+    cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
+    // let mut cube = (cube.abs() + 1.0).log(E) * cube.signum();
 
     if input_size.len() != 4 {
         error!("Model input size was: {:?}. Expected 4 dims", input_size);
-        return cube;
+        return cube.to_owned();
     }
     if input_size[1] > cube.dim().0 {
         error!(
@@ -235,10 +235,10 @@ fn preprocess_cube(
             input_size[1],
             cube.dim().0
         );
-        return cube;
+        return cube.to_owned();
     }
     cube = cube.slice_move(s![..input_size[1], .., ..]);
-    cube
+    cube.to_owned()
 }
 
 #[cfg(test)]
