@@ -356,12 +356,7 @@ impl ByteTrack {
     }
 
     pub fn get_tracklet_from_uuid(&self, uuid: &Uuid) -> Option<&Tracklet> {
-        for t in self.tracklets.iter() {
-            if t.id == *uuid {
-                return Some(t);
-            }
-        }
-        None
+        self.tracklets.iter().find(|t| t.id == *uuid)
     }
 }
 
