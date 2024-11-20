@@ -1,10 +1,18 @@
-use crate::{kalman::ConstantVelocityXYAHModel2, setup::Args};
+use std::collections::HashMap;
+
+use crate::kalman::ConstantVelocityXYAHModel2;
 use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
 use vaal::VAALBox;
 
+pub struct ByteTrackSettings {
+    pub track_high_conf: f32,
+    pub track_extra_lifespan: f32,
+    pub track_iou: f32,
+    pub track_update: f32,
+}
 #[allow(dead_code)]
 pub struct ByteTrack {
     // tracklets;
@@ -13,6 +21,8 @@ pub struct ByteTrack {
     pub removed_tracks: Vec<Tracklet>,
     pub frame_count: i32,
     pub timestamp: u64,
+    pub uuid_map: HashMap<Uuid, i32>,
+    pub settings: ByteTrackSettings,
 }
 #[derive(Debug, Clone)]
 pub struct Tracklet {
@@ -20,14 +30,20 @@ pub struct Tracklet {
     pub prev_boxes: vaal::VAALBox,
     pub filter: ConstantVelocityXYAHModel2<f32>,
     pub expiry: u64,
+    pub last_updated: u64,
+    pub last_updated_high_conf: u64,
     pub count: i32,
     pub created: u64,
 }
 
 impl Tracklet {
-    fn update(&mut self, vaalbox: &VAALBox, s: &Args, ts: u64) {
+    fn update(&mut self, vaalbox: &VAALBox, s: &ByteTrackSettings, ts: u64) {
         self.count += 1;
         self.expiry = ts + (s.track_extra_lifespan * 1e9) as u64;
+        self.last_updated = ts;
+        if vaalbox.score >= s.track_high_conf {
+            self.last_updated_high_conf = ts;
+        }
         self.prev_boxes = *vaalbox;
         self.filter.update(&vaalbox_to_xyah(vaalbox));
     }
@@ -140,6 +156,25 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
+            uuid_map: HashMap::new(),
+            settings: ByteTrackSettings {
+                track_extra_lifespan: 0.5,
+                track_high_conf: 0.5,
+                track_iou: 0.1,
+                track_update: 0.4,
+            },
+        }
+    }
+
+    pub fn new_with_settings(settings: ByteTrackSettings) -> ByteTrack {
+        ByteTrack {
+            tracklets: vec![],
+            lost_tracks: vec![],
+            removed_tracks: vec![],
+            frame_count: 0,
+            timestamp: 0,
+            uuid_map: HashMap::new(),
+            settings,
         }
     }
 
@@ -181,15 +216,10 @@ impl ByteTrack {
         })
     }
 
-    pub fn update(
-        &mut self,
-        s: &Args,
-        boxes: &mut [VAALBox],
-        timestamp: u64,
-    ) -> Vec<Option<TrackInfo>> {
+    pub fn update(&mut self, boxes: &mut [VAALBox], timestamp: u64) -> Vec<Option<TrackInfo>> {
         self.frame_count += 1;
         let high_conf_ind = (0..boxes.len())
-            .filter(|x| boxes[*x].score >= s.track_high_conf)
+            .filter(|x| boxes[*x].score >= self.settings.track_high_conf)
             .collect::<Vec<usize>>();
         let mut matched = vec![false; boxes.len()];
         let mut tracked = vec![false; self.tracklets.len()];
@@ -198,8 +228,13 @@ impl ByteTrack {
             for track in &mut self.tracklets {
                 track.filter.predict();
             }
-            let costs =
-                self.compute_costs(boxes, s.track_high_conf, s.track_iou, &matched, &tracked);
+            let costs = self.compute_costs(
+                boxes,
+                self.settings.track_high_conf,
+                self.settings.track_iou,
+                &matched,
+                &tracked,
+            );
             // With m boxes and n tracks, we compute a m x n array of costs for
             // association cost is based on distance computed by the Kalman Filter
             // Then we use lapjv (linear assignment) to minimize the cost of
@@ -228,14 +263,15 @@ impl ByteTrack {
 
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                     xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.tracklets[x].update(&observed_box, s, timestamp);
+                    self.uuid_map.insert(self.tracklets[x].id, boxes[i].label);
+                    self.tracklets[x].update(&observed_box, &self.settings, timestamp);
                 }
             }
         }
 
         // try to match unmatched tracklets to low score detections as well
         if !self.tracklets.is_empty() {
-            let costs = self.compute_costs(boxes, 0.0, s.track_iou, &matched, &tracked);
+            let costs = self.compute_costs(boxes, 0.0, self.settings.track_iou, &matched, &tracked);
             let ans = lapjv(&costs).unwrap();
             for i in 0..ans.0.len() {
                 let x = ans.0[i];
@@ -266,7 +302,7 @@ impl ByteTrack {
                     let a_ = predicted_xyah[2];
                     let h_ = predicted_xyah[3];
 
-                    self.tracklets[x].update(&boxes[i], s, timestamp);
+                    self.tracklets[x].update(&boxes[i], &self.settings, timestamp);
 
                     let w_ = h_ * a_;
                     boxes[i].xmin = x_ - w_ / 2.0;
@@ -282,6 +318,7 @@ impl ByteTrack {
         for i in (0..self.tracklets.len()).rev() {
             if self.tracklets[i].expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
+                self.uuid_map.remove_entry(&self.tracklets[i].id);
                 let _ = self.tracklets.swap_remove(i);
             }
         }
@@ -300,12 +337,15 @@ impl ByteTrack {
                     prev_boxes: boxes[i],
                     filter: ConstantVelocityXYAHModel2::new(
                         &vaalbox_to_xyah(&boxes[i]),
-                        s.track_update,
+                        self.settings.track_update,
                     ),
-                    expiry: timestamp + (s.track_extra_lifespan * 1e9) as u64,
+                    expiry: timestamp + (self.settings.track_extra_lifespan * 1e9) as u64,
+                    last_updated: timestamp,
+                    last_updated_high_conf: timestamp,
                     count: 1,
                     created: timestamp,
                 });
+                self.uuid_map.insert(id, boxes[i].label);
             }
         }
         matched_info
@@ -313,6 +353,15 @@ impl ByteTrack {
 
     pub fn get_tracklets(&self) -> &Vec<Tracklet> {
         &self.tracklets
+    }
+
+    pub fn get_tracklet_from_uuid(&self, uuid: &Uuid) -> Option<&Tracklet> {
+        for t in self.tracklets.iter() {
+            if t.id == *uuid {
+                return Some(t);
+            }
+        }
+        None
     }
 }
 

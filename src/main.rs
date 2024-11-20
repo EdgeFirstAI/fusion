@@ -16,7 +16,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use tracker::ByteTrack;
+use tracker::{ByteTrack, ByteTrackSettings};
 use vaal::VAALBox;
 #[cfg(feature = "model_output")]
 use zenoh::prelude::sync::*;
@@ -536,7 +536,18 @@ async fn main() {
         i += args.angle_bin_width;
     }
 
-    let mut tracker = ByteTrack::new();
+    let mut tracker = ByteTrack::new_with_settings(ByteTrackSettings {
+        track_high_conf: args.track_high_conf,
+        track_extra_lifespan: args.track_extra_lifespan,
+        track_iou: args.track_iou,
+        track_update: args.track_update,
+    });
+    let mut point_tracker = ByteTrack::new_with_settings(ByteTrackSettings {
+        track_high_conf: 0.5,
+        track_extra_lifespan: 0.5,
+        track_iou: 0.1,
+        track_update: 0.5,
+    });
     loop {
         let msgs = radar_sub.drain();
         let s = match msgs.last() {
@@ -608,7 +619,7 @@ async fn main() {
 
         for i in 0..points.len() {
             let new_class = if radar_only[i] > 0 || mask_only[i] > 0 {
-                radar_only[i] + mask_only[i]
+                radar_only[i].max(mask_only[i])
             } else {
                 0
             };
@@ -702,7 +713,12 @@ async fn main() {
         }
 
         let encoded = if has_cluster_id {
-            get_occupied_cluster(pcd.header.clone(), &points, &cluster_ids)
+            get_occupied_cluster(
+                pcd.header.clone(),
+                &points,
+                &cluster_ids,
+                &mut point_tracker,
+            )
         } else {
             get_occupied_no_cluster(pcd.header.clone(), &points, &mut bins, frame_index, &args)
         };
@@ -814,7 +830,7 @@ fn classify_points_mask_proj(
 fn grid_points_radar_tracked(
     grid: &Arc<Mutex<Option<Grid>>>,
     points: &[ParsedPoint],
-    tracker: &mut ByteTrack,
+    grid_tracker: &mut ByteTrack,
     args: &Args,
     #[cfg(feature = "model_output")] session: Arc<Session>,
 ) -> Vec<usize> {
@@ -843,8 +859,8 @@ fn grid_points_radar_tracked(
             });
         }
     }
-    if *timestamp > tracker.timestamp {
-        tracker.update(args, &mut boxes, *timestamp);
+    if *timestamp > grid_tracker.timestamp {
+        grid_tracker.update(&mut boxes, *timestamp);
     }
 
     #[cfg(feature = "model_output")]
@@ -852,7 +868,7 @@ fn grid_points_radar_tracked(
         let height = g.len();
         let width = g[0].len();
         let mut tracked_g = vec![vec![0.0; width]; g.len()];
-        for tracklet in tracker.get_tracklets() {
+        for tracklet in grid_tracker.get_tracklets() {
             if tracklet.count < 3 {
                 continue;
             }
@@ -889,7 +905,7 @@ fn grid_points_radar_tracked(
         let _ = session.put("rt/fusion/mask_test_tracked", val).res_sync();
     }
 
-    for tracklet in tracker.get_tracklets() {
+    for tracklet in grid_tracker.get_tracklets() {
         if tracklet.count < 2 {
             continue;
         }
@@ -1025,6 +1041,7 @@ fn get_occupied_cluster(
     header: Header,
     points: &[ParsedPoint],
     cluster_ids: &HashMap<i32, Vec<usize>>,
+    point_tracker: &mut ByteTrack,
 ) -> Value {
     let mut centroid_points = Vec::new();
     for id in cluster_ids {
@@ -1057,7 +1074,90 @@ fn get_occupied_cluster(
         p.fields.insert("speed".to_string(), xyzv[3]);
         p.fields.insert("class".to_string(), class);
         p.fields.insert("count".to_string(), id.1.len() as f64);
+        p.fields.insert("cluster_id".to_string(), *id.0 as f64);
         centroid_points.push(p);
+    }
+
+    // want to track points that have class != 0
+    let mut boxes: Vec<VAALBox> = centroid_points
+        .iter()
+        // .filter(|p| p.fields["class"] > 0.0)
+        .map(|p| VAALBox {
+            xmin: p.fields["x"] as f32 - 0.3,
+            xmax: p.fields["x"] as f32 + 0.3,
+            ymin: p.fields["y"] as f32 - 0.3,
+            ymax: p.fields["y"] as f32 + 0.3,
+            score: if p.fields["class"] > 0.0 { 1.0 } else { 0.3 },
+            label: p.fields["class"].round() as i32,
+        })
+        .collect();
+    let timestamp = header.stamp.to_nanos();
+    let track_info = point_tracker.update(&mut boxes, timestamp);
+    for (i, inf) in track_info.into_iter().enumerate() {
+        if inf.is_none() {
+            continue;
+        }
+        let uuid = inf.unwrap().uuid;
+        let tracklet = point_tracker
+            .get_tracklet_from_uuid(&uuid)
+            .expect("Got invalid UUID for track match");
+        if tracklet.last_updated_high_conf
+            + ((point_tracker.settings.track_extra_lifespan * 1e9) as u64)
+            < timestamp
+        {
+            continue;
+        }
+        if boxes[i].label == 0 {
+            centroid_points[i]
+                .fields
+                .insert("class".to_string(), point_tracker.uuid_map[&uuid] as f64);
+            println!(
+                "setting point {} to {}",
+                i, centroid_points[i].fields["class"],
+            );
+        }
+    }
+    for i in point_tracker.get_tracklets() {
+        if i.last_updated == timestamp {
+            continue;
+        }
+        // println!("Found tracklet that was not updated this frame");
+        if i.last_updated_high_conf + ((point_tracker.settings.track_extra_lifespan * 1e9) as u64)
+            < timestamp
+        {
+            continue;
+        }
+        if i.count < 5 {
+            continue;
+        }
+        // this track wasn't updated
+
+        // should I check if there is still a point nearby?
+        // nearby points still should've been updated
+
+        let mut p = ParsedPoint {
+            fields: HashMap::new(),
+            angle: 0.0,
+            range: DEFAULT_PCD_RANGE,
+        };
+
+        let predicted = i.get_predicted_location();
+        p.fields.insert(
+            "x".to_string(),
+            (predicted.xmin + predicted.xmax) as f64 / 2.0,
+        );
+        p.fields.insert(
+            "y".to_string(),
+            (predicted.ymin + predicted.ymax) as f64 / 2.0,
+        );
+        p.fields.insert("z".to_string(), 0.0);
+        p.fields.insert("speed".to_string(), 0.0);
+        p.fields
+            .insert("class".to_string(), point_tracker.uuid_map[&i.id] as f64);
+        p.fields.insert("count".to_string(), 0.0);
+        p.fields.insert("cluster_id".to_string(), 0.0);
+        centroid_points.push(p);
+        println!("added extra point");
     }
 
     let mut centroid_pcd = PointCloud2 {
@@ -1071,7 +1171,7 @@ fn get_occupied_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in ["x", "y", "z", "class", "speed", "count"] {
+    for char in ["x", "y", "z", "class", "speed", "count", "cluster_id"] {
         insert_field(
             &mut centroid_pcd,
             PointField {
