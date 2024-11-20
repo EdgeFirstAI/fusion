@@ -1111,9 +1111,10 @@ fn get_occupied_cluster(
             centroid_points[i]
                 .fields
                 .insert("class".to_string(), point_tracker.uuid_map[&uuid] as f64);
-            println!(
+            trace!(
                 "setting point {} to {}",
-                i, centroid_points[i].fields["class"],
+                i,
+                centroid_points[i].fields["class"],
             );
         }
     }
@@ -1157,7 +1158,7 @@ fn get_occupied_cluster(
         p.fields.insert("count".to_string(), 0.0);
         p.fields.insert("cluster_id".to_string(), 0.0);
         centroid_points.push(p);
-        println!("added extra point");
+        trace!("added extra point");
     }
 
     let mut centroid_pcd = PointCloud2 {
