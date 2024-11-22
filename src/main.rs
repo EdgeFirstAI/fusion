@@ -1,3 +1,4 @@
+#![feature(test)]
 use async_std::{sync::Mutex, task::block_on};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;

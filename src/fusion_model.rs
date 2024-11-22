@@ -3,7 +3,12 @@ use deepviewrt::model;
 use edgefirst_schemas::edgefirst_msgs::RadarCube;
 use log::{debug, error, info};
 use ndarray::{s, Array};
-use std::{f32::consts::E, sync::Arc, thread::spawn, time::Duration};
+use std::{
+    f32::consts::E,
+    sync::Arc,
+    thread::spawn,
+    time::{Duration, Instant},
+};
 use vaal::Context;
 use zenoh::{
     prelude::{r#async::*, sync::*},
@@ -107,7 +112,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 }
             }
         };
-
+        let start = Instant::now();
         let radarcube: RadarCube = match cdr::deserialize(&sample.payload.contiguous()) {
             Ok(v) => v,
             Err(e) => {
@@ -116,7 +121,8 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             }
         };
 
-        debug!("deserialized radarcube");
+        debug!("deserialized radarcube, took {:?}", start.elapsed()); // takes about 4-5ms
+        let start = Instant::now();
         let mut cube = Array::from_shape_vec(
             [
                 radarcube.shape[0] as usize,
@@ -130,9 +136,9 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         .unwrap();
 
         let cube = preprocess_cube(&mut cube, &input_shape);
-        let cube = cube.to_owned().into_flat();
+        let cube = cube.into_flat();
         let cube = cube.as_slice().unwrap();
-        debug!("preprocessed radarcube: len={:?}", cube.len());
+        debug!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
         let input_tensor = match backbone
             .dvrt_context()
@@ -207,8 +213,8 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     }
 }
 
-fn preprocess_cube(
-    cube: &mut Array<f32, ndarray::Dim<[usize; 5]>>,
+fn preprocess_cube<'a>(
+    cube: &'a mut Array<f32, ndarray::Dim<[usize; 5]>>,
     input_size: &[usize],
 ) -> Array<f32, ndarray::Dim<[usize; 3]>> {
     // need to convert axis (0, 1, 2, 3, 4) into (1, 3, 0, 2, 4)
@@ -221,13 +227,16 @@ fn preprocess_cube(
     cube.swap_axes(2, 3);
     // (1, 3, 0, 2, 4)
 
-    let mut cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap();
-    cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
-    // let mut cube = (cube.abs() + 1.0).log(E) * cube.signum();
+    let mut cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap().to_owned();
 
+    // this takes about 24ms
+    cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
+
+    // this takes about 40 ms
+    // let mut cube = (cube.abs() + 1.0).log(E) * cube.signum();
     if input_size.len() != 4 {
         error!("Model input size was: {:?}. Expected 4 dims", input_size);
-        return cube.to_owned();
+        return cube;
     }
     if input_size[1] > cube.dim().0 {
         error!(
@@ -235,15 +244,17 @@ fn preprocess_cube(
             input_size[1],
             cube.dim().0
         );
-        return cube.to_owned();
+        return cube;
     }
-    cube = cube.slice_move(s![..input_size[1], .., ..]);
-    cube.to_owned()
+    if input_size[1] < cube.dim().0 {
+        cube = cube.slice_move(s![..input_size[1], .., ..]);
+    }
+    cube
 }
 
 #[cfg(test)]
 mod swap_axes_test {
-
+    extern crate test;
     use std::{
         fs::File,
         io::{BufRead, BufReader},
@@ -251,6 +262,17 @@ mod swap_axes_test {
 
     use super::*;
 
+    #[test]
+    fn test_log1p() {
+        let mut cube = Array::from_shape_vec(
+            [2, 200, 4, 256 / 2, 2],
+            (0..(2 * 200 * 4 * 256)).map(|v| v as f32 / 256.0).collect(),
+        )
+        .unwrap();
+        let cube1 = (cube.abs() + 1.0).log(E) * cube.signum();
+        cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
+        println!("{}", cube1 == cube);
+    }
     #[test]
     fn test_range_crop() {
         let mut cube = Array::from_shape_vec(
@@ -281,7 +303,9 @@ mod swap_axes_test {
         )
         .unwrap();
         let input_size = [1, 200, 128, 16];
+        let start = Instant::now();
         let cube = preprocess_cube(&mut cube, &input_size);
+        println!("Preprocessing Cube takes {:?}", start.elapsed());
         assert_eq!(
             cube.dim(),
             [200, 128, 16].into(),
@@ -296,7 +320,19 @@ mod swap_axes_test {
         println!("len={}", cube.flatten().as_slice().unwrap().len())
     }
 
-    // #[test]
+    use test::Bencher;
+    #[bench]
+    fn bench_basic(b: &mut Bencher) {
+        let mut cube = Array::from_shape_vec(
+            [2, 200, 4, 256 / 2, 2],
+            (0..(2 * 200 * 4 * 256)).map(|v| (v % 4) as f32).collect(),
+        )
+        .unwrap();
+        let input_size = [1, 200, 128, 16];
+        b.iter(|| preprocess_cube(&mut cube, &input_size))
+    }
+
+    #[test]
     fn test_data() {
         println!(
             "{}",
