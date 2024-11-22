@@ -44,6 +44,10 @@ pub struct Args {
     #[arg(long, env, action)]
     pub model_polar: bool,
 
+    /// model threshold.
+    #[arg(long, env, default_value = "0.5")]
+    pub model_threshold: f32,
+
     /// engine for model context
     #[arg(long, env, default_value = "npu")]
     pub engine: String,

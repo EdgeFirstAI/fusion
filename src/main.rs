@@ -426,7 +426,7 @@ struct Bin {
     last_masked: u128,
     first_marked: u128,
 }
-type Grid = (Vec<Vec<bool>>, u64);
+type Grid = (Vec<Vec<f32>>, u64);
 const CLASS_FIELD: &str = "class";
 #[async_std::main]
 async fn main() {
@@ -648,9 +648,9 @@ async fn main() {
                 },
             );
         }
-        // add_grid_as_points(&grid, &mut points, &args);
         let mut has_cluster_id = false;
         // points with the same cluster_id get the same class
+        // add_grid_as_points(&grid, &mut points, &args);
         let mut cluster_ids = HashMap::new();
         for (i, point) in points.iter_mut().enumerate() {
             if point.fields.contains_key("cluster_id") {
@@ -694,8 +694,6 @@ async fn main() {
                     .insert("class".to_string(), class as f64);
             }
         }
-
-        // add_grid_as_points(&grid, &mut points, &args);
         let data = serialize_pcd(&points, &pcd.fields);
         pcd.row_step = data.len() as u32;
         pcd.data = data;
@@ -847,7 +845,7 @@ fn grid_points_radar_tracked(
     let mut boxes = Vec::new();
     for (i, g_i) in g.iter().enumerate() {
         for (j, g_ij) in g_i.iter().enumerate() {
-            if !g_ij {
+            if *g_ij < args.model_threshold {
                 continue;
             }
             boxes.push(VAALBox {
@@ -915,18 +913,7 @@ fn grid_points_radar_tracked(
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
-        let (x, y) = if args.model_polar {
-            let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
-            let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-            let x = (-angle).to_radians().cos() * range;
-            let y = (-angle).to_radians().sin() * range;
-            (x, y)
-        } else {
-            let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-            let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
-                + args.range_bin_width * (j as f64 + 0.5));
-            (x, y)
-        };
+        let (x, y) = grid_to_xy(g, i as f64, j as f64, args);
         let mut points_in_grid = Vec::new();
         // find all points in grid
         for (ind, p) in points.iter().enumerate() {
@@ -982,25 +969,15 @@ fn grid_points_radar(
     if guard.is_none() {
         return class;
     }
+
     let (g, _) = guard.as_ref().unwrap();
     for (i, g_i) in g.iter().enumerate() {
         for (j, g_ij) in g_i.iter().enumerate() {
-            if !g_ij {
+            if *g_ij < args.model_threshold {
                 continue;
             }
             // center of grid
-            let (x, y) = if args.model_polar {
-                let angle = args.angle_bin_limit[0] + args.angle_bin_width * (j as f64 + 0.5);
-                let range = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-                let x = (-angle).to_radians().cos() * range;
-                let y = (-angle).to_radians().sin() * range;
-                (x, y)
-            } else {
-                let x = args.range_bin_limit[0] + args.range_bin_width * (i as f64 + 0.5);
-                let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0
-                    + args.range_bin_width * (j as f64 + 0.5));
-                (x, y)
-            };
+            let (x, y) = grid_to_xy(g, i as f64, j as f64, args);
 
             // find closest point
             let mut min_dist = 9999999.9;
@@ -1018,48 +995,58 @@ fn grid_points_radar(
     class
 }
 
-// fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut
-// Vec<ParsedPoint>, args: &Args) {     let guard = block_on(grid.lock());
-//     if guard.is_none() {
-//         return;
-//     }
-//     let (g, _) = guard.as_ref().unwrap();
-//     for i in 0..g.len() {
-//         for j in 0..g[i].len() {
-//             if !g[i][j] {
-//                 continue;
-//             }
-//             // center of grid
-//             let (x, y) = if args.model_polar {
-//                 let angle = args.angle_bin_limit[0] + args.angle_bin_width *
-// (j as f64 + 0.5);                 let range = args.range_bin_limit[0] +
-// args.range_bin_width * (i as f64 + 0.5);                 let x =
-// (-angle).to_radians().cos() * range;                 let y =
-// (-angle).to_radians().sin() * range;                 (x, y)
-//             } else {
-//                 let x = args.range_bin_limit[0] + args.range_bin_width * (i
-// as f64 + 0.5);                 let y = -(args.range_bin_limit[0] -
-// args.range_bin_limit[1] / 2.0
-//                     + args.range_bin_width * (j as f64 + 0.5));
-//                 (x, y)
-//             };
-//             let mut p = ParsedPoint {
-//                 fields: HashMap::new(),
-//                 angle: 0.0,
-//                 range: 0.0,
-//             };
-//             p.fields.insert("x".to_string(), x);
-//             p.fields.insert("y".to_string(), y);
-//             p.fields.insert("z".to_string(), 0.0);
-//             p.fields.insert("speed".to_string(), 0.0);
-//             p.fields.insert("class".to_string(), 10.0);
-//             p.fields.insert("count".to_string(), 1.0);
-//             p.fields.insert("cluster_id".to_string(), 0.0);
-//             p.fields.insert("radar_class".to_string(), 10.0);
-//             points.push(p);
-//         }
-//     }
-// }
+fn grid_to_xy(g: &Vec<Vec<f32>>, i: f64, j: f64, args: &Args) -> (f64, f64) {
+    let i_width = (args.range_bin_limit[1] - args.range_bin_limit[0]) / (g.len() as f64);
+    let j_width = if args.model_polar {
+        (args.angle_bin_limit[1] - args.angle_bin_limit[0]) / (g[0].len() as f64)
+    } else {
+        (args.range_bin_limit[1] - args.range_bin_limit[0]) / (g[0].len() as f64)
+    };
+    if args.model_polar {
+        let angle = args.angle_bin_limit[0] + j_width * (j as f64 + 0.5);
+        let range = args.range_bin_limit[0] + i_width * (i as f64 + 0.5);
+        let x = (-angle).to_radians().cos() * range;
+        let y = (-angle).to_radians().sin() * range;
+        (x, y)
+    } else {
+        let x = args.range_bin_limit[0] + i_width * (i as f64 + 0.5);
+        let y =
+            -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j as f64 + 0.5));
+        (x, y)
+    }
+}
+
+#[allow(dead_code)]
+fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut Vec<ParsedPoint>, args: &Args) {
+    let guard = block_on(grid.lock());
+    if guard.is_none() {
+        return;
+    }
+    let (g, _) = guard.as_ref().unwrap();
+    for (i, g_i) in g.iter().enumerate() {
+        for (j, g_ij) in g_i.iter().enumerate() {
+            if *g_ij < args.model_threshold {
+                continue;
+            }
+            // center of grid
+            let (x, y) = grid_to_xy(g, i as f64, j as f64, args);
+            let mut p = ParsedPoint {
+                fields: HashMap::new(),
+                angle: 0.0,
+                range: 0.0,
+            };
+            p.fields.insert("x".to_string(), x);
+            p.fields.insert("y".to_string(), y);
+            p.fields.insert("z".to_string(), 0.0);
+            p.fields.insert("speed".to_string(), 0.0);
+            p.fields.insert("class".to_string(), 1.0);
+            p.fields.insert("count".to_string(), 1.0);
+            p.fields.insert("cluster_id".to_string(), 99.0);
+            p.fields.insert("radar_class".to_string(), 10.0);
+            points.push(p);
+        }
+    }
+}
 
 // Return the centroid of clusters that have class_id. All points in a class
 // should have the same class_id

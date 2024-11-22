@@ -178,7 +178,12 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         {
             let mask = mask
                 .iter()
-                .flat_map(|v| [128, (255.0 * v).min(255.0) as u8])
+                .flat_map(|v| {
+                    [
+                        (255.0 * args.model_threshold) as u8,
+                        (255.0 * v).min(255.0) as u8,
+                    ]
+                })
                 .collect();
             let msg = Mask {
                 height: output_shape[1],
@@ -197,7 +202,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             debug!("sent model output on {}", publ_mask.key_expr());
         }
 
-        let mut occupied_ = mask.into_iter().map(|v| v >= 0.5);
+        let mut occupied_ = mask.into_iter().map(|v| v);
         let mut occupied = Vec::new();
         for i in 0..output_shape[2] as usize {
             occupied.push(Vec::new());
