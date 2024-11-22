@@ -913,7 +913,7 @@ fn grid_points_radar_tracked(
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
-        let (x, y) = grid_to_xy(g, i as f64, j as f64, args);
+        let (x, y) = grid_to_xy(i as f64, j as f64, args);
         let mut points_in_grid = Vec::new();
         // find all points in grid
         for (ind, p) in points.iter().enumerate() {
@@ -977,7 +977,7 @@ fn grid_points_radar(
                 continue;
             }
             // center of grid
-            let (x, y) = grid_to_xy(g, i as f64, j as f64, args);
+            let (x, y) = grid_to_xy(i as f64, j as f64, args);
 
             // find closest point
             let mut min_dist = 9999999.9;
@@ -995,12 +995,12 @@ fn grid_points_radar(
     class
 }
 
-fn grid_to_xy(g: &Vec<Vec<f32>>, i: f64, j: f64, args: &Args) -> (f64, f64) {
-    let i_width = (args.range_bin_limit[1] - args.range_bin_limit[0]) / (g.len() as f64);
+fn grid_to_xy(i: f64, j: f64, args: &Args) -> (f64, f64) {
+    let i_width = args.range_bin_width;
     let j_width = if args.model_polar {
-        (args.angle_bin_limit[1] - args.angle_bin_limit[0]) / (g[0].len() as f64)
+        args.angle_bin_width
     } else {
-        (args.range_bin_limit[1] - args.range_bin_limit[0]) / (g[0].len() as f64)
+        args.range_bin_width
     };
     if args.model_polar {
         let angle = args.angle_bin_limit[0] + j_width * (j as f64 + 0.5);
@@ -1029,7 +1029,7 @@ fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut Vec<ParsedPo
                 continue;
             }
             // center of grid
-            let (x, y) = grid_to_xy(g, i as f64, j as f64, args);
+            let (x, y) = grid_to_xy(i as f64, j as f64, args);
             let mut p = ParsedPoint {
                 fields: HashMap::new(),
                 angle: 0.0,
