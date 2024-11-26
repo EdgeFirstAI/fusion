@@ -223,7 +223,7 @@ fn preprocess_cube<'a>(
     input_size: &[usize],
 ) -> Array<f32, ndarray::Dim<[usize; 3]>> {
     // need to convert axis (0, 1, 2, 3, 4) into (1, 3, 0, 2, 4)
-
+    let start = Instant::now();
     // (0, 1, 2, 3, 4)
     cube.swap_axes(0, 1);
     // (1, 0, 2, 3, 4)
@@ -233,7 +233,8 @@ fn preprocess_cube<'a>(
     // (1, 3, 0, 2, 4)
 
     let mut cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap().to_owned();
-
+    println!("transpose and reshape takes {:?}", start.elapsed());
+    let start = Instant::now();
     // this takes about 24ms
     cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
 
@@ -254,6 +255,7 @@ fn preprocess_cube<'a>(
     if input_size[1] < cube.dim().0 {
         cube = cube.slice_move(s![..input_size[1], .., ..]);
     }
+    println!("the rest takes {:?}", start.elapsed());
     cube
 }
 
@@ -302,9 +304,12 @@ mod swap_axes_test {
     }
     #[test]
     fn test_basic() {
+        let data = include_str!("testdata/before_radar.txt");
+
+        let flat_cube: Vec<f32> = data.lines().map(|s| s.parse().unwrap()).collect();
         let mut cube = Array::from_shape_vec(
             [2, 200, 4, 256 / 2, 2],
-            (0..(2 * 200 * 4 * 256)).map(|v| v as f32).collect(),
+            (0..(2 * 200 * 4 * 256)).map(|v| flat_cube[v]).collect(),
         )
         .unwrap();
         let input_size = [1, 200, 128, 16];
@@ -323,18 +328,6 @@ mod swap_axes_test {
         //     "Second value was not 0.7615942"
         // );
         println!("len={}", cube.flatten().as_slice().unwrap().len())
-    }
-
-    use test::Bencher;
-    #[bench]
-    fn bench_basic(b: &mut Bencher) {
-        let mut cube = Array::from_shape_vec(
-            [2, 200, 4, 256 / 2, 2],
-            (0..(2 * 200 * 4 * 256)).map(|v| (v % 4) as f32).collect(),
-        )
-        .unwrap();
-        let input_size = [1, 200, 128, 16];
-        b.iter(|| preprocess_cube(&mut cube, &input_size))
     }
 
     #[test]
