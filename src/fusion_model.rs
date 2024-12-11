@@ -1,7 +1,7 @@
 use async_std::{sync::Mutex, task::block_on};
 use deepviewrt::model;
 use edgefirst_schemas::edgefirst_msgs::RadarCube;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use ndarray::{s, Array};
 use std::{
     f32::consts::E,
@@ -233,7 +233,7 @@ fn preprocess_cube<'a>(
     // (1, 3, 0, 2, 4)
 
     let mut cube = cube.to_shape([200, 128, 2 * 4 * 2]).unwrap().to_owned();
-    println!("transpose and reshape takes {:?}", start.elapsed());
+    trace!("transpose and reshape takes {:?}", start.elapsed());
     let start = Instant::now();
     // this takes about 24ms
     cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
@@ -255,13 +255,12 @@ fn preprocess_cube<'a>(
     if input_size[1] < cube.dim().0 {
         cube = cube.slice_move(s![..input_size[1], .., ..]);
     }
-    println!("the rest takes {:?}", start.elapsed());
+    trace!("the rest takes {:?}", start.elapsed());
     cube
 }
 
 #[cfg(test)]
 mod swap_axes_test {
-    extern crate test;
     use std::{
         fs::File,
         io::{BufRead, BufReader},
