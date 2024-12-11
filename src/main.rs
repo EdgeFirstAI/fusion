@@ -930,7 +930,7 @@ fn grid_points_radar_tracked(
             }
             points_in_grid.push(ind);
         }
-        if points_in_grid.len() > 0 {
+        if !points_in_grid.is_empty() {
             for ind in points_in_grid {
                 class[ind] = 1;
             }
@@ -1002,15 +1002,15 @@ fn grid_to_xy(i: f64, j: f64, args: &Args) -> (f64, f64) {
         args.range_bin_width
     };
     if args.model_polar {
-        let angle = args.angle_bin_limit[0] + j_width * (j as f64 + 0.5);
-        let range = args.range_bin_limit[0] + i_width * (i as f64 + 0.5);
+        let angle = args.angle_bin_limit[0] + j_width * (j + 0.5);
+        let range = args.range_bin_limit[0] + i_width * (i + 0.5);
         let x = (-angle).to_radians().cos() * range;
         let y = (-angle).to_radians().sin() * range;
         (x, y)
     } else {
-        let x = args.range_bin_limit[0] + i_width * (i as f64 + 0.5);
+        let x = args.range_bin_limit[0] + i_width * (i + 0.5);
         let y =
-            -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j as f64 + 0.5));
+            -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j + 0.5));
         (x, y)
     }
 }

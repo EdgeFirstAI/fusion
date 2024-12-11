@@ -202,7 +202,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             debug!("sent model output on {}", publ_mask.key_expr());
         }
 
-        let mut occupied_ = mask.into_iter().map(|v| v);
+        let mut occupied_ = mask.into_iter();
         let mut occupied = Vec::new();
         for i in 0..output_shape[2] as usize {
             occupied.push(Vec::new());
@@ -218,8 +218,8 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     }
 }
 
-fn preprocess_cube<'a>(
-    cube: &'a mut Array<f32, ndarray::Dim<[usize; 5]>>,
+fn preprocess_cube(
+    cube: &mut Array<f32, ndarray::Dim<[usize; 5]>>,
     input_size: &[usize],
 ) -> Array<f32, ndarray::Dim<[usize; 3]>> {
     // need to convert axis (0, 1, 2, 3, 4) into (1, 3, 0, 2, 4)
