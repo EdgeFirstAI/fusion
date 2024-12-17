@@ -24,6 +24,10 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/model/mask")]
     pub mask_topic: String,
 
+    /// zenoh key expression for camera DMA buffers
+    #[arg(long, env, default_value = "rt/camera/dma")]
+    pub camera_topic: String,
+
     /// camera info topic
     #[arg(long, env, default_value = "rt/camera/info")]
     pub info_topic: String,

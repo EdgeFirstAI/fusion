@@ -41,3 +41,5 @@ deepviewrt = { git = "https://github.com/DeepViewML/deepviewrt-rs.git", branch =
 lapjv = "0.2.1"
 uuid = { version = "1.11.0", features = ["v4"] }
 nalgebra = "0.33.2"
+pidfd_getfd = "0.2.2"
+async-pidfd = "0.1.4"

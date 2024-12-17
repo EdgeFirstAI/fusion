@@ -1,10 +1,13 @@
+use async_pidfd::PidFd;
 use async_std::{sync::Mutex, task::block_on};
-use deepviewrt::model;
-use edgefirst_schemas::edgefirst_msgs::RadarCube;
+use deepviewrt::{model, tensor::Tensor};
+use edgefirst_schemas::edgefirst_msgs::{DmaBuf, RadarCube};
 use log::{debug, error, info, trace};
 use ndarray::{s, Array};
+use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     f32::consts::E,
+    os::fd::AsRawFd,
     sync::Arc,
     thread::spawn,
     time::{Duration, Instant},
@@ -21,6 +24,8 @@ use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{setup::Args, Grid};
+
+const VAAL_IMAGE_PROC_UNSIGNED_NORM: u32 = 0x0001;
 
 pub fn spawn_fusion_model_thread(
     session: Arc<Session>,
@@ -82,10 +87,30 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     };
 
     let input_tensor_index = model::inputs(backbone.model().unwrap()).unwrap();
-    let input_shape: Vec<_> = match backbone
+
+    let input_names: Vec<_> = input_tensor_index
+        .iter()
+        .map(|v| model::layer_name(backbone.model().unwrap(), *v as usize).unwrap_or("NO_NAME"))
+        .collect();
+
+    let mut radar_input_index = 0;
+    let mut camera_input_index = None;
+
+    for (i, name) in input_names.iter().enumerate() {
+        debug!("Input #{} has name: {}", i, name);
+        if name.contains("radar") {
+            radar_input_index = i;
+            debug!("setting radar input index to {}", i);
+        } else if name.contains("camera") {
+            let _ = camera_input_index.insert(i);
+            debug!("setting camera input index to {}", i);
+        }
+    }
+
+    let radar_input_shape: Vec<_> = match backbone
         .dvrt_context()
         .unwrap()
-        .tensor_index_mut(input_tensor_index[0] as usize)
+        .tensor_index(input_tensor_index[radar_input_index] as usize)
     {
         Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
         Err(e) => {
@@ -95,6 +120,40 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     };
     debug!("got input tensor shape");
 
+    let sub_camera = if camera_input_index.is_some() {
+        let s = session
+            .declare_subscriber(&args.camera_topic)
+            .res_sync()
+            .unwrap();
+        info!("Declared subscriber on {:?}", &args.camera_topic);
+        Some(s)
+    } else {
+        None
+    };
+
+    let camera_input_tensor = if let Some(camera_input_index) = camera_input_index {
+        match backbone
+            .dvrt_context()
+            .unwrap()
+            .tensor_index(input_tensor_index[camera_input_index] as usize)
+        {
+            Ok(v) => {
+                // needed because the dvrt borrow is still mutable even though the Tensor
+                // pointer itself isn't mutable
+                let tensor = unsafe { Tensor::from_ptr(v.to_mut_ptr(), false).unwrap() };
+                Some(tensor)
+            }
+            Err(e) => {
+                error!(
+                    "Could not get input {} from model: {:?}",
+                    camera_input_index, e
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let timeout = Duration::from_millis(2000);
     loop {
         let sample = if let Some(v) = sub_radarcube.drain().last() {
@@ -135,15 +194,15 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         )
         .unwrap();
 
-        let cube = preprocess_cube(&mut cube, &input_shape);
+        let cube = preprocess_cube(&mut cube, &radar_input_shape);
         let cube = cube.into_flat();
         let cube = cube.as_slice().unwrap();
         debug!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
-        let input_tensor = match backbone
+        let radar_input_tensor = match backbone
             .dvrt_context()
             .unwrap()
-            .tensor_index_mut(input_tensor_index[0] as usize)
+            .tensor_index_mut(input_tensor_index[radar_input_index] as usize)
         {
             Ok(v) => v,
             Err(e) => {
@@ -151,16 +210,86 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 return;
             }
         };
-        let mut input_tensor_map = input_tensor.maprw_f32().unwrap();
+        let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
         debug!("mapped input tensor: len={:?}", input_tensor_map.len());
         input_tensor_map.copy_from_slice(cube);
         drop(input_tensor_map);
 
+        if camera_input_index.is_some() {
+            let camera_input_tensor = camera_input_tensor.as_ref().unwrap();
+            let sub_camera = sub_camera.as_ref().unwrap();
+            let sample = if let Some(v) = sub_camera.drain().last() {
+                v
+            } else {
+                match sub_camera.recv_timeout(timeout) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!(
+                            "error receiving radar cube on {}: {:?}",
+                            sub_radarcube.key_expr(),
+                            e
+                        );
+                        continue;
+                    }
+                }
+            };
+            let mut cam_buffer: DmaBuf = match cdr::deserialize(&sample.payload.contiguous()) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Failed to deserialize message: {:?}", e);
+                    continue;
+                }
+            };
+            debug!("Got DMA Buffer: {:?}", cam_buffer);
+
+            let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                    cam_buffer.pid, e
+                );
+                    continue;
+                }
+            };
+            let fd = match get_file_from_pidfd(
+                pidfd.as_raw_fd(),
+                cam_buffer.fd,
+                GetFdFlags::empty(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
+                    e
+                );
+                    continue;
+                }
+            };
+
+            cam_buffer.fd = fd.as_raw_fd();
+            debug!("Updated dma fd to {}", cam_buffer.fd);
+
+            info!("Start load_frame_dmabuf");
+            match backbone.load_frame_dmabuf(
+                Some(camera_input_tensor),
+                cam_buffer.fd,
+                cam_buffer.fourcc,
+                cam_buffer.width as i32,
+                cam_buffer.height as i32,
+                None,
+                VAAL_IMAGE_PROC_UNSIGNED_NORM,
+            ) {
+                Ok(_) => {}
+                Err(e) => error!("Could not load camera frame: {:?}", e),
+            }
+        }
+        info!("finished load_frame_dmabuf");
         if let Err(e) = backbone.run_model() {
             error!("Failed to run model: {}", e);
             return;
         }
-
+        info!("finished run model");
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
         let mask = if let Some(tensor) = backbone.output_tensor(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
