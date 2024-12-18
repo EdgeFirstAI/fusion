@@ -32,7 +32,7 @@ use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{
-    image::{Image, ImageManager, RGB3},
+    image::{Image, ImageManager, Rotation, RGB3},
     setup::Args,
     Grid,
 };
@@ -421,7 +421,7 @@ fn load_frame_dmabuf(
         dma_buf.height,
         dma_buf.fourcc.into(),
     );
-    match img_mgr.convert(&input, dest, None) {
+    match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {
             error!(

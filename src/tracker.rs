@@ -370,7 +370,8 @@ impl ByteTrack {
 
 #[cfg(test)]
 mod tests {
-    use vaal::VAALBox;
+
+    use crate::tracker::VAALBox;
 
     use super::{vaalbox_to_xyah, xyah_to_vaalbox};
 

@@ -48,6 +48,7 @@ pub struct G2DBuffer<'a> {
     imgmgr: &'a ImageManager,
 }
 
+#[allow(dead_code)]
 #[derive(Copy, Clone, Debug)]
 pub enum Rotation {
     Rotation0 = g2d_rotation_G2D_ROTATION_0 as isize,
@@ -213,6 +214,7 @@ impl ImageManager {
         from: &Image,
         to: &Image,
         crop: Option<Rect>,
+        rot: Rotation,
     ) -> Result<(), Box<dyn Error>> {
         let from_fd = from.fd.try_clone()?;
         let from_phys: G2DPhysical = DmaBuf::from(from_fd).into();
