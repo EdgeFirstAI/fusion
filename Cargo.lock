@@ -488,6 +488,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -671,7 +677,7 @@ checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
 [[package]]
 name = "deepviewrt"
 version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#bc57d9b35101c8e36e2136bc366d957bfcaa885b"
+source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#449565b5f203c28ea8825033794c180402b06980"
 dependencies = [
  "deepviewrt-sys",
 ]
@@ -679,7 +685,7 @@ dependencies = [
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#bc57d9b35101c8e36e2136bc366d957bfcaa885b"
+source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#449565b5f203c28ea8825033794c180402b06980"
 dependencies = [
  "libc",
 ]
@@ -726,6 +732,29 @@ dependencies = [
  "option-ext",
  "redox_users",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "dma-buf"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d22ffee04765190bdf0cf3f86f488dd5c0fce20f74906df8413c38c099090f"
+dependencies = [
+ "log",
+ "rustix 0.38.37",
+ "thiserror",
+]
+
+[[package]]
+name = "dma-heap"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046f097d486414ec55d719ff2b25f52d1cb106070481fba9e7809ae7f1cb1095"
+dependencies = [
+ "log",
+ "rustix 0.38.37",
+ "strum_macros",
+ "thiserror",
 ]
 
 [[package]]
@@ -991,6 +1020,17 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+]
+
+[[package]]
+name = "g2d-sys"
+version = "1.0.0"
+dependencies = [
+ "dma-buf",
+ "libc",
+ "libloading",
+ "nix 0.28.0",
+ "videostream",
 ]
 
 [[package]]
@@ -1328,9 +1368,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.158"
+version = "0.2.168"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8adc4bb1803a324070e64a98ae98f38934d91957a99cfb3a43dcbc01bc56439"
+checksum = "5aaeb2981e0606ca11d79718f8bb01164f1d6ed75080182d3abf017e6d244b6d"
 
 [[package]]
 name = "libloading"
@@ -1407,9 +1447,13 @@ dependencies = [
  "cdr",
  "clap 4.5.17",
  "deepviewrt",
+ "dma-buf",
+ "dma-heap",
  "edgefirst-schemas",
  "env_logger",
+ "g2d-sys",
  "lapjv",
+ "libc",
  "log",
  "nalgebra",
  "ndarray 0.16.1",
@@ -1417,7 +1461,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
- "vaal",
+ "videostream",
  "zenoh",
  "zenoh-ros-type",
  "zstd",
@@ -1542,6 +1586,18 @@ checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
 dependencies = [
  "bitflags 2.6.0",
  "cfg-if",
+ "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
+dependencies = [
+ "bitflags 2.6.0",
+ "cfg-if",
+ "cfg_aliases",
  "libc",
 ]
 
@@ -2302,6 +2358,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustversion"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e819f2bc632f285be6d7cd36e25940d45b2391dd6d9b939e79de557f7014248"
+
+[[package]]
 name = "ryu"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2620,6 +2682,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.77",
+]
+
+[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2860,6 +2935,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unix-ts"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e88bab2be9575823c160e1ca9869179a5b9381e23e1013fdbe4c75fd8705e1a"
+dependencies = [
+ "unix-ts-macros",
+]
+
+[[package]]
+name = "unix-ts-macros"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf5fd32fe602f27c0db508ffab4a845120fdb7474ea78c01e5c483ac1b09951"
+
+[[package]]
 name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2921,23 +3011,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vaal"
-version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cd1dc48b54a535386bc3d841d5c65a01e9e1de60"
-dependencies = [
- "deepviewrt",
- "vaal-sys",
-]
-
-[[package]]
-name = "vaal-sys"
-version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cd1dc48b54a535386bc3d841d5c65a01e9e1de60"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "validated_struct"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2978,6 +3051,27 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "videostream"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87188b86601bbb5fffc92947688c5fc99e7f293438ff1ea0c30fa297591e5de6"
+dependencies = [
+ "dma-buf",
+ "nix 0.28.0",
+ "unix-ts",
+ "videostream-sys",
+]
+
+[[package]]
+name = "videostream-sys"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e87c6c33985f356caaee5d61c1046fa92dc82a4fd5e19a9f3aec92cab14cd5e4"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "waker-fn"
@@ -3531,7 +3625,7 @@ dependencies = [
  "async-trait",
  "futures",
  "log",
- "nix",
+ "nix 0.27.1",
  "uuid",
  "zenoh-core",
  "zenoh-link-commons",

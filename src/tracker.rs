@@ -5,7 +5,6 @@ use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
-use vaal::VAALBox;
 
 pub struct ByteTrackSettings {
     pub track_high_conf: f32,
@@ -27,13 +26,22 @@ pub struct ByteTrack {
 #[derive(Debug, Clone)]
 pub struct Tracklet {
     pub id: Uuid,
-    pub prev_boxes: vaal::VAALBox,
+    pub prev_boxes: VAALBox,
     pub filter: ConstantVelocityXYAHModel2<f32>,
     pub expiry: u64,
     pub last_updated: u64,
     pub last_updated_high_conf: u64,
     pub count: i32,
     pub created: u64,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct VAALBox {
+    pub xmin: f32,
+    pub ymin: f32,
+    pub xmax: f32,
+    pub ymax: f32,
+    pub score: f32,
+    pub label: i32,
 }
 
 impl Tracklet {

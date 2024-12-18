@@ -1,18 +1,26 @@
 use async_pidfd::PidFd;
 use async_std::{sync::Mutex, task::block_on};
-use deepviewrt::{model, tensor::Tensor};
+use deepviewrt::{
+    context::Context,
+    engine::Engine,
+    model,
+    tensor::{Tensor, TensorType},
+};
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, RadarCube};
 use log::{debug, error, info, trace};
 use ndarray::{s, Array};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     f32::consts::E,
-    os::fd::AsRawFd,
+    fs::read,
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::io::OwnedFd,
+    },
     sync::Arc,
     thread::spawn,
     time::{Duration, Instant},
 };
-use vaal::Context;
 use zenoh::{
     prelude::{r#async::*, sync::*},
     Session,
@@ -23,9 +31,15 @@ use cdr::{CdrLe, Infinite};
 #[cfg(feature = "model_output")]
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
-use crate::{setup::Args, Grid};
+use crate::{
+    image::{Image, ImageManager, RGB3},
+    setup::Args,
+    Grid,
+};
 
-const VAAL_IMAGE_PROC_UNSIGNED_NORM: u32 = 0x0001;
+static RGB_MEANS_IMAGENET: [f32; 3] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255.0];
+
+static RGB_STDS_IMAGENET: [f32; 3] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0];
 
 pub fn spawn_fusion_model_thread(
     session: Arc<Session>,
@@ -35,35 +49,35 @@ pub fn spawn_fusion_model_thread(
     spawn(move || run_fusion_model(session, args, grid));
 }
 pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
-    let mut backbone = match Context::new(&args.engine) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not open VAAL Context on {}, {:?}", args.engine, e);
-            return;
-        }
-    };
-    info!("Opened DeepViewRT Context on {}", args.engine);
-
     if args.model.is_none() {
         info!("No radar model was given");
         return;
     }
-    let filepath = args.model.unwrap().clone();
-    let filename = match filepath.to_str() {
-        Some(v) => v,
-        None => {
-            error!(
-                "Cannot use file {:?}, please use only utf8 characters in file path",
-                filepath
-            );
+    let model_name = args.model.as_ref().unwrap().clone();
+    let model_data = match read(&model_name) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open `{:?}` file: {:?}", model_name, e);
             return;
         }
     };
 
-    match backbone.load_model_file(filename) {
-        Ok(_) => info!("Loaded backbone model {:?}", filename),
+    info!("Model read from file");
+
+    let engine = if args.engine.to_lowercase() == "npu" {
+        Engine::new("deepview-rt-openvx.so")
+            .expect("Initializing deepview-rt-openvx.so engine failed")
+    } else {
+        Engine::new("").expect("Initializing cpu engine failed")
+    };
+    let mut nn_context = Context::new(Some(engine), model::memory_size(&model_data), 4096 * 1024)
+        .expect("NNContext init failed");
+    info!("NNContext initialized");
+
+    match nn_context.load_model(model_data) {
+        Ok(_) => info!("Loaded backbone model {:?}", model_name),
         Err(e) => {
-            error!("Could not load model file {}: {:?}", filename, e);
+            error!("Could not load model file {:?}: {:?}", model_name, e);
             return;
         }
     }
@@ -86,11 +100,11 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         }
     };
 
-    let input_tensor_index = model::inputs(backbone.model().unwrap()).unwrap();
+    let input_tensor_index = model::inputs(nn_context.model()).unwrap();
 
     let input_names: Vec<_> = input_tensor_index
         .iter()
-        .map(|v| model::layer_name(backbone.model().unwrap(), *v as usize).unwrap_or("NO_NAME"))
+        .map(|v| model::layer_name(nn_context.model(), *v as usize).unwrap_or("NO_NAME"))
         .collect();
 
     let mut radar_input_index = 0;
@@ -107,19 +121,15 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         }
     }
 
-    let radar_input_shape: Vec<_> = match backbone
-        .dvrt_context()
-        .unwrap()
-        .tensor_index(input_tensor_index[radar_input_index] as usize)
-    {
-        Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
-        Err(e) => {
-            error!("Could not get input 0 from model: {:?}", e);
-            return;
-        }
-    };
+    let radar_input_shape: Vec<_> =
+        match nn_context.tensor_index(input_tensor_index[radar_input_index] as usize) {
+            Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
+            Err(e) => {
+                error!("Could not get input 0 from model: {:?}", e);
+                return;
+            }
+        };
     debug!("got input tensor shape");
-
     let sub_camera = if camera_input_index.is_some() {
         let s = session
             .declare_subscriber(&args.camera_topic)
@@ -131,12 +141,8 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         None
     };
 
-    let camera_input_tensor = if let Some(camera_input_index) = camera_input_index {
-        match backbone
-            .dvrt_context()
-            .unwrap()
-            .tensor_index(input_tensor_index[camera_input_index] as usize)
-        {
+    let mut camera_input_tensor = if let Some(camera_input_index) = camera_input_index {
+        match nn_context.tensor_index(input_tensor_index[camera_input_index] as usize) {
             Ok(v) => {
                 // needed because the dvrt borrow is still mutable even though the Tensor
                 // pointer itself isn't mutable
@@ -154,6 +160,38 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     } else {
         None
     };
+    let camera_input_shape = if let Some(ref camera_input_tensor) = camera_input_tensor {
+        camera_input_tensor
+            .shape()
+            .iter()
+            .map(|v| *v as usize)
+            .collect()
+    } else {
+        vec![1, 1, 1, 1]
+    };
+
+    let img_mgr = match ImageManager::new() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open G2D: {:?}", e);
+            return;
+        }
+    };
+
+    let g2dbuf = match img_mgr.alloc(camera_input_shape[2], camera_input_shape[1], 4) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not alloc G2D buf: {:?}", e);
+            return;
+        }
+    };
+    let dest = Image::new_preallocated(
+        img_mgr.g2d_buf_fd(&g2dbuf),
+        camera_input_shape[2] as u32,
+        camera_input_shape[1] as u32,
+        RGB3,
+    );
+
     let timeout = Duration::from_millis(2000);
     loop {
         let sample = if let Some(v) = sub_radarcube.drain().last() {
@@ -199,24 +237,21 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         let cube = cube.as_slice().unwrap();
         debug!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
-        let radar_input_tensor = match backbone
-            .dvrt_context()
-            .unwrap()
-            .tensor_index_mut(input_tensor_index[radar_input_index] as usize)
-        {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not get input 0 from model: {:?}", e);
-                return;
-            }
-        };
+        let radar_input_tensor =
+            match nn_context.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Could not get input 0 from model: {:?}", e);
+                    return;
+                }
+            };
         let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
         debug!("mapped input tensor: len={:?}", input_tensor_map.len());
         input_tensor_map.copy_from_slice(cube);
         drop(input_tensor_map);
 
         if camera_input_index.is_some() {
-            let camera_input_tensor = camera_input_tensor.as_ref().unwrap();
+            let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
             let sub_camera = sub_camera.as_ref().unwrap();
             let sample = if let Some(v) = sub_camera.drain().last() {
                 v
@@ -270,28 +305,31 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             cam_buffer.fd = fd.as_raw_fd();
             debug!("Updated dma fd to {}", cam_buffer.fd);
 
-            info!("Start load_frame_dmabuf");
-            match backbone.load_frame_dmabuf(
-                Some(camera_input_tensor),
-                cam_buffer.fd,
-                cam_buffer.fourcc,
-                cam_buffer.width as i32,
-                cam_buffer.height as i32,
-                None,
-                VAAL_IMAGE_PROC_UNSIGNED_NORM,
+            debug!("Start load_frame_dmabuf");
+
+            match load_frame_dmabuf(
+                camera_input_tensor,
+                &img_mgr,
+                &dest,
+                &cam_buffer,
+                Preprocessing::UnsignedNorm,
             ) {
                 Ok(_) => {}
-                Err(e) => error!("Could not load camera frame: {:?}", e),
+                Err(e) => {
+                    error!("Error loading camera frame into input: {:?}", e);
+                    continue;
+                }
             }
+            debug!("finished load_frame_dmabuf");
         }
-        info!("finished load_frame_dmabuf");
-        if let Err(e) = backbone.run_model() {
+
+        if let Err(e) = nn_context.run() {
             error!("Failed to run model: {}", e);
             return;
         }
-        info!("finished run model");
+        debug!("finished run model");
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
-        let mask = if let Some(tensor) = backbone.output_tensor(0) {
+        let mask = if let Ok(tensor) = nn_context.output(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
             let data = tensor.mapro_f32().unwrap();
             let len = data.len();
@@ -345,6 +383,160 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         let mut guard = block_on(grid.lock());
         *guard = Some((occupied, timestamp));
     }
+}
+
+#[allow(dead_code)]
+pub enum Preprocessing {
+    Raw = 0x0,
+    UnsignedNorm = 0x1,
+    SignedNorm = 0x2,
+    ImageNet = 0x8,
+}
+
+fn load_frame_dmabuf(
+    tensor: &mut Tensor,
+    img_mgr: &ImageManager,
+    dest: &Image,
+    dma_buf: &DmaBuf,
+    preprocess: Preprocessing,
+) -> Result<(), String> {
+    if dest.height() as i32 != tensor.shape()[1] {
+        return Err(
+            "The height of the destination buffer is not equal to the height of the tensor"
+                .to_owned(),
+        );
+    }
+    if dest.width() as i32 != tensor.shape()[2] {
+        return Err(
+            "The width of the destination buffer is not equal to the width of the tensor"
+                .to_owned(),
+        );
+    }
+    if dest.format() != RGB3 {
+        return Err("The format of destination buffer is not RGB3".to_owned());
+    }
+    let input = Image::new_preallocated(
+        unsafe { OwnedFd::from_raw_fd(dma_buf.fd) },
+        dma_buf.width,
+        dma_buf.height,
+        dma_buf.fourcc.into(),
+    );
+    match img_mgr.convert(&input, dest, None) {
+        Ok(_) => {}
+        Err(e) => {
+            error!(
+                "Could not g2d convert from {:?} to {:?}: {:?}",
+                input, dest, e
+            )
+        }
+    }
+    debug!("Dest size: {}", dest.size());
+    debug!("Tensor size: {}", tensor.volume());
+    match tensor.tensor_type() {
+        TensorType::U8 => {
+            let mut tensor_mapped = match tensor.maprw() {
+                Ok(v) => v,
+                Err(e) => return Err(e.to_string()),
+            };
+            let dest_mapped = dest.dmabuf().memory_map().unwrap();
+
+            match dest_mapped.read(
+                |data, tensor_mapped| {
+                    let tensor_mapped = tensor_mapped.unwrap();
+                    tensor_mapped.copy_from_slice(data);
+                    Ok(())
+                },
+                Some(&mut tensor_mapped),
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Could not copy from g2d dest buffer to tensor: {:?}", e)
+                }
+            }
+        }
+        TensorType::I16 => todo!(),
+        TensorType::U16 => todo!(),
+        TensorType::I32 => todo!(),
+        TensorType::RAW => todo!(),
+        TensorType::STR => todo!(),
+        TensorType::I8 => {
+            let mut tensor_mapped = match tensor.maprw() {
+                Ok(v) => v,
+                Err(e) => return Err(e.to_string()),
+            };
+            let dest_mapped = dest.dmabuf().memory_map().unwrap();
+
+            match dest_mapped.read(
+                |data, tensor_mapped| {
+                    let tensor_mapped = tensor_mapped.unwrap();
+                    for i in 0..tensor_mapped.len() {
+                        tensor_mapped[i] = (data[i] as i16 - 128) as i8;
+                    }
+
+                    Ok(())
+                },
+                Some(&mut tensor_mapped),
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Could not copy from g2d dest buffer to tensor: {:?}", e)
+                }
+            }
+        }
+        TensorType::U32 => todo!(),
+        TensorType::I64 => todo!(),
+        TensorType::U64 => todo!(),
+        TensorType::F16 => todo!(),
+        TensorType::F32 => {
+            let mut tensor_mapped = match tensor.maprw() {
+                Ok(v) => v,
+                Err(e) => return Err(e.to_string()),
+            };
+            let dest_mapped = dest.dmabuf().memory_map().unwrap();
+            match dest_mapped.read(
+                |data, tensor_mapped| {
+                    let tensor_mapped = tensor_mapped.unwrap();
+                    match preprocess {
+                        Preprocessing::Raw => {
+                            for i in 0..tensor_mapped.len() {
+                                tensor_mapped[i] = data[i] as f32;
+                            }
+                        }
+                        Preprocessing::UnsignedNorm => {
+                            for i in 0..tensor_mapped.len() {
+                                tensor_mapped[i] = data[i] as f32 / 255.0;
+                            }
+                        }
+                        Preprocessing::SignedNorm => {
+                            for i in 0..tensor_mapped.len() {
+                                tensor_mapped[i] = data[i] as f32 / 127.5 - 1.0;
+                            }
+                        }
+                        Preprocessing::ImageNet => {
+                            for i in (0..tensor_mapped.len()).step_by(3) {
+                                tensor_mapped[i] =
+                                    (data[i] as f32 - RGB_MEANS_IMAGENET[0]) / RGB_STDS_IMAGENET[0];
+                                tensor_mapped[i + 1] =
+                                    (data[i] as f32 - RGB_MEANS_IMAGENET[1]) / RGB_STDS_IMAGENET[1];
+                                tensor_mapped[i + 2] =
+                                    (data[i] as f32 - RGB_MEANS_IMAGENET[2]) / RGB_STDS_IMAGENET[2];
+                            }
+                        }
+                    }
+                    Ok(())
+                },
+                Some(&mut tensor_mapped),
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Could not copy from g2d dest buffer to tensor: {:?}", e)
+                }
+            }
+        }
+        TensorType::F64 => todo!(),
+    };
+
+    Ok(())
 }
 
 fn preprocess_cube(

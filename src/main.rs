@@ -16,18 +16,18 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use tracker::{ByteTrack, ByteTrackSettings};
-use vaal::VAALBox;
+use tracker::{ByteTrack, ByteTrackSettings, VAALBox};
+
 #[cfg(feature = "model_output")]
 use zenoh::prelude::sync::*;
 use zenoh::{config::Config, prelude::r#async::*};
 
 use ndarray::{self, Array2};
 mod fusion_model;
+mod image;
 mod kalman;
 mod setup;
 mod tracker;
-
 struct ParsedPoint {
     fields: HashMap<String, f64>,
     angle: f64,
@@ -1009,8 +1009,7 @@ fn grid_to_xy(i: f64, j: f64, args: &Args) -> (f64, f64) {
         (x, y)
     } else {
         let x = args.range_bin_limit[0] + i_width * (i + 0.5);
-        let y =
-            -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j + 0.5));
+        let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j + 0.5));
         (x, y)
     }
 }
