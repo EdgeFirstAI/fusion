@@ -18,6 +18,7 @@ strip = false
 debug = true
 
 [features]
+default = ["model_output"]
 model_output = []
 
 [dependencies]

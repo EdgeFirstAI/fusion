@@ -257,7 +257,7 @@ impl ImageManager {
             height: to.height as i32,
             blendfunc: 0,
             clrcolor: 0,
-            rot: 0,
+            rot: rot as u32,
             global_alpha: 0,
         };
 

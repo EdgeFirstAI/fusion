@@ -89,12 +89,15 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     info!("Declared subscriber on {:?}", &args.radarcube_topic);
 
     #[cfg(feature = "model_output")]
-    let publ_mask = match session.declare_publisher("rt/fusion/mask_test").res_sync() {
+    let publ_mask = match session
+        .declare_publisher(args.model_output_topic.clone())
+        .res_sync()
+    {
         Ok(v) => v,
         Err(e) => {
             error!(
-                "Error while declaring detection publisher rt/fusion/mask_test: {:?}",
-                e
+                "Error while declaring detection publisher {}: {:?}",
+                &args.model_output_topic, e
             );
             return;
         }

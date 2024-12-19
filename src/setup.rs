@@ -60,6 +60,11 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/radar/cube")]
     pub radarcube_topic: String,
 
+    #[cfg(feature = "model_output")]
+    /// radar model output
+    #[arg(long, env, default_value = "rt/fusion/model_output")]
+    pub model_output_topic: String,
+
     /// enable tracking to reduce flickering in model output
     #[arg(long, env, action)]
     pub track: bool,
