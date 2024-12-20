@@ -405,6 +405,8 @@ mod tests {
             ymax: 0.691,
             score: 0.0,
             class: 0,
+            #[cfg(feature = "model_output")]
+            radar_class: 0,
         };
         let xyah = vaalbox_to_xyah(&box1);
         let mut box2 = TrackerBox {
@@ -414,6 +416,8 @@ mod tests {
             ymax: 0.0,
             score: 0.0,
             class: 0,
+            #[cfg(feature = "model_output")]
+            radar_class: 0,
         };
         xyah_to_vaalbox(&xyah, &mut box2);
 

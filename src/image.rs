@@ -6,7 +6,8 @@ use g2d_sys::{
     g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90, g2d_surface, G2DFormat,
     G2DPhysical,
 };
-use libc::dup;
+use libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
+use log::warn;
 use std::{
     error::Error,
     ffi::c_void,
@@ -15,7 +16,8 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
         unix::io::OwnedFd,
     },
-    ptr::null_mut,
+    ptr::{null, null_mut},
+    slice::{from_raw_parts, from_raw_parts_mut},
 };
 use videostream::{camera::CameraBuffer, encoder::VSLRect, fourcc::FourCC, frame::Frame};
 
@@ -286,6 +288,28 @@ impl Drop for ImageManager {
     }
 }
 
+pub struct MappedImage {
+    mmap: *mut u8,
+    len: usize,
+}
+
+impl MappedImage {
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { from_raw_parts(self.mmap, self.len) }
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [u8] {
+        unsafe { from_raw_parts_mut(self.mmap, self.len) }
+    }
+}
+impl Drop for MappedImage {
+    fn drop(&mut self) {
+        if unsafe { munmap(self.mmap.cast::<c_void>(), self.len) } > 0 {
+            warn!("unmap failed!");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Image {
     fd: OwnedFd,
@@ -351,6 +375,24 @@ impl Image {
 
     pub fn dmabuf(&self) -> DmaBuf {
         unsafe { DmaBuf::from_raw_fd(dup(self.fd.as_raw_fd())) }
+    }
+
+    pub fn mmap(&mut self) -> MappedImage {
+        let image_size = image_size(self.width, self.height, self.format);
+        unsafe {
+            let mmap = mmap(
+                null_mut(),
+                image_size,
+                PROT_READ | PROT_WRITE,
+                MAP_SHARED,
+                self.raw_fd(),
+                0,
+            ) as *mut u8;
+            MappedImage {
+                mmap,
+                len: image_size,
+            }
+        }
     }
 
     pub fn width(&self) -> u32 {

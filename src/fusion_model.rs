@@ -32,7 +32,7 @@ use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{
-    image::{Image, ImageManager, Rotation, RGB3},
+    image::{Image, ImageManager, Rotation, RGBA},
     setup::Args,
     Grid,
 };
@@ -65,12 +65,14 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     info!("Model read from file");
 
     let engine = if args.engine.to_lowercase() == "npu" {
-        Engine::new("deepview-rt-openvx.so")
-            .expect("Initializing deepview-rt-openvx.so engine failed")
+        Some(
+            Engine::new("deepview-rt-openvx.so")
+                .expect("Initializing deepview-rt-openvx.so engine failed"),
+        )
     } else {
-        Engine::new("").expect("Initializing cpu engine failed")
+        None
     };
-    let mut nn_context = Context::new(Some(engine), model::memory_size(&model_data), 4096 * 1024)
+    let mut nn_context = Context::new(engine, model::memory_size(&model_data), 4096 * 1024)
         .expect("NNContext init failed");
     info!("NNContext initialized");
 
@@ -181,19 +183,17 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         }
     };
 
-    let g2dbuf = match img_mgr.alloc(camera_input_shape[2], camera_input_shape[1], 4) {
+    let mut dest = match Image::new(
+        camera_input_shape[2] as u32,
+        camera_input_shape[1] as u32,
+        RGBA,
+    ) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not alloc G2D buf: {:?}", e);
+            error!("Could not alloc CMA heap: {:?}", e);
             return;
         }
     };
-    let dest = Image::new_preallocated(
-        img_mgr.g2d_buf_fd(&g2dbuf),
-        camera_input_shape[2] as u32,
-        camera_input_shape[1] as u32,
-        RGB3,
-    );
 
     let timeout = Duration::from_millis(2000);
     loop {
@@ -313,7 +313,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             match load_frame_dmabuf(
                 camera_input_tensor,
                 &img_mgr,
-                &dest,
+                &mut dest,
                 &cam_buffer,
                 Preprocessing::UnsignedNorm,
             ) {
@@ -399,7 +399,7 @@ pub enum Preprocessing {
 fn load_frame_dmabuf(
     tensor: &mut Tensor,
     img_mgr: &ImageManager,
-    dest: &Image,
+    dest: &mut Image,
     dma_buf: &DmaBuf,
     preprocess: Preprocessing,
 ) -> Result<(), String> {
@@ -415,8 +415,8 @@ fn load_frame_dmabuf(
                 .to_owned(),
         );
     }
-    if dest.format() != RGB3 {
-        return Err("The format of destination buffer is not RGB3".to_owned());
+    if dest.format() != RGBA {
+        return Err("The format of destination buffer is not RGBA".to_owned());
     }
     let input = Image::new_preallocated(
         unsafe { OwnedFd::from_raw_fd(dma_buf.fd) },
@@ -434,27 +434,21 @@ fn load_frame_dmabuf(
         }
     }
     trace!("Dest size: {}", dest.size());
-    trace!("Tensor size: {}", tensor.volume());
+    let tensor_vol = tensor.volume() as usize;
+    trace!("Tensor volume: {}", tensor_vol);
     match tensor.tensor_type() {
         TensorType::U8 => {
             let mut tensor_mapped = match tensor.maprw() {
                 Ok(v) => v,
                 Err(e) => return Err(e.to_string()),
             };
-            let dest_mapped = dest.dmabuf().memory_map().unwrap();
+            let mut dest_mapped = dest.mmap();
+            let data = dest_mapped.as_slice_mut();
 
-            match dest_mapped.read(
-                |data, tensor_mapped| {
-                    let tensor_mapped = tensor_mapped.unwrap();
-                    tensor_mapped.copy_from_slice(data);
-                    Ok(())
-                },
-                Some(&mut tensor_mapped),
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Could not copy from g2d dest buffer to tensor: {:?}", e)
-                }
+            for i in 0..tensor_vol / 3 {
+                tensor_mapped[i * 3] = data[i * 4];
+                tensor_mapped[i * 3 + 1] = data[i * 4 + 1];
+                tensor_mapped[i * 3 + 2] = data[i * 4 + 2];
             }
         }
         TensorType::I16 => todo!(),
@@ -467,23 +461,13 @@ fn load_frame_dmabuf(
                 Ok(v) => v,
                 Err(e) => return Err(e.to_string()),
             };
-            let dest_mapped = dest.dmabuf().memory_map().unwrap();
 
-            match dest_mapped.read(
-                |data, tensor_mapped| {
-                    let tensor_mapped = tensor_mapped.unwrap();
-                    for i in 0..tensor_mapped.len() {
-                        tensor_mapped[i] = (data[i] as i16 - 128) as i8;
-                    }
-
-                    Ok(())
-                },
-                Some(&mut tensor_mapped),
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Could not copy from g2d dest buffer to tensor: {:?}", e)
-                }
+            let mut dest_mapped = dest.mmap();
+            let data = dest_mapped.as_slice_mut();
+            for i in 0..tensor_vol / 3 {
+                tensor_mapped[i * 3] = (data[i * 4] as i16 - 128) as i8;
+                tensor_mapped[i * 3 + 1] = (data[i * 4 + 1] as i16 - 128) as i8;
+                tensor_mapped[i * 3 + 2] = (data[i * 4 + 2] as i16 - 128) as i8;
             }
         }
         TensorType::U32 => todo!(),
@@ -495,44 +479,39 @@ fn load_frame_dmabuf(
                 Ok(v) => v,
                 Err(e) => return Err(e.to_string()),
             };
-            let dest_mapped = dest.dmabuf().memory_map().unwrap();
-            match dest_mapped.read(
-                |data, tensor_mapped| {
-                    let tensor_mapped = tensor_mapped.unwrap();
-                    match preprocess {
-                        Preprocessing::Raw => {
-                            for i in 0..tensor_mapped.len() {
-                                tensor_mapped[i] = data[i] as f32;
-                            }
-                        }
-                        Preprocessing::UnsignedNorm => {
-                            for i in 0..tensor_mapped.len() {
-                                tensor_mapped[i] = data[i] as f32 / 255.0;
-                            }
-                        }
-                        Preprocessing::SignedNorm => {
-                            for i in 0..tensor_mapped.len() {
-                                tensor_mapped[i] = data[i] as f32 / 127.5 - 1.0;
-                            }
-                        }
-                        Preprocessing::ImageNet => {
-                            for i in (0..tensor_mapped.len()).step_by(3) {
-                                tensor_mapped[i] =
-                                    (data[i] as f32 - RGB_MEANS_IMAGENET[0]) / RGB_STDS_IMAGENET[0];
-                                tensor_mapped[i + 1] =
-                                    (data[i] as f32 - RGB_MEANS_IMAGENET[1]) / RGB_STDS_IMAGENET[1];
-                                tensor_mapped[i + 2] =
-                                    (data[i] as f32 - RGB_MEANS_IMAGENET[2]) / RGB_STDS_IMAGENET[2];
-                            }
-                        }
+            let mut dest_mapped = dest.mmap();
+            let data = dest_mapped.as_slice_mut();
+            match preprocess {
+                Preprocessing::Raw => {
+                    for i in 0..tensor_vol / 3 {
+                        tensor_mapped[i * 3] = data[i * 4] as f32;
+                        tensor_mapped[i * 3 + 1] = data[i * 4 + 1] as f32;
+                        tensor_mapped[i * 3 + 2] = data[i * 4 + 2] as f32;
                     }
-                    Ok(())
-                },
-                Some(&mut tensor_mapped),
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Could not copy from g2d dest buffer to tensor: {:?}", e)
+                }
+                Preprocessing::UnsignedNorm => {
+                    for i in 0..tensor_vol / 3 {
+                        tensor_mapped[i * 3] = data[i * 4] as f32 / 255.0;
+                        tensor_mapped[i * 3 + 1] = data[i * 4 + 1] as f32 / 255.0;
+                        tensor_mapped[i * 3 + 2] = data[i * 4 + 2] as f32 / 255.0;
+                    }
+                }
+                Preprocessing::SignedNorm => {
+                    for i in 0..tensor_vol / 3 {
+                        tensor_mapped[i * 3] = data[i * 4] as f32 / 127.5 - 1.0;
+                        tensor_mapped[i * 3 + 1] = data[i * 4 + 1] as f32 / 127.5 - 1.0;
+                        tensor_mapped[i * 3 + 2] = data[i * 4 + 2] as f32 / 127.5 - 1.0;
+                    }
+                }
+                Preprocessing::ImageNet => {
+                    for i in 0..tensor_vol / 3 {
+                        tensor_mapped[i * 3] =
+                            (data[i * 4] as f32 - RGB_MEANS_IMAGENET[0]) / RGB_STDS_IMAGENET[0];
+                        tensor_mapped[i * 3 + 1] =
+                            (data[i * 4 + 1] as f32 - RGB_MEANS_IMAGENET[1]) / RGB_STDS_IMAGENET[1];
+                        tensor_mapped[i * 3 + 2] =
+                            (data[i * 4 + 2] as f32 - RGB_MEANS_IMAGENET[2]) / RGB_STDS_IMAGENET[2];
+                    }
                 }
             }
         }
