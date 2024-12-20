@@ -132,7 +132,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 return;
             }
         };
-    debug!("got input tensor shape");
+    debug!("got input tensor shape: {:?}", radar_input_shape);
     let sub_camera = if camera_input_index.is_some() {
         let s = session
             .declare_subscriber(&args.camera_topic)
@@ -221,7 +221,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             }
         };
 
-        debug!("deserialized radarcube, took {:?}", start.elapsed()); // takes about 4-5ms
+        trace!("deserialized radarcube, took {:?}", start.elapsed()); // takes about 4-5ms
         let start = Instant::now();
         let mut cube = Array::from_shape_vec(
             [
@@ -238,7 +238,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         let cube = preprocess_cube(&mut cube, &radar_input_shape);
         let cube = cube.into_flat();
         let cube = cube.as_slice().unwrap();
-        debug!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
+        trace!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
         let radar_input_tensor =
             match nn_context.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
@@ -249,7 +249,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 }
             };
         let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
-        debug!("mapped input tensor: len={:?}", input_tensor_map.len());
+        trace!("mapped input tensor: len={:?}", input_tensor_map.len());
         input_tensor_map.copy_from_slice(cube);
         drop(input_tensor_map);
 
@@ -278,7 +278,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                     continue;
                 }
             };
-            debug!("Got DMA Buffer: {:?}", cam_buffer);
+            trace!("Got DMA Buffer: {:?}", cam_buffer);
 
             let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
                 Ok(v) => v,
@@ -306,9 +306,9 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             };
 
             cam_buffer.fd = fd.as_raw_fd();
-            debug!("Updated dma fd to {}", cam_buffer.fd);
+            trace!("Updated dma fd to {}", cam_buffer.fd);
 
-            debug!("Start load_frame_dmabuf");
+            trace!("Start load_frame_dmabuf");
 
             match load_frame_dmabuf(
                 camera_input_tensor,
@@ -323,14 +323,14 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                     continue;
                 }
             }
-            debug!("finished load_frame_dmabuf");
+            trace!("finished load_frame_dmabuf");
         }
 
         if let Err(e) = nn_context.run() {
             error!("Failed to run model: {}", e);
             return;
         }
-        debug!("finished run model");
+        trace!("finished run model");
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
         let mask = if let Ok(tensor) = nn_context.output(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
@@ -369,7 +369,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 ),
             );
             let _ = publ_mask.put(val).res_sync();
-            debug!("sent model output on {}", publ_mask.key_expr());
+            trace!("sent model output on {}", publ_mask.key_expr());
         }
 
         let mut occupied_ = mask.into_iter();
@@ -433,8 +433,8 @@ fn load_frame_dmabuf(
             )
         }
     }
-    debug!("Dest size: {}", dest.size());
-    debug!("Tensor size: {}", tensor.volume());
+    trace!("Dest size: {}", dest.size());
+    trace!("Tensor size: {}", tensor.volume());
     match tensor.tensor_type() {
         TensorType::U8 => {
             let mut tensor_mapped = match tensor.maprw() {
