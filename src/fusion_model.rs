@@ -121,7 +121,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             }
         };
 
-        debug!("deserialized radarcube, took {:?}", start.elapsed()); // takes about 4-5ms
+        trace!("deserialized radarcube, took {:?}", start.elapsed()); // takes about 4-5ms
         let start = Instant::now();
         let mut cube = Array::from_shape_vec(
             [
@@ -138,7 +138,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         let cube = preprocess_cube(&mut cube, &input_shape);
         let cube = cube.into_flat();
         let cube = cube.as_slice().unwrap();
-        debug!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
+        trace!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
         let input_tensor = match backbone
             .dvrt_context()
@@ -152,7 +152,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             }
         };
         let mut input_tensor_map = input_tensor.maprw_f32().unwrap();
-        debug!("mapped input tensor: len={:?}", input_tensor_map.len());
+        trace!("mapped input tensor: len={:?}", input_tensor_map.len());
         input_tensor_map.copy_from_slice(cube);
         drop(input_tensor_map);
 
@@ -199,7 +199,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
                 ),
             );
             let _ = publ_mask.put(val).res_sync();
-            debug!("sent model output on {}", publ_mask.key_expr());
+            trace!("sent model output on {}", publ_mask.key_expr());
         }
 
         let mut occupied_ = mask.into_iter();
