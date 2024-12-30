@@ -16,7 +16,7 @@ use std::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
         unix::io::OwnedFd,
     },
-    ptr::{null, null_mut},
+    ptr::null_mut,
     slice::{from_raw_parts, from_raw_parts_mut},
 };
 use videostream::{camera::CameraBuffer, encoder::VSLRect, fourcc::FourCC, frame::Frame};

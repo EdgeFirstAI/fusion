@@ -37,9 +37,9 @@ use crate::{
     Grid,
 };
 
-static RGB_MEANS_IMAGENET: [f32; 3] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255.0];
+static RGB_MEANS_IMAGENET: [f32; 4] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255.0, 128.0]; // last value is for Alpha channel when needed
 
-static RGB_STDS_IMAGENET: [f32; 3] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0];
+static RGB_STDS_IMAGENET: [f32; 4] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0, 64.0]; // last value is for Alpha channel when needed
 
 pub fn spawn_fusion_model_thread(
     session: Arc<Session>,
@@ -418,6 +418,8 @@ fn load_frame_dmabuf(
     if dest.format() != RGBA {
         return Err("The format of destination buffer is not RGBA".to_owned());
     }
+    const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
+
     let input = Image::new_preallocated(
         unsafe { OwnedFd::from_raw_fd(dma_buf.fd) },
         dma_buf.width,
@@ -436,6 +438,15 @@ fn load_frame_dmabuf(
     trace!("Dest size: {}", dest.size());
     let tensor_vol = tensor.volume() as usize;
     trace!("Tensor volume: {}", tensor_vol);
+    let tensor_channels = *tensor.shape().last().unwrap_or(&3) as usize;
+    match tensor_channels {
+        3 | 4 => {}
+        _ => {
+            return Err(format!(
+                "Input tensor has an invalid number of channels for images: {tensor_channels}"
+            ))
+        }
+    }
     match tensor.tensor_type() {
         TensorType::U8 => {
             let mut tensor_mapped = match tensor.maprw() {
@@ -445,10 +456,10 @@ fn load_frame_dmabuf(
             let mut dest_mapped = dest.mmap();
             let data = dest_mapped.as_slice_mut();
 
-            for i in 0..tensor_vol / 3 {
-                tensor_mapped[i * 3] = data[i * 4];
-                tensor_mapped[i * 3 + 1] = data[i * 4 + 1];
-                tensor_mapped[i * 3 + 2] = data[i * 4 + 2];
+            for i in 0..tensor_vol / tensor_channels {
+                for j in 0..tensor_channels {
+                    tensor_mapped[i * tensor_channels + j] = data[i * DATA_CHANNELS + j];
+                }
             }
         }
         TensorType::I16 => todo!(),
@@ -464,10 +475,11 @@ fn load_frame_dmabuf(
 
             let mut dest_mapped = dest.mmap();
             let data = dest_mapped.as_slice_mut();
-            for i in 0..tensor_vol / 3 {
-                tensor_mapped[i * 3] = (data[i * 4] as i16 - 128) as i8;
-                tensor_mapped[i * 3 + 1] = (data[i * 4 + 1] as i16 - 128) as i8;
-                tensor_mapped[i * 3 + 2] = (data[i * 4 + 2] as i16 - 128) as i8;
+            for i in 0..tensor_vol / tensor_channels {
+                for j in 0..tensor_channels {
+                    tensor_mapped[i * tensor_channels + j] =
+                        (data[i * DATA_CHANNELS + j] as i16 - 128) as i8;
+                }
             }
         }
         TensorType::U32 => todo!(),
@@ -483,34 +495,36 @@ fn load_frame_dmabuf(
             let data = dest_mapped.as_slice_mut();
             match preprocess {
                 Preprocessing::Raw => {
-                    for i in 0..tensor_vol / 3 {
-                        tensor_mapped[i * 3] = data[i * 4] as f32;
-                        tensor_mapped[i * 3 + 1] = data[i * 4 + 1] as f32;
-                        tensor_mapped[i * 3 + 2] = data[i * 4 + 2] as f32;
+                    for i in 0..tensor_vol / tensor_channels {
+                        for j in 0..tensor_channels {
+                            tensor_mapped[i * tensor_channels + j] =
+                                data[i * DATA_CHANNELS + j] as f32;
+                        }
                     }
                 }
                 Preprocessing::UnsignedNorm => {
-                    for i in 0..tensor_vol / 3 {
-                        tensor_mapped[i * 3] = data[i * 4] as f32 / 255.0;
-                        tensor_mapped[i * 3 + 1] = data[i * 4 + 1] as f32 / 255.0;
-                        tensor_mapped[i * 3 + 2] = data[i * 4 + 2] as f32 / 255.0;
+                    for i in 0..tensor_vol / tensor_channels {
+                        for j in 0..tensor_channels {
+                            tensor_mapped[i * tensor_channels + j] =
+                                data[i * DATA_CHANNELS + j] as f32 / 255.0;
+                        }
                     }
                 }
                 Preprocessing::SignedNorm => {
-                    for i in 0..tensor_vol / 3 {
-                        tensor_mapped[i * 3] = data[i * 4] as f32 / 127.5 - 1.0;
-                        tensor_mapped[i * 3 + 1] = data[i * 4 + 1] as f32 / 127.5 - 1.0;
-                        tensor_mapped[i * 3 + 2] = data[i * 4 + 2] as f32 / 127.5 - 1.0;
+                    for i in 0..tensor_vol / tensor_channels {
+                        for j in 0..tensor_channels {
+                            tensor_mapped[i * tensor_channels + j] =
+                                data[i * DATA_CHANNELS + j] as f32 / 127.5 - 1.0;
+                        }
                     }
                 }
                 Preprocessing::ImageNet => {
-                    for i in 0..tensor_vol / 3 {
-                        tensor_mapped[i * 3] =
-                            (data[i * 4] as f32 - RGB_MEANS_IMAGENET[0]) / RGB_STDS_IMAGENET[0];
-                        tensor_mapped[i * 3 + 1] =
-                            (data[i * 4 + 1] as f32 - RGB_MEANS_IMAGENET[1]) / RGB_STDS_IMAGENET[1];
-                        tensor_mapped[i * 3 + 2] =
-                            (data[i * 4 + 2] as f32 - RGB_MEANS_IMAGENET[2]) / RGB_STDS_IMAGENET[2];
+                    for i in 0..tensor_vol / tensor_channels {
+                        for j in 0..tensor_channels {
+                            tensor_mapped[i * tensor_channels + j] =
+                                (data[i * DATA_CHANNELS + j] as f32 - RGB_MEANS_IMAGENET[j])
+                                    / RGB_STDS_IMAGENET[j];
+                        }
                     }
                 }
             }
