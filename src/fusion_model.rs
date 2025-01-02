@@ -7,11 +7,13 @@ use deepviewrt::{
     tensor::{Tensor, TensorType},
 };
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, RadarCube};
+use libc::memcpy;
 use log::{debug, error, info, trace};
 use ndarray::{s, Array};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     f32::consts::E,
+    ffi::c_void,
     fs::read,
     os::{
         fd::{AsRawFd, FromRawFd},
@@ -72,17 +74,51 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     } else {
         None
     };
-    let mut nn_context = Context::new(engine, model::memory_size(&model_data), 4096 * 1024)
+    let mut backbone = Context::new(engine, model::memory_size(&model_data), 4096 * 1024)
         .expect("NNContext init failed");
-    info!("NNContext initialized");
+    info!("NNContext for backbone initialized");
 
-    match nn_context.load_model(model_data) {
+    match backbone.load_model(model_data) {
         Ok(_) => info!("Loaded backbone model {:?}", model_name),
         Err(e) => {
             error!("Could not load model file {:?}: {:?}", model_name, e);
             return;
         }
     }
+
+    let mut decoder = None;
+    if let Some(ref path) = args.model_decoder {
+        let model_name = path.clone();
+        let model_data = match read(&model_name) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not open `{:?}` file: {:?}", model_name, e);
+                return;
+            }
+        };
+        let mut decoder_ctx = Context::new(None, model::memory_size(&model_data), 4096 * 1024)
+            .expect("NNContext init failed");
+        info!("NNContext for decoder initialized");
+        match decoder_ctx.load_model(model_data) {
+            Ok(_) => info!("Loaded decoder model {:?}", model_name),
+            Err(e) => {
+                error!(
+                    "Could not load decoder model file {:?}: {:?}",
+                    model_name, e
+                );
+                return;
+            }
+        }
+        let _ = decoder.insert(decoder_ctx);
+    }
+
+    let input_match = match get_input_match(&backbone, &decoder) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not match backbone outputs to decoder inputs: {}", e);
+            return;
+        }
+    };
 
     let sub_radarcube = session
         .declare_subscriber(&args.radarcube_topic)
@@ -105,11 +141,11 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         }
     };
 
-    let input_tensor_index = model::inputs(nn_context.model()).unwrap();
+    let input_tensor_index = model::inputs(backbone.model()).unwrap();
 
     let input_names: Vec<_> = input_tensor_index
         .iter()
-        .map(|v| model::layer_name(nn_context.model(), *v as usize).unwrap_or("NO_NAME"))
+        .map(|v| model::layer_name(backbone.model(), *v as usize).unwrap_or("NO_NAME"))
         .collect();
 
     let mut radar_input_index = 0;
@@ -127,7 +163,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     }
 
     let radar_input_shape: Vec<_> =
-        match nn_context.tensor_index(input_tensor_index[radar_input_index] as usize) {
+        match backbone.tensor_index(input_tensor_index[radar_input_index] as usize) {
             Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
             Err(e) => {
                 error!("Could not get input 0 from model: {:?}", e);
@@ -147,7 +183,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
     };
 
     let mut camera_input_tensor = if let Some(camera_input_index) = camera_input_index {
-        match nn_context.tensor_index(input_tensor_index[camera_input_index] as usize) {
+        match backbone.tensor_index(input_tensor_index[camera_input_index] as usize) {
             Ok(v) => {
                 // needed because the dvrt borrow is still mutable even though the Tensor
                 // pointer itself isn't mutable
@@ -241,7 +277,7 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         trace!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
         let radar_input_tensor =
-            match nn_context.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
+            match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Could not get input 0 from model: {:?}", e);
@@ -326,13 +362,19 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
             trace!("finished load_frame_dmabuf");
         }
 
-        if let Err(e) = nn_context.run() {
+        if let Err(e) = run_model(&backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
             return;
         }
+
+        let output_ctx = match decoder {
+            Some(ref v) => v,
+            None => &backbone,
+        };
+
         trace!("finished run model");
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
-        let mask = if let Ok(tensor) = nn_context.output(0) {
+        let mask = if let Ok(tensor) = output_ctx.output(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
             let data = tensor.mapro_f32().unwrap();
             let len = data.len();
@@ -386,6 +428,100 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         let mut guard = block_on(grid.lock());
         *guard = Some((occupied, timestamp));
     }
+}
+
+fn get_input_match(
+    backbone: &Context,
+    decoder: &Option<Context>,
+) -> Result<Vec<(usize, usize)>, String> {
+    if decoder.is_none() {
+        return Ok(Vec::new());
+    }
+    let decoder = decoder.as_ref().unwrap();
+    let backbone_outputs = model::outputs(backbone.model()).unwrap_or_default();
+    let decoder_inputs = model::inputs(decoder.model()).unwrap_or_default();
+    if backbone_outputs.len() != decoder_inputs.len() {
+        return Err("backbone output count and decoder input count are not equal".to_string());
+    }
+    let mut matching = Vec::new();
+    for bb_out in backbone_outputs {
+        let bb_out_shape = match backbone.tensor_index(bb_out as usize) {
+            Ok(v) => v.shape(),
+            Err(_) => continue,
+        };
+        let mut found = false;
+        for dc_in in decoder_inputs.iter() {
+            let dc_in_shape = match decoder.tensor_index(*dc_in as usize) {
+                Ok(v) => v.shape(),
+                Err(_) => continue,
+            };
+            if bb_out_shape == dc_in_shape {
+                matching.push((bb_out as usize, *dc_in as usize));
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!(
+                "could not find matching decoder input for backbone output with shape {}",
+                bb_out
+            ));
+        }
+    }
+
+    Ok(matching)
+}
+
+fn run_model(
+    backbone: &Context,
+    decoder: &mut Option<Context>,
+    input_match: &[(usize, usize)],
+) -> Result<(), deepviewrt::error::Error> {
+    backbone.run()?;
+    if decoder.is_none() {
+        return Ok(());
+    }
+    let decoder = decoder.as_mut().unwrap();
+    for (bb_out, dc_in) in input_match {
+        let output = match backbone.tensor_index(*bb_out) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get output tensor from backbone");
+                return Err(e);
+            }
+        };
+        let input = match decoder.tensor_index_mut(*dc_in) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get input tensor from decoder");
+                return Err(e);
+            }
+        };
+        let tensor_size = output.size() as usize;
+        let output_map = match output.mapro::<u8>() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not map output tensor from backbone");
+                return Err(e);
+            }
+        };
+        let mut input_map = match input.maprw::<u8>() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not map input tensor from decoder");
+                return Err(e);
+            }
+        };
+
+        unsafe {
+            memcpy(
+                input_map.as_mut_ptr() as *mut c_void,
+                output_map.as_ptr() as *const c_void,
+                tensor_size,
+            );
+        }
+    }
+    decoder.run()
 }
 
 #[allow(dead_code)]

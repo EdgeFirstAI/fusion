@@ -44,6 +44,10 @@ pub struct Args {
     #[arg(short, long, env)]
     pub model: Option<PathBuf>,
 
+    /// model decoder
+    #[arg(long, env)]
+    pub model_decoder: Option<PathBuf>,
+
     /// set the model to be polar
     #[arg(long, env, action)]
     pub model_polar: bool,
