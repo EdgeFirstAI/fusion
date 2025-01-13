@@ -677,7 +677,7 @@ checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
 [[package]]
 name = "deepviewrt"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#449565b5f203c28ea8825033794c180402b06980"
+source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
 dependencies = [
  "deepviewrt-sys",
 ]
@@ -685,7 +685,7 @@ dependencies = [
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#449565b5f203c28ea8825033794c180402b06980"
+source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
 dependencies = [
  "libc",
 ]
@@ -1374,9 +1374,9 @@ checksum = "5aaeb2981e0606ca11d79718f8bb01164f1d6ed75080182d3abf017e6d244b6d"
 
 [[package]]
 name = "libloading"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
+checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
  "windows-targets 0.52.6",
@@ -1455,6 +1455,7 @@ dependencies = [
  "lapjv",
  "libc",
  "log",
+ "moonfire-tflite",
  "nalgebra",
  "ndarray 0.16.1",
  "pidfd_getfd",
@@ -1511,6 +1512,19 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "moonfire-tflite"
+version = "0.0.1"
+source = "git+https://github.com/Charlie-Auzone/moonfire-tflite.git#217797350f18aeef56c28f2df723ab33bf739873"
+dependencies = [
+ "cc",
+ "libc",
+ "libloading",
+ "num",
+ "num-derive",
+ "num-traits",
 ]
 
 [[package]]
@@ -1608,6 +1622,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43794a0ace135be66a25d3ae77d41b91615fb68ae937f904090203e81f755b65"
 
 [[package]]
+name = "num"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+dependencies = [
+ "num-bigint",
+ "num-complex 0.4.6",
+ "num-integer",
+ "num-iter",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1651,6 +1679,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.77",
 ]
 
 [[package]]
