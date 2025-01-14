@@ -240,7 +240,7 @@ mod tests {
         measurements.copy_from_slice(&[0.3, 0.5, 1.0, 0.5]);
 
         let mut distances = OMatrix::<f32, Dyn, Dyn>::from_element(1, 1, 0.0);
-        for (_, mut column) in distances.column_iter_mut().enumerate() {
+        for mut column in distances.column_iter_mut() {
             let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Gaussian);
             column.copy_from(&dist);
         }

@@ -671,14 +671,14 @@ dependencies = [
 
 [[package]]
 name = "data-encoding"
-version = "2.6.0"
+version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8566979429cf69b49a5c740c60791108e86440e8be149bbea4fe54d2c32d6e2"
+checksum = "0e60eed09d8c01d3cee5b7d30acb059b76614c918fa0f992e0dd6eeb10daad6f"
 
 [[package]]
 name = "deepviewrt"
 version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#bc57d9b35101c8e36e2136bc366d957bfcaa885b"
+source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
 dependencies = [
  "deepviewrt-sys",
 ]
@@ -686,7 +686,7 @@ dependencies = [
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git?branch=main#bc57d9b35101c8e36e2136bc366d957bfcaa885b"
+source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
 dependencies = [
  "libc",
 ]
@@ -744,6 +744,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.96",
+]
+
+[[package]]
+name = "dma-buf"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d22ffee04765190bdf0cf3f86f488dd5c0fce20f74906df8413c38c099090f"
+dependencies = [
+ "log",
+ "rustix 0.38.43",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dma-heap"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046f097d486414ec55d719ff2b25f52d1cb106070481fba9e7809ae7f1cb1095"
+dependencies = [
+ "log",
+ "rustix 0.38.43",
+ "strum_macros",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1553,9 +1576,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.22"
+version = "0.4.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
+checksum = "04cbf5b083de1c7e0222a7a51dbfdba1cbe1c6ab0b15e29fff3f6c077fd9cd9f"
 dependencies = [
  "value-bag",
 ]
@@ -1578,6 +1601,8 @@ dependencies = [
  "cdr",
  "clap 4.5.26",
  "deepviewrt",
+ "dma-buf",
+ "dma-heap",
  "edgefirst-schemas",
  "env_logger",
  "g2d-sys",
@@ -1723,7 +1748,7 @@ version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
- "bitflags 2.6.0",
+ "bitflags 2.7.0",
  "cfg-if",
  "cfg_aliases",
  "libc",
@@ -2825,7 +2850,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
- "syn 2.0.77",
+ "syn 2.0.96",
 ]
 
 [[package]]
@@ -3175,28 +3200,11 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b913a3b5fe84142e269d63cc62b64319ccaf89b748fc31fe025177f767a756c4"
+checksum = "744018581f9a3454a9e15beb8a33b017183f1e7c0cd170232a2d1453b23a51c4"
 dependencies = [
  "getrandom",
-]
-
-[[package]]
-name = "vaal"
-version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cd1dc48b54a535386bc3d841d5c65a01e9e1de60"
-dependencies = [
- "deepviewrt",
- "vaal-sys",
-]
-
-[[package]]
-name = "vaal-sys"
-version = "0.0.0"
-source = "git+https://github.com/Charlie-AuZone/vaal-rs.git?branch=EDGEAI-364#cd1dc48b54a535386bc3d841d5c65a01e9e1de60"
-dependencies = [
- "libc",
 ]
 
 [[package]]
