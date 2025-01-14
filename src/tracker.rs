@@ -5,7 +5,6 @@ use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
 use uuid::Uuid;
-use vaal::VAALBox;
 
 pub struct ByteTrackSettings {
     pub track_high_conf: f32,
@@ -21,13 +20,15 @@ pub struct ByteTrack {
     pub removed_tracks: Vec<Tracklet>,
     pub frame_count: i32,
     pub timestamp: u64,
-    pub uuid_map: HashMap<Uuid, i32>,
+    pub uuid_map_class: HashMap<Uuid, i32>,
+    #[cfg(feature = "model_output")]
+    pub uuid_map_radar_class: HashMap<Uuid, i32>,
     pub settings: ByteTrackSettings,
 }
 #[derive(Debug, Clone)]
 pub struct Tracklet {
     pub id: Uuid,
-    pub prev_boxes: vaal::VAALBox,
+    pub prev_boxes: TrackerBox,
     pub filter: ConstantVelocityXYAHModel2<f32>,
     pub expiry: u64,
     pub last_updated: u64,
@@ -35,9 +36,20 @@ pub struct Tracklet {
     pub count: i32,
     pub created: u64,
 }
+#[derive(Debug, Clone, Copy)]
+pub struct TrackerBox {
+    pub xmin: f32,
+    pub ymin: f32,
+    pub xmax: f32,
+    pub ymax: f32,
+    pub score: f32,
+    pub class: i32,
+    #[cfg(feature = "model_output")]
+    pub radar_class: i32,
+}
 
 impl Tracklet {
-    fn update(&mut self, vaalbox: &VAALBox, s: &ByteTrackSettings, ts: u64) {
+    fn update(&mut self, vaalbox: &TrackerBox, s: &ByteTrackSettings, ts: u64) {
         self.count += 1;
         self.expiry = ts + (s.track_extra_lifespan * 1e9) as u64;
         self.last_updated = ts;
@@ -48,22 +60,24 @@ impl Tracklet {
         self.filter.update(&vaalbox_to_xyah(vaalbox));
     }
 
-    pub fn get_predicted_location(&self) -> VAALBox {
+    pub fn get_predicted_location(&self) -> TrackerBox {
         let predicted_xyah = self.filter.mean.as_slice();
-        let mut expected = VAALBox {
+        let mut expected = TrackerBox {
             xmin: 0.0,
             xmax: 0.0,
             ymin: 0.0,
             ymax: 0.0,
             score: self.prev_boxes.score,
-            label: self.prev_boxes.label,
+            class: self.prev_boxes.class,
+            #[cfg(feature = "model_output")]
+            radar_class: self.prev_boxes.radar_class,
         };
         xyah_to_vaalbox(predicted_xyah, &mut expected);
         expected
     }
 }
 
-fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
+fn vaalbox_to_xyah(vaal_box: &TrackerBox) -> [f32; 4] {
     let x = (vaal_box.xmax + vaal_box.xmin) / 2.0;
     let y = (vaal_box.ymax + vaal_box.ymin) / 2.0;
     let w = (vaal_box.xmax - vaal_box.xmin).max(EPSILON);
@@ -73,7 +87,7 @@ fn vaalbox_to_xyah(vaal_box: &VAALBox) -> [f32; 4] {
     [x, y, a, h]
 }
 
-fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut VAALBox) {
+fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut TrackerBox) {
     if xyah.len() < 4 {
         return;
     }
@@ -98,7 +112,7 @@ pub struct TrackInfo {
 const INVALID_MATCH: f32 = 1000000.0;
 const EPSILON: f32 = 0.00001;
 
-fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
+fn iou(box1: &TrackerBox, box2: &TrackerBox) -> f32 {
     let intersection = (box1.xmax.min(box2.xmax) - box1.xmin.max(box2.xmin)).max(0.0)
         * (box1.ymax.min(box2.ymax) - box1.ymin.max(box2.ymin)).max(0.0);
 
@@ -119,7 +133,7 @@ fn iou(box1: &VAALBox, box2: &VAALBox) -> f32 {
 
 fn box_cost(
     track: &Tracklet,
-    new_box: &VAALBox,
+    new_box: &TrackerBox,
     distance: f32,
     score_threshold: f32,
     iou_threshold: f32,
@@ -132,13 +146,15 @@ fn box_cost(
 
     // use iou between predicted box and real box:
     let predicted_xyah = track.filter.mean.as_slice();
-    let mut expected = VAALBox {
+    let mut expected = TrackerBox {
         xmin: 0.0,
         xmax: 0.0,
         ymin: 0.0,
         ymax: 0.0,
         score: 0.0,
-        label: 0,
+        class: 0,
+        #[cfg(feature = "model_output")]
+        radar_class: 0,
     };
     xyah_to_vaalbox(predicted_xyah, &mut expected);
     let iou = iou(&expected, new_box);
@@ -156,7 +172,9 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
-            uuid_map: HashMap::new(),
+            uuid_map_class: HashMap::new(),
+            #[cfg(feature = "model_output")]
+            uuid_map_radar_class: HashMap::new(),
             settings: ByteTrackSettings {
                 track_extra_lifespan: 0.5,
                 track_high_conf: 0.5,
@@ -173,14 +191,16 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
-            uuid_map: HashMap::new(),
+            uuid_map_class: HashMap::new(),
+            #[cfg(feature = "model_output")]
+            uuid_map_radar_class: HashMap::new(),
             settings,
         }
     }
 
     fn compute_costs(
         &mut self,
-        boxes: &[VAALBox],
+        boxes: &[TrackerBox],
         score_threshold: f32,
         iou_threshold: f32,
         box_filter: &[bool],
@@ -216,7 +236,7 @@ impl ByteTrack {
         })
     }
 
-    pub fn update(&mut self, boxes: &mut [VAALBox], timestamp: u64) -> Vec<Option<TrackInfo>> {
+    pub fn update(&mut self, boxes: &mut [TrackerBox], timestamp: u64) -> Vec<Option<TrackInfo>> {
         self.frame_count += 1;
         let high_conf_ind = (0..boxes.len())
             .filter(|x| boxes[*x].score >= self.settings.track_high_conf)
@@ -263,7 +283,11 @@ impl ByteTrack {
 
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                     xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.uuid_map.insert(self.tracklets[x].id, boxes[i].label);
+                    self.uuid_map_class
+                        .insert(self.tracklets[x].id, boxes[i].class);
+                    #[cfg(feature = "model_output")]
+                    self.uuid_map_radar_class
+                        .insert(self.tracklets[x].id, boxes[i].radar_class);
                     self.tracklets[x].update(&observed_box, &self.settings, timestamp);
                 }
             }
@@ -318,7 +342,10 @@ impl ByteTrack {
         for i in (0..self.tracklets.len()).rev() {
             if self.tracklets[i].expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
-                self.uuid_map.remove_entry(&self.tracklets[i].id);
+                self.uuid_map_class.remove_entry(&self.tracklets[i].id);
+                #[cfg(feature = "model_output")]
+                self.uuid_map_radar_class
+                    .remove_entry(&self.tracklets[i].id);
                 let _ = self.tracklets.swap_remove(i);
             }
         }
@@ -345,7 +372,9 @@ impl ByteTrack {
                     count: 1,
                     created: timestamp,
                 });
-                self.uuid_map.insert(id, boxes[i].label);
+                self.uuid_map_class.insert(id, boxes[i].class);
+                #[cfg(feature = "model_output")]
+                self.uuid_map_radar_class.insert(id, boxes[i].radar_class);
             }
         }
         matched_info
@@ -362,28 +391,33 @@ impl ByteTrack {
 
 #[cfg(test)]
 mod tests {
-    use vaal::VAALBox;
+
+    use crate::tracker::TrackerBox;
 
     use super::{vaalbox_to_xyah, xyah_to_vaalbox};
 
     #[test]
     fn filter() {
-        let box1 = VAALBox {
+        let box1 = TrackerBox {
             xmin: 0.02135,
             xmax: 0.12438,
             ymin: 0.0134,
             ymax: 0.691,
             score: 0.0,
-            label: 0,
+            class: 0,
+            #[cfg(feature = "model_output")]
+            radar_class: 0,
         };
         let xyah = vaalbox_to_xyah(&box1);
-        let mut box2 = VAALBox {
+        let mut box2 = TrackerBox {
             xmin: 0.0,
             xmax: 0.0,
             ymin: 0.0,
             ymax: 0.0,
             score: 0.0,
-            label: 0,
+            class: 0,
+            #[cfg(feature = "model_output")]
+            radar_class: 0,
         };
         xyah_to_vaalbox(&xyah, &mut box2);
 

@@ -16,18 +16,18 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use tracker::{ByteTrack, ByteTrackSettings};
-use vaal::VAALBox;
+use tracker::{ByteTrack, ByteTrackSettings, TrackerBox};
+
 #[cfg(feature = "model_output")]
 use zenoh::prelude::sync::*;
 use zenoh::{config::Config, prelude::r#async::*};
 
 use ndarray::{self, Array2};
 mod fusion_model;
+mod image;
 mod kalman;
 mod setup;
 mod tracker;
-
 struct ParsedPoint {
     fields: HashMap<String, f64>,
     angle: f64,
@@ -342,6 +342,8 @@ fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
     for i in bins {
         for j in i {
             j.classes.clear();
+            #[cfg(feature = "model_output")]
+            j.radar_classes.clear();
             if j.last_masked + args.bin_delay < curr {
                 j.first_marked = 0;
             }
@@ -386,6 +388,12 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint
     } else {
         0
     };
+    #[cfg(feature = "model_output")]
+    let radar_class = if let Some(mode) = mode_slice(bins[i][j].radar_classes.as_slice()) {
+        *mode
+    } else {
+        0
+    };
 
     grid_point.fields.insert(
         "x".to_string(),
@@ -397,6 +405,10 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint
     );
     grid_point.fields.insert("z".to_string(), 0.0);
     grid_point.fields.insert("class".to_string(), class as f64);
+    #[cfg(feature = "model_output")]
+    grid_point
+        .fields
+        .insert("radar_class".to_string(), radar_class as f64);
     grid_point
         .fields
         .insert("count".to_string(), bins[i][j].classes.len() as f64);
@@ -421,6 +433,8 @@ fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
 
 struct Bin {
     classes: Vec<usize>,
+    #[cfg(feature = "model_output")]
+    radar_classes: Vec<usize>,
     speeds: Vec<f64>,
     last_masked: u128,
     first_marked: u128,
@@ -526,6 +540,8 @@ async fn main() {
         while j <= args.range_bin_limit[1] {
             range_bins.push(Bin {
                 classes: Vec::new(),
+                #[cfg(feature = "model_output")]
+                radar_classes: Vec::new(),
                 speeds: Vec::new(),
                 last_masked: 0,
                 first_marked: u128::MAX,
@@ -649,7 +665,6 @@ async fn main() {
         }
         let mut has_cluster_id = false;
         // points with the same cluster_id get the same class
-        // add_grid_as_points(&grid, &mut points, &args);
         let mut cluster_ids = HashMap::new();
         for (i, point) in points.iter_mut().enumerate() {
             if point.fields.contains_key("cluster_id") {
@@ -691,6 +706,29 @@ async fn main() {
                 points[*index]
                     .fields
                     .insert("class".to_string(), class as f64);
+            }
+            #[cfg(feature = "model_output")]
+            {
+                let mut radar_classes = Vec::new();
+                for index in id.1 {
+                    let radar_class = points[*index].fields["radar_class"].round() as i32;
+                    if radar_class <= 0 {
+                        continue;
+                    }
+                    radar_classes.push(radar_class);
+                }
+
+                let radar_class = if let Some(max) = max_slice(radar_classes.as_slice()) {
+                    *max
+                } else {
+                    0
+                };
+
+                for index in id.1 {
+                    points[*index]
+                        .fields
+                        .insert("radar_class".to_string(), radar_class as f64);
+                }
             }
         }
         let data = serialize_pcd(&points, &pcd.fields);
@@ -847,13 +885,15 @@ fn grid_points_radar_tracked(
             if *g_ij < args.model_threshold {
                 continue;
             }
-            boxes.push(VAALBox {
+            boxes.push(TrackerBox {
                 xmin: j as f32 - 1.0,
                 ymin: i as f32 - 1.0,
                 xmax: j as f32 + 1.0,
                 ymax: i as f32 + 1.0,
                 score: 1.0,
-                label: 1,
+                class: 1,
+                #[cfg(feature = "model_output")]
+                radar_class: 1,
             });
         }
     }
@@ -930,7 +970,7 @@ fn grid_points_radar_tracked(
             }
             points_in_grid.push(ind);
         }
-        if points_in_grid.len() > 0 {
+        if !points_in_grid.is_empty() {
             for ind in points_in_grid {
                 class[ind] = 1;
             }
@@ -1002,15 +1042,14 @@ fn grid_to_xy(i: f64, j: f64, args: &Args) -> (f64, f64) {
         args.range_bin_width
     };
     if args.model_polar {
-        let angle = args.angle_bin_limit[0] + j_width * (j as f64 + 0.5);
-        let range = args.range_bin_limit[0] + i_width * (i as f64 + 0.5);
+        let angle = args.angle_bin_limit[0] + j_width * (j + 0.5);
+        let range = args.range_bin_limit[0] + i_width * (i + 0.5);
         let x = (-angle).to_radians().cos() * range;
         let y = (-angle).to_radians().sin() * range;
         (x, y)
     } else {
-        let x = args.range_bin_limit[0] + i_width * (i as f64 + 0.5);
-        let y =
-            -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j as f64 + 0.5));
+        let x = args.range_bin_limit[0] + i_width * (i + 0.5);
+        let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j + 0.5));
         (x, y)
     }
 }
@@ -1062,6 +1101,8 @@ fn get_occupied_cluster(
             continue;
         }
         let class = points[id.1[0]].fields["class"];
+        #[cfg(feature = "model_output")]
+        let radar_class = points[id.1[0]].fields["radar_class"];
         let mut xyzv = id.1.iter().fold([0.0, 0.0, 0.0, 0.0], |mut xyzv, ind| {
             xyzv[0] += points[*ind].fields["x"];
             xyzv[1] += points[*ind].fields["y"];
@@ -1085,22 +1126,26 @@ fn get_occupied_cluster(
         p.fields.insert("z".to_string(), xyzv[2]);
         p.fields.insert("speed".to_string(), xyzv[3]);
         p.fields.insert("class".to_string(), class);
+        #[cfg(feature = "model_output")]
+        p.fields.insert("radar_class".to_string(), radar_class);
         p.fields.insert("count".to_string(), id.1.len() as f64);
         p.fields.insert("cluster_id".to_string(), *id.0 as f64);
         centroid_points.push(p);
     }
 
     // want to track points that have class != 0
-    let mut boxes: Vec<VAALBox> = centroid_points
+    let mut boxes: Vec<TrackerBox> = centroid_points
         .iter()
         // .filter(|p| p.fields["class"] > 0.0)
-        .map(|p| VAALBox {
+        .map(|p| TrackerBox {
             xmin: p.fields["x"] as f32 - 0.5,
             xmax: p.fields["x"] as f32 + 0.5,
             ymin: p.fields["y"] as f32 - 0.5,
             ymax: p.fields["y"] as f32 + 0.5,
             score: if p.fields["class"] > 0.0 { 1.0 } else { 0.3 },
-            label: p.fields["class"].round() as i32,
+            class: p.fields["class"].round() as i32,
+            #[cfg(feature = "model_output")]
+            radar_class: p.fields["radar_class"].round() as i32,
         })
         .collect();
     let timestamp = header.stamp.to_nanos();
@@ -1119,14 +1164,15 @@ fn get_occupied_cluster(
         {
             continue;
         }
-        if boxes[i].label == 0 {
-            centroid_points[i]
-                .fields
-                .insert("class".to_string(), point_tracker.uuid_map[&uuid] as f64);
-            trace!(
-                "setting point {} to {}",
-                i,
-                centroid_points[i].fields["class"],
+        if boxes[i].class == 0 {
+            centroid_points[i].fields.insert(
+                "class".to_string(),
+                point_tracker.uuid_map_class[&uuid] as f64,
+            );
+            #[cfg(feature = "model_output")]
+            centroid_points[i].fields.insert(
+                "radar_class".to_string(),
+                point_tracker.uuid_map_radar_class[&uuid] as f64,
             );
         }
     }
@@ -1165,8 +1211,15 @@ fn get_occupied_cluster(
         );
         p.fields.insert("z".to_string(), 0.0);
         p.fields.insert("speed".to_string(), 0.0);
-        p.fields
-            .insert("class".to_string(), point_tracker.uuid_map[&i.id] as f64);
+        p.fields.insert(
+            "class".to_string(),
+            point_tracker.uuid_map_class[&i.id] as f64,
+        );
+        #[cfg(feature = "model_output")]
+        p.fields.insert(
+            "radar_class".to_string(),
+            point_tracker.uuid_map_radar_class[&i.id] as f64,
+        );
         p.fields.insert("count".to_string(), 0.0);
         p.fields.insert("cluster_id".to_string(), 0.0);
         centroid_points.push(p);
@@ -1184,7 +1237,17 @@ fn get_occupied_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in ["x", "y", "z", "class", "speed", "count", "cluster_id"] {
+    for char in [
+        "x",
+        "y",
+        "z",
+        "class",
+        "speed",
+        "count",
+        "cluster_id",
+        #[cfg(feature = "model_output")]
+        "radar_class",
+    ] {
         insert_field(
             &mut centroid_pcd,
             PointField {
@@ -1238,6 +1301,11 @@ fn get_occupied_no_cluster(
         let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
         let class = p.fields["class"] as usize;
         bins[i][j].classes.push(class);
+
+        #[cfg(feature = "model_output")]
+        if let Some(radar_class) = p.fields.get("radar_class") {
+            bins[i][j].radar_classes.push(*radar_class as usize);
+        }
 
         if let Some(speed) = p.fields.get("speed") {
             bins[i][j].speeds.push(*speed);
@@ -1357,7 +1425,16 @@ fn get_occupied_no_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in ["x", "y", "z", "class", "speed", "count"] {
+    for char in [
+        "x",
+        "y",
+        "z",
+        "class",
+        "speed",
+        "count",
+        #[cfg(feature = "model_output")]
+        "radar_class",
+    ] {
         insert_field(
             &mut grid_pcd,
             PointField {

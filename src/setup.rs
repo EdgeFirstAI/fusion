@@ -24,6 +24,10 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/model/mask")]
     pub mask_topic: String,
 
+    /// zenoh key expression for camera DMA buffers
+    #[arg(long, env, default_value = "rt/camera/dma")]
+    pub camera_topic: String,
+
     /// camera info topic
     #[arg(long, env, default_value = "rt/camera/info")]
     pub info_topic: String,
@@ -40,6 +44,10 @@ pub struct Args {
     #[arg(short, long, env)]
     pub model: Option<PathBuf>,
 
+    /// model decoder
+    #[arg(long, env)]
+    pub model_decoder: Option<PathBuf>,
+
     /// set the model to be polar
     #[arg(long, env, action)]
     pub model_polar: bool,
@@ -55,6 +63,11 @@ pub struct Args {
     /// radarcube input topic
     #[arg(long, env, default_value = "rt/radar/cube")]
     pub radarcube_topic: String,
+
+    #[cfg(feature = "model_output")]
+    /// radar model output
+    #[arg(long, env, default_value = "rt/fusion/model_output")]
+    pub model_output_topic: String,
 
     /// enable tracking to reduce flickering in model output
     #[arg(long, env, action)]
