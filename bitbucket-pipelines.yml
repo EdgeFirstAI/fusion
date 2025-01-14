@@ -29,7 +29,7 @@ definitions:
           - cargo clippy --target=aarch64-unknown-linux-gnu --message-format=json > clippy.json || true
           - cargo audit --json > audit.json || true
           - cargo outdated --depth 1 --format json > outdated.json || true
-          - cargo sonar --clippy --audit --outdated
+          - cargo sonar --clippy --outdated
         artifacts:
           - target/aarch64-unknown-linux-gnu/release/maivin-fusion
           - sonar-issues.json
