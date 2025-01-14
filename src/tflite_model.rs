@@ -3,7 +3,6 @@ use async_std::{sync::Mutex, task::block_on};
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, RadarCube};
 use libc::memcpy;
 use log::{debug, error, info, trace};
-use moonfire_tflite::{delegate::Delegate, Interpreter, Model, Tensor, TensorType};
 use ndarray::Array;
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
@@ -15,6 +14,11 @@ use std::{
     },
     sync::Arc,
     time::{Duration, Instant},
+};
+use tflitec_sys::{
+    delegate::Delegate,
+    tensor::{TensorMut, TensorType},
+    Interpreter, TFLiteLib,
 };
 use zenoh::{
     prelude::{r#async::*, sync::*},
@@ -34,6 +38,7 @@ use crate::{
 };
 
 static NPU_PATH: &str = "libvx_delegate.so";
+static TFLITEC_PATH: &str = "libtensorflowlite_c.so";
 pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
     if args.model.is_none() {
         info!("No radar model was given");
@@ -50,10 +55,21 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
 
     info!("Model read from file");
 
-    let model = Model::from_mem(model_data).expect(&format!(
-        "Could not create TFLite model from {:?}",
-        model_name
-    ));
+    let tflite_lib = match TFLiteLib::new(TFLITEC_PATH) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open TFLite library: {e}");
+            return;
+        }
+    };
+
+    let model = match tflite_lib.new_model_from_mem(model_data) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not create TFLite model from {:?}: {e}", model_name);
+            return;
+        }
+    };
 
     let sub_radarcube = session
         .declare_subscriber(&args.radarcube_topic)
@@ -76,14 +92,26 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
         }
     };
 
-    let mut builder = Interpreter::builder();
+    let mut builder = match tflite_lib.new_interpreter_builder() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while building backbone: {}", e);
+            return;
+        }
+    };
 
     if args.engine.to_lowercase() == "npu" {
         info!("Using delegate {:?}", NPU_PATH);
         let delegate = Delegate::load_external(NPU_PATH).unwrap();
         builder.add_owned_delegate(delegate);
     }
-    let mut backbone = builder.build(&model).expect("Backbone init failed");
+    let mut backbone = match builder.build(&model) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while building backbone: {}", e);
+            return;
+        }
+    };
 
     info!("TFLite context for backbone initialized");
 
@@ -97,12 +125,27 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
                 return;
             }
         };
-        let model = Model::from_mem(model_data).expect(&format!(
-            "Could not create TFLite model from {:?}",
-            model_name
-        ));
-        let builder = Interpreter::builder();
-        let decoder_ctx = builder.build(&model).expect("TFLite init failed");
+        let model = match tflite_lib.new_model_from_mem(model_data) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not create TFLite model from {:?}: {e}", model_name);
+                return;
+            }
+        };
+        let builder = match tflite_lib.new_interpreter_builder() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Error while building decoder: {}", e);
+                return;
+            }
+        };
+        let decoder_ctx = match builder.build(&model) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Error while building decoder: {}", e);
+                return;
+            }
+        };
         info!("TFLite context for decoder initialized");
         let _ = decoder.insert(decoder_ctx);
     }
@@ -118,7 +161,13 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
     let mut radar_input_index = 0;
     let mut camera_input_index = None;
 
-    let inputs = backbone.inputs();
+    let inputs = match backbone.inputs_mut() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not get backbone inputs: {}", e);
+            return;
+        }
+    };
     for i in 0..inputs.len() {
         debug!("found input: {:?}", inputs[i]);
         if inputs[i].name().contains("radar") {
@@ -130,11 +179,23 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             debug!("setting camera input index to {}", i);
         }
     }
-    let radar_input_shape: Vec<_> = inputs[radar_input_index].shape();
+    let radar_input_shape: Vec<_> = match inputs[radar_input_index].shape() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not get input shape: {}", e);
+            return;
+        }
+    };
     debug!("got input tensor shape: {:?}", radar_input_shape);
 
     let camera_input_shape = if let Some(ref camera_input_index) = camera_input_index {
-        inputs[*camera_input_index].shape()
+        match inputs[*camera_input_index].shape() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get input shape: {}", e);
+                return;
+            }
+        }
     } else {
         vec![1, 1, 1, 1]
     };
@@ -221,7 +282,14 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
         let cube = cube.as_slice().unwrap();
         trace!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
 
-        let radar_input_tensor = &mut backbone.inputs_mut()[radar_input_index];
+        let mut backbone_inputs = match backbone.inputs_mut() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Error while getting inputs of backbone: {:?}", e);
+                return;
+            }
+        };
+        let radar_input_tensor = &mut backbone_inputs[radar_input_index];
         let input_tensor_map = match radar_input_tensor.maprw() {
             Ok(v) => v,
             Err(e) => {
@@ -233,7 +301,8 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
         let _ = input_tensor_map;
 
         if camera_input_index.is_some() {
-            let camera_input_tensor = &mut backbone.inputs_mut()[camera_input_index.unwrap()];
+            let camera_input_tensor = &mut backbone_inputs[camera_input_index.unwrap()];
+
             let sub_camera = sub_camera.as_ref().unwrap();
             let sample = if let Some(v) = sub_camera.drain().last() {
                 v
@@ -304,7 +373,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             }
             trace!("finished load_frame_dmabuf");
         }
-
+        drop(backbone_inputs);
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
             return;
@@ -317,9 +386,22 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
 
         trace!("finished run model");
         let mut output_shape: Vec<usize> = vec![0, 0, 0, 0];
-        let mask = if output_ctx.outputs().len() > 0 {
-            let tensor = &output_ctx.outputs()[0];
-            output_shape = tensor.shape();
+        let outputs = match output_ctx.outputs() {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Cannot get outputs: {:?}", e);
+                return;
+            }
+        };
+        let mask = if outputs.len() > 0 {
+            let tensor = &outputs[0];
+            output_shape = match tensor.shape() {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Cannot get tensor shape: {:?}", e);
+                    return;
+                }
+            };
             let data = match tensor.mapro() {
                 Ok(v) => v,
                 Err(e) => {
@@ -388,17 +470,17 @@ fn get_input_match(
         return Ok(Vec::new());
     }
     let decoder = decoder.as_ref().unwrap();
-    let backbone_outputs = backbone.outputs();
-    let decoder_inputs = decoder.inputs();
+    let backbone_outputs = backbone.outputs()?;
+    let decoder_inputs = decoder.inputs_mut()?;
     if backbone_outputs.len() != decoder_inputs.len() {
         return Err("backbone output count and decoder input count are not equal".to_string());
     }
     let mut matching = Vec::new();
     for bb_out in 0..backbone_outputs.len() {
-        let bb_out_shape = backbone_outputs[bb_out].shape();
+        let bb_out_shape = backbone_outputs[bb_out].shape()?;
         let mut found = false;
         for dc_in in 0..decoder_inputs.len() {
-            let dc_in_shape = decoder_inputs[dc_in].shape();
+            let dc_in_shape = decoder_inputs[dc_in].shape()?;
             if bb_out_shape == dc_in_shape {
                 matching.push((bb_out, dc_in));
                 found = true;
@@ -427,8 +509,8 @@ fn run_model(
     }
     let decoder = decoder.as_mut().unwrap();
     for (bb_out, dc_in) in input_match {
-        let output = &backbone.outputs()[*bb_out];
-        let input = &mut decoder.inputs_mut()[*dc_in];
+        let output = &backbone.outputs()?[*bb_out];
+        let input = &mut decoder.inputs_mut()?[*dc_in];
         let tensor_size = output.byte_size();
         let output_map = match output.mapro::<u8>() {
             Ok(v) => v,
@@ -468,19 +550,19 @@ static RGB_MEANS_IMAGENET: [f32; 4] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255
 static RGB_STDS_IMAGENET: [f32; 4] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0, 64.0]; // last value is for Alpha channel when needed
 
 fn load_frame_dmabuf(
-    tensor: &mut Tensor,
+    tensor: &mut TensorMut,
     img_mgr: &ImageManager,
     dest: &mut Image,
     dma_buf: &DmaBuf,
     preprocess: Preprocessing,
 ) -> Result<(), String> {
-    if dest.height() as usize != tensor.shape()[1] {
+    if dest.height() as usize != tensor.shape()?[1] {
         return Err(
             "The height of the destination buffer is not equal to the height of the tensor"
                 .to_owned(),
         );
     }
-    if dest.width() as usize != tensor.shape()[2] {
+    if dest.width() as usize != tensor.shape()?[2] {
         return Err(
             "The width of the destination buffer is not equal to the width of the tensor"
                 .to_owned(),
@@ -507,9 +589,9 @@ fn load_frame_dmabuf(
         }
     }
     trace!("Dest size: {}", dest.size());
-    let tensor_vol = tensor.volume() as usize;
+    let tensor_vol = tensor.volume()? as usize;
     trace!("Tensor volume: {}", tensor_vol);
-    let tensor_channels = *tensor.shape().last().unwrap_or(&3) as usize;
+    let tensor_channels = *tensor.shape()?.last().unwrap_or(&3) as usize;
     match tensor_channels {
         3 | 4 => {}
         _ => {
@@ -599,6 +681,16 @@ fn load_frame_dmabuf(
         }
         TensorType::Complex64 => todo!(),
         TensorType::Bool => todo!(),
+        TensorType::UnknownType => todo!(),
+        TensorType::Float64 => todo!(),
+        TensorType::Complex128 => todo!(),
+        TensorType::UInt64 => todo!(),
+        TensorType::Resource => todo!(),
+        TensorType::Variant => todo!(),
+        TensorType::UInt32 => todo!(),
+        TensorType::UInt16 => todo!(),
+        TensorType::Int4 => todo!(),
+        TensorType::BFloat16 => todo!(),
     };
 
     Ok(())

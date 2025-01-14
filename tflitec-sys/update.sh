@@ -1,0 +1,1 @@
+BINDGEN_EXTRA_CLANG_ARGS="-I./" bindgen --dynamic-loading tensorflowlite_c --allowlist-function 'TfLite.*' tensorflow/lite/core/c/c_api.h > src/ffi.rs

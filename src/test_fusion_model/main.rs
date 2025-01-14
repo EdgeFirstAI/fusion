@@ -4,8 +4,8 @@ use clap::Parser;
 use deepviewrt::{context::Context, engine::Engine, model};
 use env_logger::Env;
 use log::{error, info};
-use moonfire_tflite::{delegate::Delegate, Interpreter, Model};
 use setup::Args;
+use tflitec_sys::{delegate::Delegate, TFLiteLib};
 mod setup;
 
 const TFLITE_NPU_PATH: &str = "libvx_delegate.so";
@@ -22,7 +22,7 @@ fn main() {
             run_rtm(&args, model_data);
         }
         Some(v) if v.to_ascii_lowercase() == "tflite" => {
-            run_tflite(&args, model_data);
+            run_tflite(&args, model_data).unwrap();
         }
         Some(v) => {
             error!("Unknown extension: {:?}", v);
@@ -33,9 +33,16 @@ fn main() {
     }
 }
 
-fn run_tflite(args: &Args, model_data: Vec<u8>) {
-    let model = Model::from_mem(model_data).unwrap();
-    let mut builder = Interpreter::builder();
+fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
+    let tflite = match TFLiteLib::new("libtensorflowlite_c.so") {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(format!("Could not open libtensorflowlite_c.so: {:?}", e));
+        }
+    };
+
+    let model = tflite.new_model_from_mem(model_data).unwrap();
+    let mut builder = tflite.new_interpreter_builder()?;
 
     if args.engine == "npu" {
         let delegate = Delegate::load_external(TFLITE_NPU_PATH)
@@ -46,14 +53,14 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) {
     let mut interpreter = builder.build(&model).unwrap();
     info!(
         "interpreter with {} inputs, {} outputs",
-        interpreter.inputs().len(),
-        interpreter.outputs().len()
+        interpreter.inputs_mut()?.len(),
+        interpreter.outputs()?.len()
     );
-    let inputs = interpreter.inputs();
+    let inputs = interpreter.inputs_mut()?;
     for i in 0..inputs.len() {
         info!("input: {:?}", inputs[i]);
     }
-    let outputs = interpreter.outputs();
+    let outputs = interpreter.outputs()?;
     for i in 0..outputs.len() {
         info!("output: {:?}", outputs[i]);
     }
@@ -64,6 +71,7 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) {
         let elapsed = start.elapsed();
         info!("Model took {:?}", elapsed);
     }
+    Ok(())
 }
 
 fn run_rtm(args: &Args, model_data: Vec<u8>) {

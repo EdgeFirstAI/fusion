@@ -1455,12 +1455,12 @@ dependencies = [
  "lapjv",
  "libc",
  "log",
- "moonfire-tflite",
  "nalgebra",
  "ndarray 0.16.1",
  "pidfd_getfd",
  "serde",
  "serde_json",
+ "tflitec-sys",
  "uuid",
  "videostream",
  "zenoh",
@@ -1512,19 +1512,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "moonfire-tflite"
-version = "0.0.1"
-source = "git+https://github.com/Charlie-Auzone/moonfire-tflite.git#217797350f18aeef56c28f2df723ab33bf739873"
-dependencies = [
- "cc",
- "libc",
- "libloading",
- "num",
- "num-derive",
- "num-traits",
 ]
 
 [[package]]
@@ -2775,6 +2762,17 @@ name = "textwrap"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23d434d3f8967a09480fb04132ebe0a3e088c173e6d0ee7897abbdf4eab0f8b9"
+
+[[package]]
+name = "tflitec-sys"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "libloading",
+ "num",
+ "num-derive",
+ "num-traits",
+]
 
 [[package]]
 name = "thiserror"
