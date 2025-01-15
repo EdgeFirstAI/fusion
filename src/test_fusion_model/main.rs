@@ -18,10 +18,10 @@ fn main() {
     info!("Model read from file");
 
     match args.model.extension() {
-        Some(v) if v.to_ascii_lowercase() == "rtm" => {
+        Some(v) if v.eq_ignore_ascii_case("rtm") => {
             run_rtm(&args, model_data);
         }
-        Some(v) if v.to_ascii_lowercase() == "tflite" => {
+        Some(v) if v.eq_ignore_ascii_case("tflite") => {
             run_tflite(&args, model_data).unwrap();
         }
         Some(v) => {
