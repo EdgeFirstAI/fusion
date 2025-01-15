@@ -168,13 +168,13 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             return;
         }
     };
-    for i in 0..inputs.len() {
-        debug!("found input: {:?}", inputs[i]);
-        if inputs[i].name().contains("radar") {
+    for (i, inp) in inputs.iter().enumerate() {
+        debug!("found input: {:?}", inp);
+        if inp.name().contains("radar") {
             radar_input_index = i;
             debug!("setting radar input index to {}", i);
         }
-        if inputs[i].name().contains("camera") {
+        if inp.name().contains("camera") {
             let _ = camera_input_index.insert(i);
             debug!("setting camera input index to {}", i);
         }
@@ -393,7 +393,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
                 return;
             }
         };
-        let mask = if outputs.len() > 0 {
+        let mask = if !outputs.is_empty() {
             let tensor = &outputs[0];
             output_shape = match tensor.shape() {
                 Ok(v) => v,
@@ -411,7 +411,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             };
             let len = data.len();
             let mut buffer = vec![0.0f32; len];
-            buffer.copy_from_slice(&data);
+            buffer.copy_from_slice(data);
             buffer
         } else {
             error!("Did not find model output");
@@ -448,7 +448,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
 
         let mut occupied_ = mask.into_iter();
         let mut occupied = Vec::new();
-        for i in 0..output_shape[2] as usize {
+        for i in 0..output_shape[2] {
             occupied.push(Vec::new());
             for _ in 0..output_shape[1] {
                 let item = occupied_.next().unwrap();
@@ -476,11 +476,11 @@ fn get_input_match(
         return Err("backbone output count and decoder input count are not equal".to_string());
     }
     let mut matching = Vec::new();
-    for bb_out in 0..backbone_outputs.len() {
-        let bb_out_shape = backbone_outputs[bb_out].shape()?;
+    for (bb_out, outp) in backbone_outputs.iter().enumerate() {
+        let bb_out_shape = outp.shape()?;
         let mut found = false;
-        for dc_in in 0..decoder_inputs.len() {
-            let dc_in_shape = decoder_inputs[dc_in].shape()?;
+        for (dc_in, inp) in decoder_inputs.iter().enumerate() {
+            let dc_in_shape = inp.shape()?;
             if bb_out_shape == dc_in_shape {
                 matching.push((bb_out, dc_in));
                 found = true;
@@ -589,9 +589,9 @@ fn load_frame_dmabuf(
         }
     }
     trace!("Dest size: {}", dest.size());
-    let tensor_vol = tensor.volume()? as usize;
+    let tensor_vol = tensor.volume()?;
     trace!("Tensor volume: {}", tensor_vol);
-    let tensor_channels = *tensor.shape()?.last().unwrap_or(&3) as usize;
+    let tensor_channels = { *tensor.shape()?.last().unwrap_or(&3) };
     match tensor_channels {
         3 | 4 => {}
         _ => {

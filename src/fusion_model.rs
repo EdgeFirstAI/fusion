@@ -28,13 +28,11 @@ pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Optio
         }
         Some(_) => {
             error!("Unknown model type extension for {:?}", model_name);
-            return;
         }
         None => {
             error!("No extension for {:?}", model_name);
-            return;
         }
-    };
+    }
 }
 
 pub fn preprocess_cube(

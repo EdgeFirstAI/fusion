@@ -14,7 +14,7 @@ fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let model_data =
-        read(args.model.clone()).expect(&format!("Did not find `{:?}` file", args.model));
+        read(args.model.clone()).unwrap_or_else(|_| panic!("Did not find `{:?}` file", args.model));
     info!("Model read from file");
 
     match args.model.extension() {
@@ -46,7 +46,7 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
 
     if args.engine == "npu" {
         let delegate = Delegate::load_external(TFLITE_NPU_PATH)
-            .expect(&format!("Initializing {TFLITE_NPU_PATH} engine failed"));
+            .unwrap_or_else(|_| panic!("Initializing {TFLITE_NPU_PATH} engine failed"));
         builder.add_owned_delegate(delegate);
     }
 
@@ -57,12 +57,12 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
         interpreter.outputs()?.len()
     );
     let inputs = interpreter.inputs_mut()?;
-    for i in 0..inputs.len() {
-        info!("input: {:?}", inputs[i]);
+    for inp in inputs {
+        info!("input: {:?}", inp);
     }
     let outputs = interpreter.outputs()?;
-    for i in 0..outputs.len() {
-        info!("output: {:?}", outputs[i]);
+    for outp in outputs {
+        info!("output: {:?}", outp);
     }
 
     for _ in 0..10 {
@@ -77,7 +77,8 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
 fn run_rtm(args: &Args, model_data: Vec<u8>) {
     let engine = if args.engine == "npu" {
         Some(
-            Engine::new(RTM_NPU_PATH).expect(&format!("Initializing {RTM_NPU_PATH} engine failed")),
+            Engine::new(RTM_NPU_PATH)
+                .unwrap_or_else(|_| panic!("Initializing {RTM_NPU_PATH} engine failed")),
         )
     } else {
         None
