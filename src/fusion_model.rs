@@ -177,10 +177,10 @@ mod swap_axes_test {
             .lines()
             .map(|s| s.unwrap().parse().unwrap())
             .collect();
-        let flat_out: Vec<f32> = flat_output.iter().map(|v| *v).collect();
+        let flat_out: Vec<f32> = flat_output.to_vec();
 
         let flat = cube.flatten();
-        let flat_cube: Vec<f32> = flat.as_slice().unwrap().iter().map(|v| *v).collect();
+        let flat_cube: Vec<f32> = flat.as_slice().unwrap().to_vec();
         assert!(
             vec_compare(&flat_cube, &flat_out),
             "Output not equal:\nRust: {:?}\nNump: {:?}",

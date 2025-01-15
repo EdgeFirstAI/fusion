@@ -59,7 +59,7 @@ pub enum Rotation {
     Rotation270 = g2d_rotation_G2D_ROTATION_270 as isize,
 }
 
-impl<'a> G2DBuffer<'a> {
+impl G2DBuffer<'_> {
     pub unsafe fn buf_handle(&self) -> *mut c_void {
         (*self.buf).buf_handle
     }
@@ -77,7 +77,7 @@ impl<'a> G2DBuffer<'a> {
     }
 }
 
-impl<'a> Drop for G2DBuffer<'a> {
+impl Drop for G2DBuffer<'_> {
     fn drop(&mut self) {
         self.imgmgr.free(self);
     }
@@ -416,15 +416,12 @@ impl TryFrom<&Image> for Frame {
     type Error = Box<dyn Error>;
 
     fn try_from(img: &Image) -> Result<Self, Self::Error> {
-        let frame = match Frame::new(
+        let frame = Frame::new(
             img.width(),
             img.height(),
             0,
             img.format().to_string().as_str(),
-        ) {
-            Ok(f) => f,
-            Err(e) => return Err(e),
-        };
+        )?;
         match frame.attach(img.fd().as_raw_fd(), 0, 0) {
             Ok(_) => (),
             Err(e) => return Err(e),
