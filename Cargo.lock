@@ -677,16 +677,18 @@ checksum = "0e60eed09d8c01d3cee5b7d30acb059b76614c918fa0f992e0dd6eeb10daad6f"
 
 [[package]]
 name = "deepviewrt"
-version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git#3a2f4fad36bf73d60ed3a08433b2352a49c7f77e"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90bcfbe4cbac2011ed1aac2408ae8db72a82aba9be63f9910d58a9445c94c68e"
 dependencies = [
  "deepviewrt-sys",
 ]
 
 [[package]]
 name = "deepviewrt-sys"
-version = "0.0.0"
-source = "git+https://github.com/DeepViewML/deepviewrt-rs.git#3a2f4fad36bf73d60ed3a08433b2352a49c7f77e"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7d3799f359b2036715f769c2a33fa5ef895886a70f050c247834228e99c2496"
 dependencies = [
  "libc",
 ]
