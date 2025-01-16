@@ -1,0 +1,17 @@
+[package]
+name = "tflitec-sys"
+description = "Low-level FFI bindings for the TensorflowLite C API Library"
+license = "AGPL-3.0"
+homepage = "https://support.deepviewml.com"
+repository = "https://bitbucket.org/au-zone/maivin-fusion/src"
+keywords = ["deepview", "visionpack"]
+categories = ["computer-vision", "multimedia::video", "external-ffi-bindings"]
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+libc = "^0.2"
+libloading = "0.8.1"
+num = "0.4"
+num-derive = "0.4"
+num-traits = "0.2"

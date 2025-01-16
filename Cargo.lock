@@ -678,7 +678,7 @@ checksum = "0e60eed09d8c01d3cee5b7d30acb059b76614c918fa0f992e0dd6eeb10daad6f"
 [[package]]
 name = "deepviewrt"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
+source = "git+https://github.com/DeepViewML/deepviewrt-rs.git#3a2f4fad36bf73d60ed3a08433b2352a49c7f77e"
 dependencies = [
  "deepviewrt-sys",
 ]
@@ -686,7 +686,7 @@ dependencies = [
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
+source = "git+https://github.com/DeepViewML/deepviewrt-rs.git#3a2f4fad36bf73d60ed3a08433b2352a49c7f77e"
 dependencies = [
  "libc",
 ]
@@ -1614,6 +1614,7 @@ dependencies = [
  "pidfd_getfd",
  "serde",
  "serde_json",
+ "tflitec-sys",
  "uuid",
  "videostream",
  "zenoh",
@@ -1761,6 +1762,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43794a0ace135be66a25d3ae77d41b91615fb68ae937f904090203e81f755b65"
 
 [[package]]
+name = "num"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+dependencies = [
+ "num-bigint",
+ "num-complex 0.4.6",
+ "num-integer",
+ "num-iter",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1804,6 +1819,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.96",
 ]
 
 [[package]]
@@ -2906,6 +2932,17 @@ name = "textwrap"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23d434d3f8967a09480fb04132ebe0a3e088c173e6d0ee7897abbdf4eab0f8b9"
+
+[[package]]
+name = "tflitec-sys"
+version = "1.0.0"
+dependencies = [
+ "libc",
+ "libloading",
+ "num",
+ "num-derive",
+ "num-traits",
+]
 
 [[package]]
 name = "thiserror"

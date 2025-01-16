@@ -26,7 +26,9 @@ use ndarray::{self, Array2};
 mod fusion_model;
 mod image;
 mod kalman;
+mod rtm_model;
 mod setup;
+mod tflite_model;
 mod tracker;
 struct ParsedPoint {
     fields: HashMap<String, f64>,
