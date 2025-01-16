@@ -43,8 +43,7 @@ edgefirst-schemas = "1.1"
 env_logger = "0.10"
 zstd = { version = "0.13", features = ["experimental"] }
 ndarray = {version ="0.16.1", features= ["rayon"] }
-deepviewrt = { git = "https://github.com/Charlie-Auzone/deepviewrt-rs.git", branch = "EDGEAI-442" } 
-#deepviewrt = { path = "../deepviewrt-rs" }
+deepviewrt = { git = "https://github.com/DeepViewML/deepviewrt-rs.git" } 
 lapjv = "0.2.1"
 uuid = { version = "1.11.0", features = ["v4"] }
 nalgebra = "0.33.2"

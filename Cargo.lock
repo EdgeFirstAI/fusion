@@ -678,7 +678,7 @@ checksum = "0e60eed09d8c01d3cee5b7d30acb059b76614c918fa0f992e0dd6eeb10daad6f"
 [[package]]
 name = "deepviewrt"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
+source = "git+https://github.com/DeepViewML/deepviewrt-rs.git#3a2f4fad36bf73d60ed3a08433b2352a49c7f77e"
 dependencies = [
  "deepviewrt-sys",
 ]
@@ -686,7 +686,7 @@ dependencies = [
 [[package]]
 name = "deepviewrt-sys"
 version = "0.0.0"
-source = "git+https://github.com/Charlie-Auzone/deepviewrt-rs.git?branch=EDGEAI-442#fe34883512a9e77efd80c560146bcef030d5e23f"
+source = "git+https://github.com/DeepViewML/deepviewrt-rs.git#3a2f4fad36bf73d60ed3a08433b2352a49c7f77e"
 dependencies = [
  "libc",
 ]
@@ -1829,7 +1829,7 @@ checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.77",
+ "syn 2.0.96",
 ]
 
 [[package]]
