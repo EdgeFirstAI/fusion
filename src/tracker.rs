@@ -20,7 +20,7 @@ pub struct ByteTrack {
     pub removed_tracks: Vec<Tracklet>,
     pub frame_count: i32,
     pub timestamp: u64,
-    pub uuid_map_class: HashMap<Uuid, i32>,
+    pub uuid_map_vision_class: HashMap<Uuid, i32>,
     #[cfg(feature = "model_output")]
     pub uuid_map_radar_class: HashMap<Uuid, i32>,
     pub settings: ByteTrackSettings,
@@ -43,7 +43,7 @@ pub struct TrackerBox {
     pub xmax: f32,
     pub ymax: f32,
     pub score: f32,
-    pub class: i32,
+    pub vision_class: i32,
     #[cfg(feature = "model_output")]
     pub radar_class: i32,
 }
@@ -68,7 +68,7 @@ impl Tracklet {
             ymin: 0.0,
             ymax: 0.0,
             score: self.prev_boxes.score,
-            class: self.prev_boxes.class,
+            vision_class: self.prev_boxes.vision_class,
             #[cfg(feature = "model_output")]
             radar_class: self.prev_boxes.radar_class,
         };
@@ -152,7 +152,7 @@ fn box_cost(
         ymin: 0.0,
         ymax: 0.0,
         score: 0.0,
-        class: 0,
+        vision_class: 0,
         #[cfg(feature = "model_output")]
         radar_class: 0,
     };
@@ -172,7 +172,7 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
-            uuid_map_class: HashMap::new(),
+            uuid_map_vision_class: HashMap::new(),
             #[cfg(feature = "model_output")]
             uuid_map_radar_class: HashMap::new(),
             settings: ByteTrackSettings {
@@ -191,7 +191,7 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
-            uuid_map_class: HashMap::new(),
+            uuid_map_vision_class: HashMap::new(),
             #[cfg(feature = "model_output")]
             uuid_map_radar_class: HashMap::new(),
             settings,
@@ -283,8 +283,8 @@ impl ByteTrack {
 
                     let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                     xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.uuid_map_class
-                        .insert(self.tracklets[x].id, boxes[i].class);
+                    self.uuid_map_vision_class
+                        .insert(self.tracklets[x].id, boxes[i].vision_class);
                     #[cfg(feature = "model_output")]
                     self.uuid_map_radar_class
                         .insert(self.tracklets[x].id, boxes[i].radar_class);
@@ -342,7 +342,8 @@ impl ByteTrack {
         for i in (0..self.tracklets.len()).rev() {
             if self.tracklets[i].expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
-                self.uuid_map_class.remove_entry(&self.tracklets[i].id);
+                self.uuid_map_vision_class
+                    .remove_entry(&self.tracklets[i].id);
                 #[cfg(feature = "model_output")]
                 self.uuid_map_radar_class
                     .remove_entry(&self.tracklets[i].id);
@@ -372,7 +373,7 @@ impl ByteTrack {
                     count: 1,
                     created: timestamp,
                 });
-                self.uuid_map_class.insert(id, boxes[i].class);
+                self.uuid_map_vision_class.insert(id, boxes[i].vision_class);
                 #[cfg(feature = "model_output")]
                 self.uuid_map_radar_class.insert(id, boxes[i].radar_class);
             }
@@ -404,7 +405,7 @@ mod tests {
             ymin: 0.0134,
             ymax: 0.691,
             score: 0.0,
-            class: 0,
+            vision_class: 0,
             #[cfg(feature = "model_output")]
             radar_class: 0,
         };
@@ -415,7 +416,7 @@ mod tests {
             ymin: 0.0,
             ymax: 0.0,
             score: 0.0,
-            class: 0,
+            vision_class: 0,
             #[cfg(feature = "model_output")]
             radar_class: 0,
         };
