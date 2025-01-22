@@ -244,7 +244,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             }
         };
 
-        trace!("deserialized radarcube, took {:?}", start.elapsed()); // takes about 4-5ms
+        trace!("deserialized radarcube: took {:?}", start.elapsed()); // takes about 4-5ms
         let start = Instant::now();
         let mut cube = Array::from_shape_vec(
             [
@@ -349,6 +349,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             trace!("finished load_frame_dmabuf");
         }
 
+        let start = Instant::now();
         if let Err(e) = run_model(&backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
             return;
@@ -359,7 +360,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             None => &backbone,
         };
 
-        trace!("finished run model");
+        trace!("finished run model: took {:?}", start.elapsed());
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
         let mask = if let Ok(tensor) = output_ctx.output(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
