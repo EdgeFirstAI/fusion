@@ -680,7 +680,7 @@ async fn main() {
     }
 }
 
-fn get_cluster_ids(points: &mut Vec<ParsedPoint>) -> (bool, HashMap<i32, Vec<usize>>) {
+fn get_cluster_ids(points: &mut [ParsedPoint]) -> (bool, HashMap<i32, Vec<usize>>) {
     let mut has_cluster_id = false;
     let mut cluster_ids = HashMap::new();
     for (i, point) in points.iter_mut().enumerate() {
@@ -700,7 +700,7 @@ fn get_cluster_ids(points: &mut Vec<ParsedPoint>) -> (bool, HashMap<i32, Vec<usi
     (has_cluster_id, cluster_ids)
 }
 fn all_points_in_cluster_same_class(
-    points: &mut Vec<ParsedPoint>,
+    points: &mut [ParsedPoint],
     cluster_ids: &HashMap<i32, Vec<usize>>,
     field: &str,
 ) {
