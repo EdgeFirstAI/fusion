@@ -16,6 +16,9 @@ pub fn spawn_fusion_model_thread(
     spawn(move || run_fusion_model(session, args, grid));
 }
 pub fn run_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
+    if args.model.is_none() {
+        return;
+    }
     let model_name = args.model.as_ref().unwrap().clone();
     match model_name.extension() {
         Some(v) if v.eq_ignore_ascii_case("tflite") => {

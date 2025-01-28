@@ -263,7 +263,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             }
         };
 
-        trace!("deserialized radarcube, took {:?}", start.elapsed()); //takes about 4-5ms
+        trace!("deserialized radarcube: took {:?}", start.elapsed()); // takes about 4-5ms
         let start = Instant::now();
         let mut cube = Array::from_shape_vec(
             [
@@ -374,6 +374,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             trace!("finished load_frame_dmabuf");
         }
         drop(backbone_inputs);
+        let start = Instant::now();
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
             return;
@@ -384,7 +385,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             None => &backbone,
         };
 
-        trace!("finished run model");
+        trace!("finished run model: took {:?}", start.elapsed());
         let mut output_shape: Vec<usize> = vec![0, 0, 0, 0];
         let outputs = match output_ctx.outputs() {
             Ok(v) => v,
