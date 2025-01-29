@@ -662,7 +662,6 @@ async fn main() {
         let (has_cluster_id, cluster_ids) = get_cluster_ids(&mut points);
         all_points_in_cluster_same_class(&mut points, &cluster_ids, FUSION_CLASS);
         all_points_in_cluster_same_class(&mut points, &cluster_ids, VISION_CLASS);
-
         let data = serialize_pcd(&points, &pcd.fields);
         pcd.row_step = data.len() as u32;
         pcd.data = data;
@@ -690,7 +689,6 @@ async fn main() {
         } else {
             get_occupied_no_cluster(pcd.header.clone(), &points, &mut bins, frame_index, &args)
         };
-
         match grid_publ.put(encoded).res_async().await {
             Ok(_) => trace!("PointCloud2 Grid Message Sent"),
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
@@ -879,11 +877,11 @@ fn grid_points_radar_tracked(
         grid_tracker.update(&mut boxes, *timestamp);
     }
 
+    let height = g.len();
+    let width = g[0].len();
     #[cfg(feature = "model_output")]
     {
-        let height = g.len();
-        let width = g[0].len();
-        let mut tracked_g = vec![vec![0.0; width]; g.len()];
+        let mut tracked_g = vec![vec![0.0; width]; height];
         for tracklet in grid_tracker.get_tracklets() {
             if tracklet.count < 3 {
                 continue;
@@ -930,20 +928,20 @@ fn grid_points_radar_tracked(
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
-        let (x, y) = grid_to_xy(i as f64, j as f64, args);
+        let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
         let mut points_in_grid = Vec::new();
         // find all points in grid
         for (ind, p) in points.iter().enumerate() {
-            if p.fields["x"] < x - args.range_bin_width * 0.5 {
+            if p.fields["x"] < x - args.model_grid_size[0] * 0.5 {
                 continue;
             }
-            if x + args.range_bin_width * 0.5 < p.fields["x"] {
+            if x + args.model_grid_size[0] * 0.5 < p.fields["x"] {
                 continue;
             }
-            if p.fields["y"] < y - args.range_bin_width * 0.5 {
+            if p.fields["y"] < y - args.model_grid_size[1] * 0.5 {
                 continue;
             }
-            if y + args.range_bin_width * 0.5 < p.fields["y"] {
+            if y + args.model_grid_size[1] * 0.5 < p.fields["y"] {
                 continue;
             }
             points_in_grid.push(ind);
@@ -988,13 +986,15 @@ fn grid_points_radar(
     }
 
     let (g, _) = guard.as_ref().unwrap();
+
+    let width = g[0].len();
     for (i, g_i) in g.iter().enumerate() {
         for (j, g_ij) in g_i.iter().enumerate() {
             if *g_ij < args.model_threshold {
                 continue;
             }
             // center of grid
-            let (x, y) = grid_to_xy(i as f64, j as f64, args);
+            let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
 
             // find closest point
             let mut min_dist = 9999999.9;
@@ -1012,22 +1012,20 @@ fn grid_points_radar(
     class
 }
 
-fn grid_to_xy(i: f64, j: f64, args: &Args) -> (f64, f64) {
-    let i_width = args.range_bin_width;
-    let j_width = if args.model_polar {
-        args.angle_bin_width
-    } else {
-        args.range_bin_width
-    };
+// Half of the width of the model is used to offset the j value
+fn grid_to_xy(i: f64, j: f64, width: usize, args: &Args) -> (f64, f64) {
+    let i_width = args.model_grid_size[0];
+    let j_width = args.model_grid_size[1];
+
     if args.model_polar {
-        let angle = args.angle_bin_limit[0] + j_width * (j + 0.5);
-        let range = args.range_bin_limit[0] + i_width * (i + 0.5);
+        let angle = -(width as f64) / 2.0 + j_width * (j + 0.5);
+        let range = i_width * (i + 0.5);
         let x = (-angle).to_radians().cos() * range;
         let y = (-angle).to_radians().sin() * range;
         (x, y)
     } else {
-        let x = args.range_bin_limit[0] + i_width * (i + 0.5);
-        let y = -(args.range_bin_limit[0] - args.range_bin_limit[1] / 2.0 + j_width * (j + 0.5));
+        let x = i_width * (i + 0.5);
+        let y = -(width as f64) / 2.0 + j_width * (j + 0.5);
         (x, y)
     }
 }
@@ -1039,13 +1037,15 @@ fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut Vec<ParsedPo
         return;
     }
     let (g, _) = guard.as_ref().unwrap();
+
+    let width = g[0].len();
     for (i, g_i) in g.iter().enumerate() {
         for (j, g_ij) in g_i.iter().enumerate() {
             if *g_ij < args.model_threshold {
                 continue;
             }
             // center of grid
-            let (x, y) = grid_to_xy(i as f64, j as f64, args);
+            let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
             let mut p = ParsedPoint {
                 fields: HashMap::new(),
                 angle: 0.0,

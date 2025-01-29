@@ -57,6 +57,12 @@ pub struct Args {
     #[arg(long, env, default_value = "0.5")]
     pub model_threshold: f32,
 
+    /// model grid size. This is the real world size (length, width) in meters
+    /// of a 1x1 model output grid cell. If the model is polar, the width is
+    /// in degrees.
+    #[arg(long, env, value_delimiter = ' ', default_value = "1 1")]
+    pub model_grid_size: Vec<f64>,
+
     /// engine for model context
     #[arg(long, env, default_value = "npu")]
     pub engine: String,
