@@ -408,9 +408,9 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
 
         let mut occupied_ = mask.into_iter();
         let mut occupied = Vec::new();
-        for i in 0..output_shape[2] as usize {
+        for i in 0..output_shape[1] as usize {
             occupied.push(Vec::new());
-            for _ in 0..output_shape[1] {
+            for _ in 0..output_shape[2] {
                 let item = occupied_.next().unwrap();
                 occupied[i].push(item)
             }

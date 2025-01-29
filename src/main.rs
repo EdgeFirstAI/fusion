@@ -662,7 +662,6 @@ async fn main() {
         let (has_cluster_id, cluster_ids) = get_cluster_ids(&mut points);
         all_points_in_cluster_same_class(&mut points, &cluster_ids, FUSION_CLASS);
         all_points_in_cluster_same_class(&mut points, &cluster_ids, VISION_CLASS);
-
         let data = serialize_pcd(&points, &pcd.fields);
         pcd.row_step = data.len() as u32;
         pcd.data = data;
@@ -690,7 +689,6 @@ async fn main() {
         } else {
             get_occupied_no_cluster(pcd.header.clone(), &points, &mut bins, frame_index, &args)
         };
-
         match grid_publ.put(encoded).res_async().await {
             Ok(_) => trace!("PointCloud2 Grid Message Sent"),
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
@@ -883,7 +881,7 @@ fn grid_points_radar_tracked(
     let width = g[0].len();
     #[cfg(feature = "model_output")]
     {
-        let mut tracked_g = vec![vec![0.0; width]; g.len()];
+        let mut tracked_g = vec![vec![0.0; width]; height];
         for tracklet in grid_tracker.get_tracklets() {
             if tracklet.count < 3 {
                 continue;
@@ -926,24 +924,24 @@ fn grid_points_radar_tracked(
             continue;
         }
         let pred = tracklet.get_predicted_location();
-        let y = (pred.ymin + pred.ymax) / 2.0;
+        let i = (pred.ymin + pred.ymax) / 2.0;
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
-        let (x, y) = grid_to_xy(y as f64, j as f64, width, args);
+        let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
         let mut points_in_grid = Vec::new();
         // find all points in grid
         for (ind, p) in points.iter().enumerate() {
-            if p.fields["x"] < x - args.range_bin_width * 0.5 {
+            if p.fields["x"] < x - args.model_grid_size[0] * 0.5 {
                 continue;
             }
-            if x + args.range_bin_width * 0.5 < p.fields["x"] {
+            if x + args.model_grid_size[0] * 0.5 < p.fields["x"] {
                 continue;
             }
-            if p.fields["y"] < y - args.range_bin_width * 0.5 {
+            if p.fields["y"] < y - args.model_grid_size[1] * 0.5 {
                 continue;
             }
-            if y + args.range_bin_width * 0.5 < p.fields["y"] {
+            if y + args.model_grid_size[1] * 0.5 < p.fields["y"] {
                 continue;
             }
             points_in_grid.push(ind);
