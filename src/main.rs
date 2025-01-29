@@ -344,7 +344,7 @@ fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
     for i in bins {
         for j in i {
             j.vision_classes.clear();
-            j.radar_classes.clear();
+            j.fusion_classes.clear();
             if j.last_masked + args.bin_delay < curr {
                 j.first_marked = 0;
             }
@@ -368,7 +368,7 @@ fn get_val_in_bin(bins: &[Vec<Bin>], i: i32, j: i32, offset_i: i32, offset_j: i3
     }
 
     let radar = bins[(i + offset_i) as usize][(j + offset_j) as usize]
-        .radar_classes
+        .fusion_classes
         .len() as u32;
     let vision = bins[(i + offset_i) as usize][(j + offset_j) as usize]
         .vision_classes
@@ -391,7 +391,7 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint
         range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
     };
     let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
-    let radar_class = *mode_slice(bins[i][j].radar_classes.as_slice()).unwrap_or(&0);
+    let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
 
     grid_point.fields.insert(
         "x".to_string(),
@@ -407,14 +407,14 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint
         .insert(VISION_CLASS.to_string(), vision_class as f64);
     grid_point
         .fields
-        .insert(RADAR_CLASS.to_string(), radar_class as f64);
+        .insert(FUSION_CLASS.to_string(), fusion_class as f64);
     grid_point.fields.insert(
         "vision_count".to_string(),
         bins[i][j].vision_classes.len() as f64,
     );
     grid_point.fields.insert(
         "radar_count".to_string(),
-        bins[i][j].radar_classes.len() as f64,
+        bins[i][j].fusion_classes.len() as f64,
     );
     let speed = if !bins[i][j].speeds.is_empty() {
         bins[i][j].speeds.iter().fold(0.0, |a, b| a + b) / bins[i][j].speeds.len() as f64
@@ -437,13 +437,13 @@ fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
 
 struct Bin {
     vision_classes: Vec<usize>,
-    radar_classes: Vec<usize>,
+    fusion_classes: Vec<usize>,
     speeds: Vec<f64>,
     last_masked: u128,
     first_marked: u128,
 }
 type Grid = (Vec<Vec<f32>>, u64);
-const RADAR_CLASS: &str = "fusion_class";
+const FUSION_CLASS: &str = "fusion_class";
 const VISION_CLASS: &str = "vision_class";
 #[async_std::main]
 async fn main() {
@@ -544,7 +544,7 @@ async fn main() {
         while j <= args.range_bin_limit[1] {
             range_bins.push(Bin {
                 vision_classes: Vec::new(),
-                radar_classes: Vec::new(),
+                fusion_classes: Vec::new(),
                 speeds: Vec::new(),
                 last_masked: 0,
                 first_marked: u128::MAX,
@@ -626,10 +626,30 @@ async fn main() {
             grid_points_radar(&grid, &points, &args)
         };
 
+        insert_field(
+            &mut pcd,
+            PointField {
+                name: FUSION_CLASS.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
+
+        insert_field(
+            &mut pcd,
+            PointField {
+                name: VISION_CLASS.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
+
         for i in 0..points.len() {
             points[i]
                 .fields
-                .insert(RADAR_CLASS.to_string(), radar_only[i] as f64);
+                .insert(FUSION_CLASS.to_string(), radar_only[i] as f64);
         }
 
         for i in 0..points.len() {
@@ -640,7 +660,7 @@ async fn main() {
 
         // points with the same cluster_id get the same class
         let (has_cluster_id, cluster_ids) = get_cluster_ids(&mut points);
-        all_points_in_cluster_same_class(&mut points, &cluster_ids, RADAR_CLASS);
+        all_points_in_cluster_same_class(&mut points, &cluster_ids, FUSION_CLASS);
         all_points_in_cluster_same_class(&mut points, &cluster_ids, VISION_CLASS);
 
         let data = serialize_pcd(&points, &pcd.fields);
@@ -851,7 +871,7 @@ fn grid_points_radar_tracked(
                 score: 1.0,
                 vision_class: 1,
                 #[cfg(feature = "model_output")]
-                radar_class: 1,
+                fusion_class: 1,
             });
         }
     }
@@ -1035,11 +1055,11 @@ fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut Vec<ParsedPo
             p.fields.insert("y".to_string(), y);
             p.fields.insert("z".to_string(), 0.0);
             p.fields.insert("speed".to_string(), 0.0);
-            p.fields.insert("vision_class".to_string(), 1.0);
+            p.fields.insert(VISION_CLASS.to_string(), 1.0);
             p.fields.insert("vision_count".to_string(), 1.0);
             p.fields.insert("cluster_id".to_string(), 99.0);
-            p.fields.insert("radar_class".to_string(), 10.0);
-            p.fields.insert("radar_count".to_string(), 1.0);
+            p.fields.insert(FUSION_CLASS.to_string(), 10.0);
+            p.fields.insert("fusion_count".to_string(), 1.0);
             points.push(p);
         }
     }
@@ -1060,7 +1080,7 @@ fn get_occupied_cluster(
             continue;
         }
         let vision_class = points[id.1[0]].fields[VISION_CLASS];
-        let radar_class = points[id.1[0]].fields[RADAR_CLASS];
+        let fusion_class = points[id.1[0]].fields[FUSION_CLASS];
         let mut xyzv = id.1.iter().fold([0.0, 0.0, 0.0, 0.0], |mut xyzv, ind| {
             xyzv[0] += points[*ind].fields["x"];
             xyzv[1] += points[*ind].fields["y"];
@@ -1084,7 +1104,7 @@ fn get_occupied_cluster(
         p.fields.insert("z".to_string(), xyzv[2]);
         p.fields.insert("speed".to_string(), xyzv[3]);
         p.fields.insert(VISION_CLASS.to_string(), vision_class);
-        p.fields.insert(RADAR_CLASS.to_string(), radar_class);
+        p.fields.insert(FUSION_CLASS.to_string(), fusion_class);
         p.fields.insert("count".to_string(), id.1.len() as f64);
         p.fields.insert("cluster_id".to_string(), *id.0 as f64);
         centroid_points.push(p);
@@ -1098,13 +1118,13 @@ fn get_occupied_cluster(
             xmax: p.fields["x"] as f32 + 0.5,
             ymin: p.fields["y"] as f32 - 0.5,
             ymax: p.fields["y"] as f32 + 0.5,
-            score: if p.fields[VISION_CLASS] > 0.0 || p.fields[RADAR_CLASS] > 0.0 {
+            score: if p.fields[VISION_CLASS] > 0.0 || p.fields[FUSION_CLASS] > 0.0 {
                 1.0
             } else {
                 0.3
             },
             vision_class: p.fields[VISION_CLASS].round() as i32,
-            radar_class: p.fields[RADAR_CLASS].round() as i32,
+            fusion_class: p.fields[FUSION_CLASS].round() as i32,
         })
         .collect();
     let timestamp = header.stamp.to_nanos();
@@ -1129,8 +1149,8 @@ fn get_occupied_cluster(
                 point_tracker.uuid_map_vision_class[&uuid] as f64,
             );
             centroid_points[i].fields.insert(
-                RADAR_CLASS.to_string(),
-                point_tracker.uuid_map_radar_class[&uuid] as f64,
+                FUSION_CLASS.to_string(),
+                point_tracker.uuid_map_fusion_class[&uuid] as f64,
             );
         }
     }
@@ -1175,7 +1195,7 @@ fn get_occupied_cluster(
         );
         p.fields.insert(
             VISION_CLASS.to_string(),
-            point_tracker.uuid_map_radar_class[&i.id] as f64,
+            point_tracker.uuid_map_fusion_class[&i.id] as f64,
         );
         p.fields.insert("count".to_string(), 0.0);
         p.fields.insert("cluster_id".to_string(), 0.0);
@@ -1201,7 +1221,7 @@ fn get_occupied_cluster(
         "speed",
         "count",
         "cluster_id",
-        RADAR_CLASS,
+        FUSION_CLASS,
         VISION_CLASS,
     ] {
         insert_field(
@@ -1257,9 +1277,9 @@ fn get_occupied_no_cluster(
             bins[i][j].vision_classes.push(vision_class);
         }
 
-        let radar_class = p.fields[RADAR_CLASS] as usize;
-        if radar_class > 0 {
-            bins[i][j].radar_classes.push(radar_class);
+        let fusion_class = p.fields[FUSION_CLASS] as usize;
+        if fusion_class > 0 {
+            bins[i][j].fusion_classes.push(fusion_class);
         }
 
         if let Some(speed) = p.fields.get("speed") {
@@ -1380,7 +1400,7 @@ fn get_occupied_no_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in ["x", "y", "z", "speed", "count", RADAR_CLASS, VISION_CLASS] {
+    for char in ["x", "y", "z", "speed", "count", FUSION_CLASS, VISION_CLASS] {
         insert_field(
             &mut grid_pcd,
             PointField {

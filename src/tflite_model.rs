@@ -31,7 +31,7 @@ use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{
-    fusion_model::preprocess_cube,
+    fusion_model::{apply_sigmoid, preprocess_cube},
     image::{Image, ImageManager, Rotation, RGBA},
     setup::Args,
     Grid,
@@ -394,7 +394,7 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
                 return;
             }
         };
-        let mask = if !outputs.is_empty() {
+        let mut mask = if !outputs.is_empty() {
             let tensor = &outputs[0];
             output_shape = match tensor.shape() {
                 Ok(v) => v,
@@ -418,6 +418,10 @@ pub fn run_tflite_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mute
             error!("Did not find model output");
             Vec::new()
         };
+
+        if args.logits {
+            apply_sigmoid(&mut mask);
+        }
 
         #[cfg(feature = "model_output")]
         {

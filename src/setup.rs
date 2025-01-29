@@ -1,6 +1,7 @@
 use async_std::path::PathBuf;
 use clap::Parser;
 
+type BoolDefaultTrue = bool;
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -68,6 +69,10 @@ pub struct Args {
     /// radar model output
     #[arg(long, env, default_value = "rt/fusion/model_output")]
     pub model_output_topic: String,
+
+    /// apply sigmoid the model output
+    #[arg(long, env, default_value = "true")]
+    pub logits: BoolDefaultTrue,
 
     /// enable tracking to reduce flickering in model output
     #[arg(long, env, action)]

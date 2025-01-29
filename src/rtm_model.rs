@@ -32,7 +32,7 @@ use cdr::{CdrLe, Infinite};
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{
-    fusion_model::preprocess_cube,
+    fusion_model::{apply_sigmoid, preprocess_cube},
     image::{Image, ImageManager, Rotation, RGBA},
     setup::Args,
     Grid,
@@ -362,7 +362,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
 
         trace!("finished run model: took {:?}", start.elapsed());
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
-        let mask = if let Ok(tensor) = output_ctx.output(0) {
+        let mut mask = if let Ok(tensor) = output_ctx.output(0) {
             output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
             let data = tensor.mapro_f32().unwrap();
             let len = data.len();
@@ -373,12 +373,11 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             error!("Did not find model output");
             Vec::new()
         };
-        info!("Mask before sigmoid: {:?}", mask);
-        let mask: Vec<f32> = mask
-            .into_iter()
-            .map(|x| x.exp() / (1.0 + x.exp()))
-            .collect();
-        info!("Mask after sigmoid: {:?}", mask);
+
+        if args.logits {
+            apply_sigmoid(&mut mask);
+        }
+
         #[cfg(feature = "model_output")]
         {
             let mask = mask
