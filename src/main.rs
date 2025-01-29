@@ -626,6 +626,26 @@ async fn main() {
             grid_points_radar(&grid, &points, &args)
         };
 
+        insert_field(
+            &mut pcd,
+            PointField {
+                name: RADAR_CLASS.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
+
+        insert_field(
+            &mut pcd,
+            PointField {
+                name: VISION_CLASS.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        );
+
         for i in 0..points.len() {
             points[i]
                 .fields
