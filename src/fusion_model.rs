@@ -79,6 +79,12 @@ pub fn preprocess_cube(
     cube
 }
 
+pub(crate) fn apply_sigmoid(mask: &mut [f32]) {
+    for v in mask.iter_mut() {
+        *v = v.exp() / (1.0 + v.exp())
+    }
+}
+
 #[cfg(test)]
 mod swap_axes_test {
     use std::{
