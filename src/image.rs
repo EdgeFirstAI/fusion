@@ -59,6 +59,7 @@ pub enum Rotation {
     Rotation270 = g2d_rotation_G2D_ROTATION_270 as isize,
 }
 
+#[allow(dead_code)]
 impl G2DBuffer<'_> {
     pub unsafe fn buf_handle(&self) -> *mut c_void {
         (*self.buf).buf_handle
@@ -88,6 +89,7 @@ pub struct ImageManager {
     handle: *mut c_void,
 }
 
+#[allow(dead_code)]
 impl ImageManager {
     pub fn new() -> Result<Self, Box<dyn Error>> {
         let lib = unsafe { g2d_library::new("libg2d.so.2") }?;
