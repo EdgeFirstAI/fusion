@@ -32,20 +32,20 @@ path = "src/test_fusion_model/main.rs"
 
 [dependencies]
 async-std = {version = "1.12", features = ["attributes"] }
-cdr = "0.2"
-clap = { version = "4.5", features = ["derive", "env"] }
-serde = "1.0"
-serde_json = "1.0"
+cdr = "0.2.4"
+clap = { version = "4.5.28", features = ["derive", "env"] }
+serde = "1.0.217"
+serde_json = "1.0.138"
 zenoh = "0.10.0-rc"
 zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
 log = "0.4.20"
-edgefirst-schemas = "1.1"
-env_logger = "0.10"
+edgefirst-schemas = "1.2.4"
+env_logger = "0.11.6"
 zstd = { version = "0.13", features = ["experimental"] }
 ndarray = {version ="0.16.1", features= ["rayon"] }
 deepviewrt = "0.7.0"
 lapjv = "0.2.1"
-uuid = { version = "1.11.0", features = ["v4"] }
+uuid = { version = "1.13.1", features = ["v4"] }
 nalgebra = "0.33.2"
 pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
@@ -53,5 +53,5 @@ dma-buf = "0.4.0"
 dma-heap = "0.4.0"
 g2d-sys = {version = "1.0.0", path = "g2d-sys"}
 libc = "0.2.168"
-videostream = "0.9.0"
+videostream = "0.9.1"
 tflitec-sys = { path = "./tflitec-sys" }
