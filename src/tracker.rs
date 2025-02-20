@@ -1,9 +1,8 @@
-use std::collections::HashMap;
-
 use crate::kalman::ConstantVelocityXYAHModel2;
 use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct ByteTrackSettings {

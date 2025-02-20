@@ -1,11 +1,12 @@
 use async_pidfd::PidFd;
+use cdr::{CdrLe, Infinite};
 use deepviewrt::{
     context::Context,
     engine::Engine,
     model,
     tensor::{Tensor, TensorType},
 };
-use edgefirst_schemas::edgefirst_msgs::{DmaBuf, RadarCube};
+use edgefirst_schemas::edgefirst_msgs::{DmaBuf, Mask, RadarCube};
 use libc::memcpy;
 use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
@@ -25,10 +26,6 @@ use zenoh::{
     bytes::{Encoding, ZBytes},
     Session,
 };
-
-use cdr::{CdrLe, Infinite};
-
-use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{
     args::Args,
