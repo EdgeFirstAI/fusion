@@ -17,11 +17,6 @@ inherits = "release"
 strip = false
 debug = true
 
-[features]
-default = ["model_output"]
-model_output = []
-
-
 [[bin]]
 name = "maivin-fusion"
 path = "src/main.rs"
@@ -30,28 +25,56 @@ path = "src/main.rs"
 name = "maivin-model-test"
 path = "src/test_fusion_model/main.rs"
 
+[features]
+default = ["tracy"]
+tracy = ["tracing-tracy/enable", "tracy-client/enable"]
+profiling = [
+    "tracing-tracy/sampling",
+    "tracing-tracy/system-tracing",
+    "tracy-client/sampling",
+    "tracy-client/system-tracing",
+]
+
 [dependencies]
-async-std = {version = "1.12", features = ["attributes"] }
-cdr = "0.2.4"
-clap = { version = "4.5.28", features = ["derive", "env"] }
-serde = "1.0.217"
-serde_json = "1.0.138"
-zenoh = "0.10.0-rc"
-zenoh-ros-type = { git = "https://github.com/MaivinAI/zenoh-ros-type" }
-log = "0.4.20"
-edgefirst-schemas = "1.2.4"
-env_logger = "0.11.6"
-zstd = { version = "0.13", features = ["experimental"] }
-ndarray = {version ="0.16.1", features= ["rayon"] }
-deepviewrt = "0.7.0"
-lapjv = "0.2.1"
-uuid = { version = "1.13.1", features = ["v4"] }
-nalgebra = "0.33.2"
-pidfd_getfd = "0.2.2"
 async-pidfd = "0.1.4"
+cdr = "0.2.4"
+clap = { version = "4.5.30", features = ["derive", "env"] }
+deepviewrt = "0.7.0"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
-g2d-sys = {version = "1.0.0", path = "g2d-sys"}
+edgefirst-schemas = "1.2.4"
+g2d-sys = { version = "1.0.0", path = "g2d-sys" }
+lapjv = "0.2.1"
 libc = "0.2.168"
-videostream = "0.9.1"
+log = { version = "0.4.20", features = ["release_max_level_info"] }
+nalgebra = "0.33.2"
+ndarray = { version = "0.16.1", features = ["rayon"] }
+pidfd_getfd = "0.2.2"
+serde_json = "1.0.138"
 tflitec-sys = { path = "./tflitec-sys" }
+tokio = { version = "1.43.0", features = [
+    "rt-multi-thread",
+    "time",
+    "io-std",
+    "tracing",
+] }
+tracing = "0.1.41"
+tracing-journald = "0.3.1"
+tracing-log = "0.2.0"
+tracing-subscriber = "0.3.19"
+tracing-tracy = { version = "0.11.4", default-features = false, features = [
+    "manual-lifetime",
+    "broadcast",
+    "ondemand",
+    "fibers",
+] }
+tracy-client = { version = "0.18.0", default-features = false, features = [
+    "manual-lifetime",
+    "broadcast",
+    "ondemand",
+    "fibers",
+] }
+uuid = { version = "1.13.2", features = ["v4"] }
+videostream = "0.9.1"
+zenoh = "1.2.1"
+zstd = { version = "0.13", features = ["experimental"] }

@@ -1,22 +1,13 @@
-use async_std::path::PathBuf;
 use clap::Parser;
+use serde_json::json;
+use std::path::PathBuf;
+use tracing::level_filters::LevelFilter;
+use zenoh::config::{Config, WhatAmI};
 
 type BoolDefaultTrue = bool;
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// connect to zenoh endpoints
-    #[arg(long, env, default_value = "tcp/127.0.0.1:7447")]
-    pub connect: Vec<String>,
-
-    /// listen to zenoh endpoints
-    #[arg(long, env)]
-    pub listen: Vec<String>,
-
-    /// zenoh connection mode
-    #[arg(long, env, default_value = "client")]
-    pub mode: String,
-
     /// radar input topic
     #[arg(long, env, default_value = "rt/radar/targets")]
     pub radar_input_topic: String,
@@ -71,7 +62,6 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/radar/cube")]
     pub radarcube_topic: String,
 
-    #[cfg(feature = "model_output")]
     /// radar model output
     #[arg(long, env, default_value = "rt/fusion/model_output")]
     pub model_output_topic: String,
@@ -150,4 +140,62 @@ pub struct Args {
     /// cluster_id field
     #[arg(long, env, default_value = "3")]
     pub bin_delay: u128,
+
+    /// Application log level
+    #[arg(long, env, default_value = "info")]
+    pub rust_log: LevelFilter,
+
+    /// Enable Tracy profiler broadcast
+    #[arg(long, env)]
+    pub tracy: bool,
+
+    /// zenoh connection mode
+    #[arg(long, env, default_value = "peer")]
+    mode: WhatAmI,
+
+    /// connect to zenoh endpoints
+    #[arg(long, env)]
+    connect: Vec<String>,
+
+    /// listen to zenoh endpoints
+    #[arg(long, env)]
+    listen: Vec<String>,
+
+    /// disable zenoh multicast scouting
+    #[arg(long, env)]
+    no_multicast_scouting: bool,
+}
+
+impl From<Args> for Config {
+    fn from(args: Args) -> Self {
+        let mut config = Config::default();
+
+        config
+            .insert_json5("mode", &json!(args.mode).to_string())
+            .unwrap();
+
+        if !args.connect.is_empty() {
+            config
+                .insert_json5("connect/endpoints", &json!(args.connect).to_string())
+                .unwrap();
+        }
+
+        if !args.listen.is_empty() {
+            config
+                .insert_json5("listen/endpoints", &json!(args.listen).to_string())
+                .unwrap();
+        }
+
+        if args.no_multicast_scouting {
+            config
+                .insert_json5("scouting/multicast/enabled", &json!(false).to_string())
+                .unwrap();
+        }
+
+        config
+            .insert_json5("scouting/multicast/interface", &json!("lo").to_string())
+            .unwrap();
+
+        config
+    }
 }

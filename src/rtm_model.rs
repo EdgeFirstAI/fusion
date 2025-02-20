@@ -1,5 +1,4 @@
 use async_pidfd::PidFd;
-use async_std::{sync::Mutex, task::block_on};
 use deepviewrt::{
     context::Context,
     engine::Engine,
@@ -8,8 +7,7 @@ use deepviewrt::{
 };
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, RadarCube};
 use libc::memcpy;
-use log::{debug, error, info, trace};
-use ndarray::Array;
+use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     ffi::c_void,
@@ -19,26 +17,27 @@ use std::{
         unix::io::OwnedFd,
     },
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::sync::Mutex;
+use tracing::{info_span, instrument};
 use zenoh::{
-    prelude::{r#async::*, sync::*},
+    bytes::{Encoding, ZBytes},
     Session,
 };
 
-#[cfg(feature = "model_output")]
 use cdr::{CdrLe, Infinite};
-#[cfg(feature = "model_output")]
+
 use edgefirst_schemas::edgefirst_msgs::Mask;
 
 use crate::{
+    args::Args,
     fusion_model::{apply_sigmoid, preprocess_cube},
     image::{Image, ImageManager, Rotation, RGBA},
-    setup::Args,
     Grid,
 };
 
-pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
+pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
     if args.model.is_none() {
         info!("No radar model was given");
         return;
@@ -56,14 +55,13 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
 
     let sub_radarcube = session
         .declare_subscriber(&args.radarcube_topic)
-        .res_sync()
+        .await
         .unwrap();
     info!("Declared subscriber on {:?}", &args.radarcube_topic);
 
-    #[cfg(feature = "model_output")]
     let publ_mask = match session
         .declare_publisher(args.model_output_topic.clone())
-        .res_sync()
+        .await
     {
         Ok(v) => v,
         Err(e) => {
@@ -162,7 +160,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
     let sub_camera = if camera_input_index.is_some() {
         let s = session
             .declare_subscriber(&args.camera_topic)
-            .res_sync()
+            .await
             .unwrap();
         info!("Declared subscriber on {:?}", &args.camera_topic);
         Some(s)
@@ -224,7 +222,13 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             v
         } else {
             match sub_radarcube.recv_timeout(timeout) {
-                Ok(v) => v,
+                Ok(v) => match v {
+                    Some(v) => v,
+                    None => {
+                        warn!("Timeout on radar cube");
+                        continue;
+                    }
+                },
                 Err(e) => {
                     error!(
                         "error receiving radar cube on {}: {:?}",
@@ -235,46 +239,30 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
                 }
             }
         };
-        let start = Instant::now();
-        let radarcube: RadarCube = match cdr::deserialize(&sample.payload.contiguous()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
-                continue;
-            }
-        };
 
-        trace!("deserialized radarcube: took {:?}", start.elapsed()); // takes about 4-5ms
-        let start = Instant::now();
-        let mut cube = Array::from_shape_vec(
-            [
-                radarcube.shape[0] as usize,
-                radarcube.shape[1] as usize,
-                radarcube.shape[2] as usize,
-                radarcube.shape[3] as usize / 2,
-                2,
-            ],
-            radarcube.cube.iter().map(|v| *v as f32).collect(),
-        )
-        .unwrap();
+        let radarcube = info_span!("cube_deserialize")
+            .in_scope(|| cdr::deserialize::<RadarCube>(&sample.payload().to_bytes()).unwrap());
+        let cube_shape = radarcube
+            .shape
+            .iter()
+            .map(|v| *v as usize)
+            .collect::<Vec<_>>();
+        let cube = preprocess_cube(&radarcube.cube, &cube_shape, &radar_input_shape);
 
-        let cube = preprocess_cube(&mut cube, &radar_input_shape);
-        let cube = cube.into_flat();
-        let cube = cube.as_slice().unwrap();
-        trace!("preprocessed radarcube: took {:?}", start.elapsed()); // takes about 28-30ms
-
-        let radar_input_tensor =
-            match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Could not get input 0 from model: {:?}", e);
-                    return;
-                }
-            };
-        let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
-        trace!("mapped input tensor: len={:?}", input_tensor_map.len());
-        input_tensor_map.copy_from_slice(cube);
-        drop(input_tensor_map);
+        info_span!("cube_load").in_scope(|| {
+            let radar_input_tensor =
+                match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("Could not get input 0 from model: {:?}", e);
+                        return;
+                    }
+                };
+            let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
+            trace!("mapped input tensor: len={:?}", input_tensor_map.len());
+            input_tensor_map.copy_from_slice(&cube);
+            drop(input_tensor_map);
+        });
 
         if camera_input_index.is_some() {
             let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
@@ -283,7 +271,13 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
                 v
             } else {
                 match sub_camera.recv_timeout(timeout) {
-                    Ok(v) => v,
+                    Ok(v) => match v {
+                        Some(v) => v,
+                        None => {
+                            warn!("Timeout on camera frame");
+                            continue;
+                        }
+                    },
                     Err(e) => {
                         error!(
                             "error receiving camera frame on {}: {:?}",
@@ -294,14 +288,9 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
                     }
                 }
             };
-            let mut cam_buffer: DmaBuf = match cdr::deserialize(&sample.payload.contiguous()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    continue;
-                }
-            };
-            trace!("Got DMA Buffer: {:?}", cam_buffer);
+
+            let mut cam_buffer = info_span!("camera_deserialize")
+                .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
 
             let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
                 Ok(v) => v,
@@ -313,6 +302,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
                     continue;
                 }
             };
+
             let fd = match get_file_from_pidfd(
                 pidfd.as_raw_fd(),
                 cam_buffer.fd,
@@ -331,25 +321,23 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             cam_buffer.fd = fd.as_raw_fd();
             trace!("Updated dma fd to {}", cam_buffer.fd);
 
-            trace!("Start load_frame_dmabuf");
-
-            match load_frame_dmabuf(
-                camera_input_tensor,
-                &img_mgr,
-                &mut dest,
-                &cam_buffer,
-                Preprocessing::UnsignedNorm,
-            ) {
+            match info_span!("camera_load").in_scope(|| {
+                load_frame_dmabuf(
+                    camera_input_tensor,
+                    &img_mgr,
+                    &mut dest,
+                    &cam_buffer,
+                    Preprocessing::UnsignedNorm,
+                )
+            }) {
                 Ok(_) => {}
                 Err(e) => {
                     error!("Error loading camera frame into input: {:?}", e);
                     continue;
                 }
             }
-            trace!("finished load_frame_dmabuf");
         }
 
-        let start = Instant::now();
         if let Err(e) = run_model(&backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
             return;
@@ -360,26 +348,29 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
             None => &backbone,
         };
 
-        trace!("finished run model: took {:?}", start.elapsed());
         let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
-        let mut mask = if let Ok(tensor) = output_ctx.output(0) {
-            output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-            let data = tensor.mapro_f32().unwrap();
-            let len = data.len();
-            let mut buffer = vec![0.0; len];
-            buffer.copy_from_slice(&data);
-            buffer
-        } else {
-            error!("Did not find model output");
-            Vec::new()
-        };
 
-        if args.logits {
-            apply_sigmoid(&mut mask);
-        }
+        let mask = info_span!("model_output").in_scope(|| {
+            let mut mask = if let Ok(tensor) = output_ctx.output(0) {
+                output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+                let data = tensor.mapro_f32().unwrap();
+                let len = data.len();
+                let mut buffer = vec![0.0; len];
+                buffer.copy_from_slice(&data);
+                buffer
+            } else {
+                error!("Did not find model output");
+                Vec::new()
+            };
 
-        #[cfg(feature = "model_output")]
-        {
+            if args.logits {
+                apply_sigmoid(&mut mask);
+            }
+
+            mask
+        });
+
+        let (buf, enc) = info_span!("model_publish").in_scope(|| {
             let mask = mask
                 .iter()
                 .flat_map(|v| {
@@ -396,15 +387,13 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
                 encoding: "".to_string(),
                 mask,
             };
-            let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-                Encoding::WithSuffix(
-                    KnownEncoding::AppOctetStream,
-                    "edgefirst_msgs/msg/Mask".into(),
-                ),
-            );
-            let _ = publ_mask.put(val).res_sync();
-            trace!("sent model output on {}", publ_mask.key_expr());
-        }
+            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+
+            (buf, enc)
+        });
+
+        publ_mask.put(buf).encoding(enc).await.unwrap();
 
         let mut occupied_ = mask.into_iter();
         let mut occupied = Vec::new();
@@ -417,7 +406,7 @@ pub fn run_rtm_fusion_model(session: Arc<Session>, args: Args, grid: Arc<Mutex<O
         }
         let timestamp = radarcube.header.stamp.nanosec as u64
             + radarcube.header.stamp.sec as u64 * 1_000_000_000;
-        let mut guard = block_on(grid.lock());
+        let mut guard = grid.lock().await;
         *guard = Some((occupied, timestamp));
     }
 }
@@ -464,6 +453,7 @@ fn get_input_match(
     Ok(matching)
 }
 
+#[instrument(skip_all)]
 fn run_model(
     backbone: &Context,
     decoder: &mut Option<Context>,
