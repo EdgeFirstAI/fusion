@@ -2,7 +2,6 @@ use std::{fs::read, time::Instant};
 
 use clap::Parser;
 use deepviewrt::{context::Context, engine::Engine, model};
-use env_logger::Env;
 use log::{error, info};
 use setup::Args;
 use tflitec_sys::{delegate::Delegate, TFLiteLib};
@@ -11,7 +10,6 @@ mod setup;
 const TFLITE_NPU_PATH: &str = "libvx_delegate.so";
 const RTM_NPU_PATH: &str = "deepview-rt-openvx.so";
 fn main() {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     let model_data =
         read(args.model.clone()).unwrap_or_else(|_| panic!("Did not find `{:?}` file", args.model));

@@ -1,4 +1,4 @@
-use async_std::{sync::Mutex, task::block_on};
+use args::Args;
 use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
@@ -7,29 +7,33 @@ use edgefirst_schemas::{
     std_msgs::Header,
 };
 use fusion_model::spawn_fusion_model_thread;
-use log::{error, info, trace};
-use setup::Args;
+use log::{error, trace};
+use ndarray::{self, Array2};
 use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
     panic,
-    str::FromStr,
     sync::Arc,
+    thread,
 };
+use tokio::sync::Mutex;
+use tracing::{info_span, instrument};
+use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracker::{ByteTrack, ByteTrackSettings, TrackerBox};
+use tracy_client::frame_mark;
+use zenoh::{
+    bytes::{Encoding, ZBytes},
+    Session,
+};
 
-#[cfg(feature = "model_output")]
-use zenoh::prelude::sync::*;
-use zenoh::{config::Config, prelude::r#async::*};
-
-use ndarray::{self, Array2};
+mod args;
 mod fusion_model;
 mod image;
 mod kalman;
 mod rtm_model;
-mod setup;
 mod tflite_model;
 mod tracker;
+
 struct ParsedPoint {
     fields: HashMap<String, f64>,
     angle: f64,
@@ -442,92 +446,87 @@ struct Bin {
     last_masked: u128,
     first_marked: u128,
 }
+
 type Grid = (Vec<Vec<f32>>, u64);
 const FUSION_CLASS: &str = "fusion_class";
 const VISION_CLASS: &str = "vision_class";
-#[async_std::main]
-async fn main() {
-    env_logger::init();
 
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
-    let mut config = Config::default();
-    let mode = WhatAmI::from_str(&args.mode).unwrap();
-    config.set_mode(Some(mode)).unwrap();
-    config.connect.endpoints = args.connect.iter().map(|v| v.parse().unwrap()).collect();
-    config.listen.endpoints = args.listen.iter().map(|v| v.parse().unwrap()).collect();
-    let _ = config.scouting.multicast.set_enabled(Some(true));
-    let _ = config
-        .scouting
-        .multicast
-        .set_interface(Some("lo".to_string()));
-    let _ = config.scouting.gossip.set_enabled(Some(true));
-    let session = match zenoh::open(config.clone()).res_async().await {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Error while opening Zenoh session: {:?}", e);
-            return;
-        }
-    }
-    .into_arc();
-    info!("Opened Zenoh session");
+    args.tracy.then(tracy_client::Client::start);
+
+    let stdout_log = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_filter(args.rust_log);
+
+    let journald = match tracing_journald::layer() {
+        Ok(journald) => Some(journald.with_filter(args.rust_log)),
+        Err(_) => None,
+    };
+
+    let tracy = match args.tracy {
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
+        false => None,
+    };
+
+    let subscriber = Registry::default()
+        .with(stdout_log)
+        .with(journald)
+        .with(tracy);
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing_log::LogTracer::init().unwrap();
+
+    let session = zenoh::open(args.clone()).await.unwrap();
 
     let info = Arc::new(Mutex::new(None));
     let info_clone = info.clone();
     let _info_sub = session
         .declare_subscriber(args.info_topic.clone())
         .callback_mut(move |s| {
-            let new_info: CameraInfo = match cdr::deserialize(&s.payload.contiguous()) {
+            let new_info: CameraInfo = match cdr::deserialize(&s.payload().to_bytes()) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Failed to deserialize message: {:?}", e);
                     return;
                 }
             };
-            let mut guard = match info_clone.try_lock() {
-                Some(v) => v,
-                None => return,
-            };
-            *guard = Some(new_info);
+            let mut guard = info_clone.try_lock();
+            if let Ok(ref mut guard) = guard {
+                **guard = Some(new_info);
+            }
         })
-        .res_async()
         .await
         .expect("Failed to declare Zenoh subscriber");
 
     let mask = Arc::new(Mutex::new(None));
     let mask_clone = mask.clone();
-    let _mask_sub = session
-        .declare_subscriber(args.mask_topic.clone())
-        .callback_mut(move |s| {
-            let new_mask: Mask = match cdr::deserialize(&s.payload.contiguous()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    return;
-                }
-            };
-            let mut guard = block_on(mask_clone.lock());
-            *guard = Some(new_mask);
+    let session_clone = session.clone();
+    let args_clone = args.clone();
+    thread::Builder::new()
+        .name("mask".to_string())
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(mask_handler(session_clone, args_clone, mask_clone));
         })
-        .res_async()
-        .await
-        .expect("Failed to declare Zenoh subscriber");
+        .unwrap();
 
     let radar_sub = session
         .declare_subscriber(args.radar_input_topic.clone())
-        .res_async()
         .await
         .expect("Failed to declare Zenoh subscriber");
 
     let radar_publ = session
         .declare_publisher(args.radar_output_topic.clone())
-        .res_async()
         .await
         .expect("Failed to declare Zenoh publisher");
 
     let grid_publ = session
         .declare_publisher(args.occ_topic.clone())
-        .res_async()
         .await
         .expect("Failed to declare Zenoh publisher");
 
@@ -567,6 +566,7 @@ async fn main() {
         track_iou: 0.01,
         track_update: 0.5,
     });
+
     loop {
         let msgs = radar_sub.drain();
         let s = match msgs.last() {
@@ -584,20 +584,19 @@ async fn main() {
             },
         };
 
-        let mut pcd: PointCloud2 = match cdr::deserialize(&s.payload.contiguous()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
-                return;
-            }
-        };
+        let (mut pcd, mut points) = info_span!("parse_pcd").in_scope(|| {
+            let pcd: PointCloud2 = cdr::deserialize(&s.payload().to_bytes()).unwrap();
 
-        // get point data
-        let mut points = parse_pcd(&pcd);
+            // get point data
+            let mut points = parse_pcd(&pcd);
 
-        points.sort_by(|p, q| p.range.total_cmp(&q.range));
+            points.sort_by(|p, q| p.range.total_cmp(&q.range));
 
-        let mut mask_only = classify_points_mask_proj(&mask, &info, &points, &mut zstd_decomp);
+            (pcd, points)
+        });
+
+        let mut mask_only =
+            classify_points_mask_proj(&mask, &info, &points, &mut zstd_decomp).await;
 
         // filter occlusions
         for i in 0..points.len() {
@@ -614,16 +613,9 @@ async fn main() {
         }
 
         let radar_only = if args.track {
-            grid_points_radar_tracked(
-                &grid,
-                &points,
-                &mut tracker,
-                &args,
-                #[cfg(feature = "model_output")]
-                session.clone(),
-            )
+            grid_points_radar_tracked(&grid, &points, &mut tracker, &args, session.clone()).await
         } else {
-            grid_points_radar(&grid, &points, &args)
+            grid_points_radar(&grid, &points, &args).await
         };
 
         insert_field(
@@ -667,19 +659,16 @@ async fn main() {
         pcd.data = data;
         pcd.is_bigendian = cfg!(target_endian = "big");
         pcd.header.frame_id = "radar".to_string(); // to fix the data recorded
-        let encoded = Value::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap()).encoding(
-            Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "sensor_msgs/msg/PointCloud2".into(),
-            ),
-        );
 
-        match radar_publ.put(encoded).res_async().await {
+        let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+
+        match radar_publ.put(buf).encoding(enc).await {
             Ok(_) => trace!("PointCloud2 Message Sent"),
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
         }
 
-        let encoded = if has_cluster_id {
+        let (buf, enc) = if has_cluster_id {
             get_occupied_cluster(
                 pcd.header.clone(),
                 &points,
@@ -689,12 +678,49 @@ async fn main() {
         } else {
             get_occupied_no_cluster(pcd.header.clone(), &points, &mut bins, frame_index, &args)
         };
-        match grid_publ.put(encoded).res_async().await {
+
+        match grid_publ.put(buf).encoding(enc).await {
             Ok(_) => trace!("PointCloud2 Grid Message Sent"),
             Err(e) => error!("PointCloud2 Message Error: {:?}", e),
         }
         clear_bins(&mut bins, frame_index, &args);
         frame_index += 1;
+
+        args.tracy.then(frame_mark);
+    }
+}
+
+async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<Mask>>>) {
+    let mask_sub = session
+        .declare_subscriber(args.mask_topic.clone())
+        .await
+        .expect("Failed to declare Zenoh subscriber");
+
+    loop {
+        let sample = match mask_sub.recv_async().await {
+            Ok(v) => v,
+            Err(e) => {
+                error!(
+                    "error receiving mask data on {}: {:?}",
+                    mask_sub.key_expr(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        let new_mask: Mask = match info_span!("mask_deserialize")
+            .in_scope(|| cdr::deserialize::<Mask>(&sample.payload().to_bytes()))
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to deserialize message: {:?}", e);
+                continue;
+            }
+        };
+
+        let mut guard = mask.lock().await;
+        *guard = Some(new_mask);
     }
 }
 
@@ -717,6 +743,7 @@ fn get_cluster_ids(points: &mut [ParsedPoint]) -> (bool, HashMap<i32, Vec<usize>
     }
     (has_cluster_id, cluster_ids)
 }
+
 fn all_points_in_cluster_same_class(
     points: &mut [ParsedPoint],
     cluster_ids: &HashMap<i32, Vec<usize>>,
@@ -744,7 +771,8 @@ fn all_points_in_cluster_same_class(
     }
 }
 
-fn classify_points_mask_proj(
+#[instrument(skip_all)]
+async fn classify_points_mask_proj(
     mask: &Arc<Mutex<Option<Mask>>>,
     info: &Arc<Mutex<Option<CameraInfo>>>,
     points: &[ParsedPoint],
@@ -752,7 +780,7 @@ fn classify_points_mask_proj(
 ) -> Vec<usize> {
     let mut class = vec![0; points.len()];
     // get mask data
-    let guard = block_on(mask.lock());
+    let guard = mask.lock().await;
     let mask_msg = match guard.as_ref() {
         Some(v) => v,
         None => {
@@ -780,7 +808,7 @@ fn classify_points_mask_proj(
     };
     let mask_classes = mask.len() as f32 / mask_width as f32 / mask_height as f32;
     let mask_classes = mask_classes.round() as usize;
-    let (mut cam_mtx, cam_width, cam_height) = match block_on(info.lock()).as_ref() {
+    let (mut cam_mtx, cam_width, cam_height) = match info.lock().await.as_ref() {
         Some(v) => (v.k, v.width as f64, v.height as f64),
         None => {
             return class;
@@ -839,18 +867,19 @@ fn classify_points_mask_proj(
     class
 }
 
-fn grid_points_radar_tracked(
+#[instrument(skip_all)]
+async fn grid_points_radar_tracked(
     grid: &Arc<Mutex<Option<Grid>>>,
     points: &[ParsedPoint],
     grid_tracker: &mut ByteTrack,
     args: &Args,
-    #[cfg(feature = "model_output")] session: Arc<Session>,
+    session: Session,
 ) -> Vec<usize> {
     let mut class = vec![0; points.len()];
     if points.is_empty() {
         return class;
     }
-    let guard = block_on(grid.lock());
+    let guard = grid.lock().await;
     if guard.is_none() {
         return class;
     }
@@ -868,7 +897,7 @@ fn grid_points_radar_tracked(
                 ymax: i as f32 + 1.0,
                 score: 1.0,
                 vision_class: 1,
-                #[cfg(feature = "model_output")]
+
                 fusion_class: 1,
             });
         }
@@ -879,7 +908,7 @@ fn grid_points_radar_tracked(
 
     let height = g.len();
     let width = g[0].len();
-    #[cfg(feature = "model_output")]
+
     {
         let mut tracked_g = vec![vec![0.0; width]; height];
         for tracklet in grid_tracker.get_tracklets() {
@@ -910,13 +939,15 @@ fn grid_points_radar_tracked(
             encoding: "".to_string(),
             mask,
         };
-        let val = Value::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap()).encoding(
-            Encoding::WithSuffix(
-                KnownEncoding::AppOctetStream,
-                "edgefirst_msgs/msg/Mask".into(),
-            ),
-        );
-        let _ = session.put("rt/fusion/mask_output_tracked", val).res_sync();
+
+        let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+
+        session
+            .put("rt/fusion/mask_output_tracked", buf)
+            .encoding(enc)
+            .await
+            .unwrap();
     }
 
     for tracklet in grid_tracker.get_tracklets() {
@@ -971,7 +1002,7 @@ fn grid_points_radar_tracked(
     class
 }
 
-fn grid_points_radar(
+async fn grid_points_radar(
     grid: &Arc<Mutex<Option<Grid>>>,
     points: &[ParsedPoint],
     args: &Args,
@@ -980,7 +1011,7 @@ fn grid_points_radar(
     if points.is_empty() {
         return class;
     }
-    let guard = block_on(grid.lock());
+    let guard = grid.lock().await;
     if guard.is_none() {
         return class;
     }
@@ -1031,8 +1062,12 @@ fn grid_to_xy(i: f64, j: f64, width: usize, args: &Args) -> (f64, f64) {
 }
 
 #[allow(dead_code)]
-fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut Vec<ParsedPoint>, args: &Args) {
-    let guard = block_on(grid.lock());
+async fn add_grid_as_points(
+    grid: &Arc<Mutex<Option<Grid>>>,
+    points: &mut Vec<ParsedPoint>,
+    args: &Args,
+) {
+    let guard = grid.lock().await;
     if guard.is_none() {
         return;
     }
@@ -1067,12 +1102,13 @@ fn add_grid_as_points(grid: &Arc<Mutex<Option<Grid>>>, points: &mut Vec<ParsedPo
 
 // Return the centroid of clusters that have class_id. All points in a class
 // should have the same class_id
+#[instrument(skip_all)]
 fn get_occupied_cluster(
     header: Header,
     points: &[ParsedPoint],
     cluster_ids: &HashMap<i32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
-) -> Value {
+) -> (ZBytes, Encoding) {
     let mut centroid_points = Vec::new();
     for id in cluster_ids {
         // sanity check, should not have cluster_ids with no points
@@ -1239,22 +1275,21 @@ fn get_occupied_cluster(
     centroid_pcd.row_step = data.len() as u32;
     centroid_pcd.data = data;
 
-    Value::from(cdr::serialize::<_, _, CdrLe>(&centroid_pcd, Infinite).unwrap()).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "sensor_msgs/msg/PointCloud2".into(),
-        ),
-    )
+    let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&centroid_pcd, Infinite).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+
+    (buf, enc)
 }
 
 // Do a grid and highlight the grid based on point classes
+#[instrument(skip_all)]
 fn get_occupied_no_cluster(
     header: Header,
     points: &Vec<ParsedPoint>,
     bins: &mut [Vec<Bin>],
     frame_index: u128,
     args: &Args,
-) -> Value {
+) -> (ZBytes, Encoding) {
     for p in points {
         let mut angle = p.angle;
         let mut range = p.range;
@@ -1416,12 +1451,10 @@ fn get_occupied_no_cluster(
     grid_pcd.row_step = data.len() as u32;
     grid_pcd.data = data;
 
-    Value::from(cdr::serialize::<_, _, CdrLe>(&grid_pcd, Infinite).unwrap()).encoding(
-        Encoding::WithSuffix(
-            KnownEncoding::AppOctetStream,
-            "sensor_msgs/msg/PointCloud2".into(),
-        ),
-    )
+    let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&grid_pcd, Infinite).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+
+    (buf, enc)
 }
 
 /* Returns the mode of the slice. Returns None if the slice is empty.
@@ -1443,6 +1476,7 @@ fn max_slice<T: Ord>(numbers: &[T]) -> Option<&T> {
         None => None,
     }
 }
+
 fn argmax_slice<T: Ord>(numbers: &[T]) -> Option<(usize, &T)> {
     numbers.iter().enumerate().max_by(|(_, a), (_, b)| a.cmp(b))
 }

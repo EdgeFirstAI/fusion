@@ -10,8 +10,8 @@ version = "1.0.0"
 edition = "2021"
 
 [dependencies]
-libc = "^0.2"
-libloading = "0.8.1"
-num = "0.4"
-num-derive = "0.4"
-num-traits = "0.2"
+libc = "0.2.170"
+libloading = "0.8.6"
+num = "0.4.3"
+num-derive = "0.4.2"
+num-traits = "0.2.19"

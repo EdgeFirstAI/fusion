@@ -19,6 +19,7 @@ use std::{
     ptr::null_mut,
     slice::{from_raw_parts, from_raw_parts_mut},
 };
+use tracing::instrument;
 use videostream::{camera::CameraBuffer, encoder::VSLRect, fourcc::FourCC, frame::Frame};
 
 pub const RGB3: FourCC = FourCC(*b"RGB3");
@@ -213,6 +214,7 @@ impl ImageManager {
         Ok(())
     }
 
+    #[instrument(skip_all)]
     pub fn convert(
         &self,
         from: &Image,
