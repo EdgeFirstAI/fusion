@@ -8,6 +8,7 @@ use edgefirst_schemas::{
     edgefirst_msgs::{Detect, DetectBox2D, DetectTrack, Mask},
     geometry_msgs::TransformStamped,
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
+    std_msgs::Header,
 };
 use log::{error, info, trace};
 use setup::Args;
@@ -343,7 +344,7 @@ async fn main() {
             *id = Some(pcd.header.frame_id.clone());
         }
 
-        let points = parse_pcd(&pcd);
+        let mut points = parse_pcd(&pcd);
         let transform = match transform.lock() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().transform.clone(),
             _ => continue,
@@ -354,7 +355,7 @@ async fn main() {
         };
         let im_shape = (info.width as f32, info.height as f32);
         let cam_mtx = info.k.map(|x| x as f32);
-        let proj = transform_and_project_points(&points, &[transform], &cam_mtx, im_shape);
+        let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, im_shape);
 
         let boxes = match boxes.lock() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().boxes.clone(),
@@ -364,6 +365,9 @@ async fn main() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().clone(),
             _ => continue,
         };
+        if mask.width * mask.height == 0 {
+            continue;
+        }
         let mask_height = mask.height as usize;
         let mask_width = mask.width as usize;
         let mask_classes = mask.mask.len() / mask_width / mask_height;
@@ -438,7 +442,10 @@ async fn main() {
             });
         }
         let new_msg = Detect {
-            header: pcd.header.clone(),
+            header: Header {
+                stamp: pcd.header.stamp.clone(),
+                frame_id: BASE_LINK_FRAME_ID.to_owned(),
+            },
             input_timestamp: pcd.header.stamp.clone(),
             model_time: Time { sec: 0, nanosec: 0 },
             output_time: pcd.header.stamp.clone(),

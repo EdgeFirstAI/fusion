@@ -96,8 +96,10 @@ const REORDER_ROWS: Matrix3x4<f32> = Matrix3x4::from_array_storage(ArrayStorage(
 const CONVERT_COORD: Matrix2x3<f32> =
     Matrix2x3::from_array_storage(ArrayStorage([[-1.0, 0.0], [0.0, -1.0], [1.0, 1.0]]));
 
+// Applies the given transforms onto points. Then projects the points on the
+// given camera matrix and returns the projected coordinates
 pub(crate) fn transform_and_project_points(
-    points: &[ParsedPoint],
+    points: &mut [ParsedPoint],
     transforms: &[Transform],
     cam_mtx: &[f32; 9],
     image_dims: (f32, f32),
@@ -110,7 +112,7 @@ pub(crate) fn transform_and_project_points(
     let transform = final_transform.to_matrix();
 
     let mut xyz1 = Vec::with_capacity(points.len() * 4);
-    for p in points {
+    for p in points.iter() {
         xyz1.push(p.x);
         xyz1.push(p.y);
         xyz1.push(p.z);
@@ -119,7 +121,11 @@ pub(crate) fn transform_and_project_points(
 
     let xyz1 = Matrix4xX::from_vec(xyz1);
     let xyz1 = transform * xyz1;
-
+    for (col, p) in xyz1.column_iter().zip(points.iter_mut()) {
+        p.x = col[0];
+        p.y = col[1];
+        p.z = col[2];
+    }
     // reorders the rows and removes the last one
     let xyz = REORDER_ROWS * xyz1;
 
