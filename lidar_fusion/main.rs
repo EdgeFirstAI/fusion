@@ -1,3 +1,4 @@
+mod mask;
 mod setup;
 mod transform;
 
@@ -11,6 +12,7 @@ use edgefirst_schemas::{
     std_msgs::Header,
 };
 use log::{error, info, trace};
+use mask::{argmax_slice, mask_instance};
 use setup::Args;
 use std::{
     collections::{HashMap, HashSet},
@@ -256,25 +258,6 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let boxes = Arc::new(Mutex::new(None));
-    let boxes_clone = boxes.clone();
-    let _boxes_sub = session
-        .declare_subscriber(args.box_topic.clone())
-        .callback_mut(move |s| {
-            let new_boxes: Detect = match cdr::deserialize(&s.payload().to_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    return;
-                }
-            };
-            if let Ok(mut guard) = boxes_clone.lock() {
-                *guard = Some(new_boxes);
-            }
-        })
-        .await
-        .expect("Failed to declare Zenoh subscriber");
-
     let transform = Arc::new(Mutex::new(None));
     let transform_clone = transform.clone();
     let lidar_frame_id = Arc::new(Mutex::new(None));
@@ -355,12 +338,9 @@ async fn main() {
         };
         let im_shape = (info.width as f32, info.height as f32);
         let cam_mtx = info.k.map(|x| x as f32);
+        let start = Instant::now();
         let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, im_shape);
-
-        let boxes = match boxes.lock() {
-            Ok(v) if v.is_some() => v.as_ref().unwrap().boxes.clone(),
-            _ => continue,
-        };
+        println!("transform_and_project_points takes {:?}", start.elapsed());
         let mask = match mask.lock() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().clone(),
             _ => continue,
@@ -371,26 +351,22 @@ async fn main() {
         let mask_height = mask.height as usize;
         let mask_width = mask.width as usize;
         let mask_classes = mask.mask.len() / mask_width / mask_height;
-        let start = Instant::now();
         let mask_argmax: Vec<usize> = mask
             .mask
             .chunks_exact(mask_classes)
             .map(argmax_slice)
             .collect();
-        println!("Mask argmax takes: {:?}", start.elapsed());
         let index_mask = |x: f32, y: f32| -> usize {
             let x = (x * mask_width as f32) as usize;
             let y = (y * mask_height as f32) as usize;
             mask_argmax[y * mask_width + x]
         };
 
+        let bbox_2d = mask_instance(&mask_argmax, mask_width);
         let mut bbox_id = HashSet::new();
 
         let mut bbox_3d = Vec::new();
-        for b in boxes {
-            if !b.track.id.is_empty() && b.track.lifetime <= 4 {
-                continue;
-            }
+        for b in bbox_2d {
             let mut bbox_cluster_ids = Vec::new();
             for i in 0..points.len() {
                 let [x, y] = proj[i];
@@ -458,12 +434,6 @@ async fn main() {
             Err(e) => error!("BBox3D Message Error: {:?}", e),
         }
     }
-}
-
-use itertools::Itertools;
-// Finds the argmax of the slice. Panics if the slice is empty
-fn argmax_slice<T: Ord>(slice: &[T]) -> usize {
-    slice.iter().position_max().unwrap()
 }
 
 pub fn stats_mode<T>(v: &[T]) -> Option<T>
