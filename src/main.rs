@@ -3,26 +3,32 @@ use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
     edgefirst_msgs::Mask,
+    geometry_msgs::{Transform, TransformStamped},
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
     std_msgs::Header,
 };
 use fusion_model::spawn_fusion_model_thread;
-use log::{error, trace};
+use log::{error, trace, warn};
 use ndarray::{self, Array2};
+use pcd::{insert_field, parse_pcd, serialize_pcd, ParsedPoint};
 use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
     panic,
     sync::Arc,
     thread,
+    time::Duration,
 };
 use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracker::{ByteTrack, ByteTrackSettings, TrackerBox};
 use tracy_client::frame_mark;
+use transform::project_point;
 use zenoh::{
     bytes::{Encoding, ZBytes},
+    pubsub::Subscriber,
+    sample::Sample,
     Session,
 };
 
@@ -30,319 +36,11 @@ mod args;
 mod fusion_model;
 mod image;
 mod kalman;
+mod pcd;
 mod rtm_model;
 mod tflite_model;
 mod tracker;
-
-struct ParsedPoint {
-    fields: HashMap<String, f64>,
-    angle: f64,
-    range: f64,
-}
-
-const SIZE_OF_DATATYPE: [usize; 9] = [
-    0, 1, // pub const INT8: u8 = 1;
-    1, // pub const UINT8: u8 = 2;
-    2, // pub const INT16: u8 = 3;
-    2, // pub const UINT16: u8 = 4;
-    4, // pub const INT32: u8 = 5;
-    4, // pub const UINT32: u8 = 6;
-    4, // pub const FLOAT32: u8 = 7;
-    8, //pub const FLOAT64: u8 = 8;
-];
-const DEFAULT_PCD_RANGE: f64 = 100000.0;
-
-fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
-    let mut p = ParsedPoint {
-        fields: HashMap::new(),
-        angle: 0.0,
-        range: DEFAULT_PCD_RANGE,
-    };
-    for f in fields {
-        let start = f.offset as usize;
-
-        let val = match f.datatype {
-            point_field::INT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                i8::from_be_bytes(bytes) as f64
-            }
-            point_field::UINT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                u8::from_be_bytes(bytes) as f64
-            }
-            point_field::INT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                i16::from_be_bytes(bytes) as f64
-            }
-            point_field::UINT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                u16::from_be_bytes(bytes) as f64
-            }
-            point_field::INT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                i32::from_be_bytes(bytes) as f64
-            }
-            point_field::UINT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                u32::from_be_bytes(bytes) as f64
-            }
-            point_field::FLOAT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                f32::from_be_bytes(bytes) as f64
-            }
-            point_field::FLOAT64 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                f64::from_be_bytes(bytes)
-            }
-            d => {
-                error!("Unknown datatype in PointField: {}", d);
-                continue;
-            }
-        };
-        p.fields.insert(f.name.clone(), val);
-    }
-    if p.fields.contains_key("x") && p.fields.contains_key("y") && p.fields.contains_key("z") {
-        p.range = (p.fields["x"].powi(2) + p.fields["y"].powi(2) + p.fields["z"].powi(2)).sqrt()
-    }
-    if p.fields.contains_key("x") && p.fields.contains_key("y") {
-        p.angle = p.fields["y"].atan2(p.fields["x"]).to_degrees();
-    }
-    p
-}
-
-fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
-    let mut p = ParsedPoint {
-        fields: HashMap::new(),
-        angle: 0.0,
-        range: DEFAULT_PCD_RANGE,
-    };
-    for f in fields {
-        let start = f.offset as usize;
-        let val = match f.datatype {
-            point_field::INT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                i8::from_le_bytes(bytes) as f64
-            }
-            point_field::UINT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                u8::from_le_bytes(bytes) as f64
-            }
-            point_field::INT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                i16::from_le_bytes(bytes) as f64
-            }
-            point_field::UINT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                u16::from_le_bytes(bytes) as f64
-            }
-            point_field::INT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                i32::from_le_bytes(bytes) as f64
-            }
-            point_field::UINT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                u32::from_le_bytes(bytes) as f64
-            }
-            point_field::FLOAT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                f32::from_le_bytes(bytes) as f64
-            }
-            point_field::FLOAT64 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
-                f64::from_le_bytes(bytes)
-            }
-            d => {
-                error!("Unknown datatype in PointField: {}", d);
-                continue;
-            }
-        };
-        p.fields.insert(f.name.clone(), val);
-    }
-    if p.fields.contains_key("x") && p.fields.contains_key("y") && p.fields.contains_key("z") {
-        p.range = (p.fields["x"].powi(2) + p.fields["y"].powi(2) + p.fields["z"].powi(2)).sqrt()
-    }
-    if p.fields.contains_key("x") && p.fields.contains_key("y") {
-        p.angle = p.fields["y"].atan2(p.fields["x"]).to_degrees();
-    }
-    p
-}
-
-fn parse_pcd(pcd: &PointCloud2) -> Vec<ParsedPoint> {
-    let mut points = Vec::new();
-    for i in 0..pcd.height {
-        for j in 0..pcd.width {
-            let start = (i * pcd.row_step + j * pcd.point_step) as usize;
-            let end = start + pcd.point_step as usize;
-            let p = if pcd.is_bigendian {
-                parse_point_be(&pcd.fields, &pcd.data[start..end])
-            } else {
-                parse_point_le(&pcd.fields, &pcd.data[start..end])
-            };
-            points.push(p);
-        }
-    }
-    points
-}
-
-fn serialize_pcd(points: &Vec<ParsedPoint>, fields: &Vec<PointField>) -> Vec<u8> {
-    let mut name_to_field = HashMap::new();
-    let mut point_step = 0;
-    for f in fields {
-        point_step = point_step.max(f.offset as usize + SIZE_OF_DATATYPE[f.datatype as usize]);
-        name_to_field.insert(f.name.clone(), f);
-    }
-    let row_step = point_step * points.len();
-    let mut buf = vec![0u8; row_step];
-
-    let mut point_offset = 0usize;
-    for p in points {
-        for (name, val) in &p.fields {
-            let field = match name_to_field.get(name) {
-                Some(v) => v,
-                None => {
-                    continue;
-                }
-            };
-            let start = point_offset + field.offset as usize;
-            let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
-            match field.datatype {
-                point_field::INT8 => {
-                    let d = (*val as i8).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::UINT8 => {
-                    let d = (*val as u8).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::INT16 => {
-                    let d = (*val as i16).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::UINT16 => {
-                    let d = (*val as u16).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::INT32 => {
-                    let d = (*val as i32).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::UINT32 => {
-                    let d = (*val as u32).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::FLOAT32 => {
-                    let d = (*val as f32).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                point_field::FLOAT64 => {
-                    let d = (*val).to_ne_bytes();
-                    buf[start..end].clone_from_slice(&d);
-                }
-                d => {
-                    error!("Unknown datatype in PointField: {}", d);
-                    continue;
-                }
-            }
-        }
-        point_offset += point_step;
-    }
-    buf
-}
-
-fn project_point(points: &[ParsedPoint], cam_mtx: &[f64; 9], offset: &[f64; 3]) -> Vec<(f64, f64)> {
-    let mtx = Array2::from_shape_fn([3, 3], |(i, j)| cam_mtx[i * 3 + j]);
-    // println!("mtx={:?}", mtx);
-    // convert from normal ROS conventions to optical conventions
-    let coords = Array2::from_shape_fn([3, points.len()], |(i, j)| match i {
-        0 => points[j].fields.get("y").unwrap_or(&0.0).to_owned() + offset[1],
-        1 => points[j].fields.get("z").unwrap_or(&0.0).to_owned() + offset[2],
-        2 => points[j].fields.get("x").unwrap_or(&0.0).to_owned() + offset[0],
-        _ => 0.0,
-    });
-    // println!("coords={:?}", coords);
-    let proj = &mtx.dot(&coords);
-    // println!("proj={:?}", proj);
-    let mut projected = Vec::new();
-    for i in 0..points.len() {
-        projected.push((
-            proj.get((0, i)).unwrap() / proj.get((2, i)).unwrap(),
-            proj.get((1, i)).unwrap() / proj.get((2, i)).unwrap(),
-        ));
-    }
-    projected
-}
-
-#[cfg(test)]
-mod projection_test {
-    use super::*;
-
-    #[test]
-    fn test_basic() {
-        let mut points = Vec::new();
-        points.push(ParsedPoint {
-            fields: HashMap::new(),
-            angle: 0.0,
-            range: DEFAULT_PCD_RANGE,
-        });
-        points[0].fields.insert("x".to_string(), 10.0);
-        points[0].fields.insert("y".to_string(), 20.0);
-        points[0].fields.insert("z".to_string(), 30.0);
-
-        points.push(ParsedPoint {
-            fields: HashMap::new(),
-            angle: 0.0,
-            range: DEFAULT_PCD_RANGE,
-        });
-        points[1].fields.insert("x".to_string(), 1.0);
-        points[1].fields.insert("y".to_string(), 2.0);
-        points[1].fields.insert("z".to_string(), 3.0);
-        let cam_mtx = [
-            1260.0 / 1920.0,
-            0.0,
-            960.0 / 1920.0,
-            0.0,
-            1260.0 / 1080.0,
-            540.0 / 1080.0,
-            0.0,
-            0.0,
-            1.0,
-        ];
-        let proj = project_point(&points, &cam_mtx, &[0.0, 0.0, 0.0]);
-        println!("Projected values: {:?}", proj);
-    }
-}
+mod transform;
 
 fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
     for i in bins {
@@ -391,8 +89,12 @@ fn mark_grid(bin: &mut Bin, curr: u128) {
 fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint {
     let mut grid_point = ParsedPoint {
         fields: HashMap::new(),
-        angle: args.angle_bin_width * (i as f64 + 0.5) + args.angle_bin_limit[0],
-        range: args.range_bin_width * (j as f64 + 0.5) + args.range_bin_limit[0],
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        id: None,
+        angle: args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0],
+        range: args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0],
     };
     let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
     let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
@@ -408,20 +110,20 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint
     grid_point.fields.insert("z".to_string(), 0.0);
     grid_point
         .fields
-        .insert(VISION_CLASS.to_string(), vision_class as f64);
+        .insert(VISION_CLASS.to_string(), vision_class as f32);
     grid_point
         .fields
-        .insert(FUSION_CLASS.to_string(), fusion_class as f64);
+        .insert(FUSION_CLASS.to_string(), fusion_class as f32);
     grid_point.fields.insert(
         "vision_count".to_string(),
-        bins[i][j].vision_classes.len() as f64,
+        bins[i][j].vision_classes.len() as f32,
     );
     grid_point.fields.insert(
         "radar_count".to_string(),
-        bins[i][j].fusion_classes.len() as f64,
+        bins[i][j].fusion_classes.len() as f32,
     );
     let speed = if !bins[i][j].speeds.is_empty() {
-        bins[i][j].speeds.iter().fold(0.0, |a, b| a + b) / bins[i][j].speeds.len() as f64
+        bins[i][j].speeds.iter().fold(0.0, |a, b| a + b) / bins[i][j].speeds.len() as f32
     } else {
         0.0
     };
@@ -429,20 +131,10 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> ParsedPoint
     grid_point
 }
 
-fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
-    pcd.fields.push(PointField {
-        name: new_field.name,
-        offset: pcd.point_step,
-        datatype: new_field.datatype,
-        count: new_field.count,
-    });
-    pcd.point_step += SIZE_OF_DATATYPE[new_field.datatype as usize] as u32 * new_field.count;
-}
-
 struct Bin {
     vision_classes: Vec<usize>,
     fusion_classes: Vec<usize>,
-    speeds: Vec<f64>,
+    speeds: Vec<f32>,
     last_masked: u128,
     first_marked: u128,
 }
@@ -450,6 +142,31 @@ struct Bin {
 type Grid = (Vec<Vec<f32>>, u64);
 const FUSION_CLASS: &str = "fusion_class";
 const VISION_CLASS: &str = "vision_class";
+
+// If the receiver is empty, waits for the next message, otherwise returns the
+// most recent message on this receiver. If the receiver is closed, returns None
+async fn drain_recv(
+    sub: &Subscriber<zenoh::handlers::FifoChannelHandler<Sample>>,
+    timeout: std::time::Duration,
+) -> Option<Sample> {
+    if let Some(v) = sub.drain().last() {
+        Some(v)
+    } else {
+        match sub.recv_timeout(timeout) {
+            Ok(v) => match v {
+                Some(v) => Some(v),
+                None => {
+                    warn!("Timeout on {}", sub.key_expr());
+                    None
+                }
+            },
+            Err(e) => {
+                error!("error receiving radar cube on {}: {:?}", sub.key_expr(), e);
+                None
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -515,8 +232,31 @@ async fn main() {
         })
         .unwrap();
 
+    let transform = Arc::new(Mutex::new(HashMap::<(String, String), Transform>::new()));
+    let transform_clone = transform.clone();
+    let _transform_sub = session
+        .declare_subscriber("rt/tf_static")
+        .callback_mut(move |s| {
+            let new_transform: TransformStamped = match cdr::deserialize(&s.payload().to_bytes()) {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("Failed to deserialize message: {:?}", e);
+                    return;
+                }
+            };
+
+            if let Ok(mut guard) = transform_clone.try_lock() {
+                guard.insert(
+                    (new_transform.header.frame_id, new_transform.child_frame_id),
+                    new_transform.transform,
+                );
+            }
+        })
+        .await
+        .expect("Failed to declare Zenoh subscriber");
+
     let radar_sub = session
-        .declare_subscriber(args.radar_input_topic.clone())
+        .declare_subscriber(args.radar_pcd_topic.clone())
         .await
         .expect("Failed to declare Zenoh subscriber");
 
@@ -533,7 +273,6 @@ async fn main() {
     let grid: Arc<Mutex<Option<Grid>>> = Arc::new(Mutex::new(None));
     spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
 
-    let mut zstd_decomp = zstd::bulk::Decompressor::new().unwrap();
     let mut bins = Vec::new();
     let mut frame_index = 0;
     let mut i = args.angle_bin_limit[0];
@@ -595,8 +334,7 @@ async fn main() {
             (pcd, points)
         });
 
-        let mut mask_only =
-            classify_points_mask_proj(&mask, &info, &points, &mut zstd_decomp).await;
+        let mut mask_only = classify_points_mask_proj(&mask, &info, &points).await;
 
         // filter occlusions
         for i in 0..points.len() {
@@ -641,13 +379,13 @@ async fn main() {
         for i in 0..points.len() {
             points[i]
                 .fields
-                .insert(FUSION_CLASS.to_string(), radar_only[i] as f64);
+                .insert(FUSION_CLASS.to_string(), radar_only[i] as f32);
         }
 
         for i in 0..points.len() {
             points[i]
                 .fields
-                .insert(VISION_CLASS.to_string(), mask_only[i] as f64);
+                .insert(VISION_CLASS.to_string(), mask_only[i] as f32);
         }
 
         // points with the same cluster_id get the same class
@@ -695,21 +433,13 @@ async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<Mask>
         .declare_subscriber(args.mask_topic.clone())
         .await
         .expect("Failed to declare Zenoh subscriber");
-
     loop {
-        let sample = match mask_sub.recv_async().await {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "error receiving mask data on {}: {:?}",
-                    mask_sub.key_expr(),
-                    e
-                );
-                continue;
-            }
+        let sample = match drain_recv(&mask_sub, Duration::from_secs(2)).await {
+            Some(v) => v,
+            None => continue,
         };
 
-        let new_mask: Mask = match info_span!("mask_deserialize")
+        let mut new_mask: Mask = match info_span!("mask_deserialize")
             .in_scope(|| cdr::deserialize::<Mask>(&sample.payload().to_bytes()))
         {
             Ok(v) => v,
@@ -719,18 +449,23 @@ async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<Mask>
             }
         };
 
+        if new_mask.encoding == "zstd" {
+            new_mask.encoding = "".to_owned();
+            new_mask.mask = zstd::decode_all(new_mask.mask.as_slice())
+                .expect("Cannot decompress zstd encoded mask");
+        }
+
         let mut guard = mask.lock().await;
         *guard = Some(new_mask);
     }
 }
 
-fn get_cluster_ids(points: &mut [ParsedPoint]) -> (bool, HashMap<i32, Vec<usize>>) {
+fn get_cluster_ids(points: &mut [ParsedPoint]) -> (bool, HashMap<usize, Vec<usize>>) {
     let mut has_cluster_id = false;
     let mut cluster_ids = HashMap::new();
     for (i, point) in points.iter_mut().enumerate() {
-        if point.fields.contains_key("cluster_id") {
+        if let Some(id) = point.id {
             has_cluster_id = true;
-            let id = point.fields["cluster_id"].round() as i32;
             if id == 0 {
                 // we ignore noise points
                 continue;
@@ -746,7 +481,7 @@ fn get_cluster_ids(points: &mut [ParsedPoint]) -> (bool, HashMap<i32, Vec<usize>
 
 fn all_points_in_cluster_same_class(
     points: &mut [ParsedPoint],
-    cluster_ids: &HashMap<i32, Vec<usize>>,
+    cluster_ids: &HashMap<usize, Vec<usize>>,
     field: &str,
 ) {
     for id in cluster_ids.iter() {
@@ -766,7 +501,7 @@ fn all_points_in_cluster_same_class(
         for index in id.1 {
             points[*index]
                 .fields
-                .insert(field.to_string(), class as f64);
+                .insert(field.to_string(), class as f32);
         }
     }
 }
@@ -776,7 +511,6 @@ async fn classify_points_mask_proj(
     mask: &Arc<Mutex<Option<Mask>>>,
     info: &Arc<Mutex<Option<CameraInfo>>>,
     points: &[ParsedPoint],
-    zstd_decomp: &mut zstd::bulk::Decompressor<'_>,
 ) -> Vec<usize> {
     let mut class = vec![0; points.len()];
     // get mask data
@@ -788,24 +522,10 @@ async fn classify_points_mask_proj(
         }
     };
 
-    // this holds the memory if we need to decompress the mask
-    let mut mask_mem = None;
-
     let mask_width = mask_msg.width as usize;
     let mask_height = mask_msg.height as usize;
     // let mask_length = mask_msg.length as usize;
-    let mask = if mask_msg.encoding == "zstd" {
-        // accepts a maximum of 32 classes
-        let m = mask_mem.insert(
-            zstd_decomp
-                .decompress(&mask_msg.mask, mask_width * mask_height * 32)
-                .unwrap(),
-        );
-        drop(guard);
-        m
-    } else {
-        &mask_msg.mask
-    };
+    let mask = &mask_msg.mask;
     let mask_classes = mask.len() as f32 / mask_width as f32 / mask_height as f32;
     let mask_classes = mask_classes.round() as usize;
     let (mut cam_mtx, cam_width, cam_height) = match info.lock().await.as_ref() {
@@ -822,13 +542,13 @@ async fn classify_points_mask_proj(
     cam_mtx[3] /= cam_height;
     cam_mtx[4] /= cam_height;
     cam_mtx[5] /= cam_height;
-
+    let cam_mtx = cam_mtx.map(|x| x as f32);
     // project points onto mask
     let point_proj = project_point(points, &cam_mtx, &[0.0, 0.0, 0.0]);
     for i in 0..points.len() {
         let mask_coord = (
-            ((1.0 - point_proj[i].0) * mask_width as f64).round() as i64,
-            ((1.0 - point_proj[i].1) * mask_height as f64).round() as i64,
+            ((1.0 - point_proj[i].0) * mask_width as f32).round() as i64,
+            ((1.0 - point_proj[i].1) * mask_height as f32).round() as i64,
         );
 
         // first do the center of the point, then 8 points around circumference
@@ -959,20 +679,20 @@ async fn grid_points_radar_tracked(
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
-        let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
+        let (x, y) = grid_to_xy(i, j, width, args);
         let mut points_in_grid = Vec::new();
         // find all points in grid
         for (ind, p) in points.iter().enumerate() {
-            if p.fields["x"] < x - args.model_grid_size[0] * 0.5 {
+            if p.x < x - args.model_grid_size[0] * 0.5 {
                 continue;
             }
-            if x + args.model_grid_size[0] * 0.5 < p.fields["x"] {
+            if x + args.model_grid_size[0] * 0.5 < p.x {
                 continue;
             }
-            if p.fields["y"] < y - args.model_grid_size[1] * 0.5 {
+            if p.y < y - args.model_grid_size[1] * 0.5 {
                 continue;
             }
-            if y + args.model_grid_size[1] * 0.5 < p.fields["y"] {
+            if y + args.model_grid_size[1] * 0.5 < p.y {
                 continue;
             }
             points_in_grid.push(ind);
@@ -988,7 +708,7 @@ async fn grid_points_radar_tracked(
         let mut min_dist = 9999999.9;
         let mut min_point_ind = 0;
         for (ind, p) in points.iter().enumerate() {
-            let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
+            let dist = ((p.x - x).powi(2) + (p.y - y).powi(2)).sqrt();
             if dist < min_dist {
                 min_dist = dist;
                 min_point_ind = ind;
@@ -1025,13 +745,13 @@ async fn grid_points_radar(
                 continue;
             }
             // center of grid
-            let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
+            let (x, y) = grid_to_xy(i as f32, j as f32, width, args);
 
             // find closest point
             let mut min_dist = 9999999.9;
             let mut min_point_ind = 0;
             for (ind, p) in points.iter().enumerate() {
-                let dist = ((p.fields["x"] - x).powi(2) + (p.fields["y"] - y).powi(2)).sqrt();
+                let dist = ((p.x - x).powi(2) + (p.y - y).powi(2)).sqrt();
                 if dist < min_dist {
                     min_dist = dist;
                     min_point_ind = ind;
@@ -1044,19 +764,19 @@ async fn grid_points_radar(
 }
 
 // Half of the width of the model is used to offset the j value
-fn grid_to_xy(i: f64, j: f64, width: usize, args: &Args) -> (f64, f64) {
+fn grid_to_xy(i: f32, j: f32, width: usize, args: &Args) -> (f32, f32) {
     let i_width = args.model_grid_size[0];
     let j_width = args.model_grid_size[1];
 
     if args.model_polar {
-        let angle = -(width as f64) / 2.0 + j_width * (j + 0.5);
+        let angle = -(width as f32) / 2.0 + j_width * (j + 0.5);
         let range = i_width * (i + 0.5);
         let x = (-angle).to_radians().cos() * range;
         let y = (-angle).to_radians().sin() * range;
         (x, y)
     } else {
         let x = i_width * (i + 0.5);
-        let y = -(width as f64) / 2.0 + j_width * (j + 0.5);
+        let y = -(width as f32) / 2.0 + j_width * (j + 0.5);
         (x, y)
     }
 }
@@ -1080,9 +800,13 @@ async fn add_grid_as_points(
                 continue;
             }
             // center of grid
-            let (x, y) = grid_to_xy(i as f64, j as f64, width, args);
+            let (x, y) = grid_to_xy(i as f32, j as f32, width, args);
             let mut p = ParsedPoint {
                 fields: HashMap::new(),
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
                 angle: 0.0,
                 range: 0.0,
             };
@@ -1106,7 +830,7 @@ async fn add_grid_as_points(
 fn get_occupied_cluster(
     header: Header,
     points: &[ParsedPoint],
-    cluster_ids: &HashMap<i32, Vec<usize>>,
+    cluster_ids: &HashMap<usize, Vec<usize>>,
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
     let mut centroid_points = Vec::new();
@@ -1118,21 +842,25 @@ fn get_occupied_cluster(
         let vision_class = points[id.1[0]].fields[VISION_CLASS];
         let fusion_class = points[id.1[0]].fields[FUSION_CLASS];
         let mut xyzv = id.1.iter().fold([0.0, 0.0, 0.0, 0.0], |mut xyzv, ind| {
-            xyzv[0] += points[*ind].fields["x"];
-            xyzv[1] += points[*ind].fields["y"];
-            xyzv[2] += points[*ind].fields["z"];
+            xyzv[0] += points[*ind].x;
+            xyzv[1] += points[*ind].y;
+            xyzv[2] += points[*ind].z;
             if let Some(v) = points[*ind].fields.get("speed") {
                 xyzv[3] += v;
             }
             xyzv
         });
         for v in xyzv.iter_mut() {
-            *v /= id.1.len() as f64
+            *v /= id.1.len() as f32
         }
         let mut p = ParsedPoint {
             fields: HashMap::new(),
             angle: 0.0,
-            range: DEFAULT_PCD_RANGE,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            id: None,
+            range: 0.0,
         };
 
         p.fields.insert("x".to_string(), xyzv[0]);
@@ -1141,8 +869,8 @@ fn get_occupied_cluster(
         p.fields.insert("speed".to_string(), xyzv[3]);
         p.fields.insert(VISION_CLASS.to_string(), vision_class);
         p.fields.insert(FUSION_CLASS.to_string(), fusion_class);
-        p.fields.insert("count".to_string(), id.1.len() as f64);
-        p.fields.insert("cluster_id".to_string(), *id.0 as f64);
+        p.fields.insert("count".to_string(), id.1.len() as f32);
+        p.fields.insert("cluster_id".to_string(), *id.0 as f32);
         centroid_points.push(p);
     }
 
@@ -1150,10 +878,10 @@ fn get_occupied_cluster(
     let mut boxes: Vec<TrackerBox> = centroid_points
         .iter()
         .map(|p| TrackerBox {
-            xmin: p.fields["x"] as f32 - 0.5,
-            xmax: p.fields["x"] as f32 + 0.5,
-            ymin: p.fields["y"] as f32 - 0.5,
-            ymax: p.fields["y"] as f32 + 0.5,
+            xmin: p.x as f32 - 0.5,
+            xmax: p.x as f32 + 0.5,
+            ymin: p.y as f32 - 0.5,
+            ymax: p.y as f32 + 0.5,
             score: if p.fields[VISION_CLASS] > 0.0 || p.fields[FUSION_CLASS] > 0.0 {
                 1.0
             } else {
@@ -1182,11 +910,11 @@ fn get_occupied_cluster(
         if boxes[i].vision_class == 0 {
             centroid_points[i].fields.insert(
                 VISION_CLASS.to_string(),
-                point_tracker.uuid_map_vision_class[&uuid] as f64,
+                point_tracker.uuid_map_vision_class[&uuid] as f32,
             );
             centroid_points[i].fields.insert(
                 FUSION_CLASS.to_string(),
-                point_tracker.uuid_map_fusion_class[&uuid] as f64,
+                point_tracker.uuid_map_fusion_class[&uuid] as f32,
             );
         }
     }
@@ -1211,27 +939,24 @@ fn get_occupied_cluster(
         let mut p = ParsedPoint {
             fields: HashMap::new(),
             angle: 0.0,
-            range: DEFAULT_PCD_RANGE,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            id: None,
+            range: 0.0,
         };
 
         let predicted = i.get_predicted_location();
-        p.fields.insert(
-            "x".to_string(),
-            (predicted.xmin + predicted.xmax) as f64 / 2.0,
-        );
-        p.fields.insert(
-            "y".to_string(),
-            (predicted.ymin + predicted.ymax) as f64 / 2.0,
-        );
-        p.fields.insert("z".to_string(), 0.0);
+        p.x = (predicted.xmin + predicted.xmax) as f32 / 2.0;
+        p.y = (predicted.ymin + predicted.ymax) as f32 / 2.0;
         p.fields.insert("speed".to_string(), 0.0);
         p.fields.insert(
             VISION_CLASS.to_string(),
-            point_tracker.uuid_map_vision_class[&i.id] as f64,
+            point_tracker.uuid_map_vision_class[&i.id] as f32,
         );
         p.fields.insert(
             VISION_CLASS.to_string(),
-            point_tracker.uuid_map_fusion_class[&i.id] as f64,
+            point_tracker.uuid_map_fusion_class[&i.id] as f32,
         );
         p.fields.insert("count".to_string(), 0.0);
         p.fields.insert("cluster_id".to_string(), 0.0);

@@ -10,7 +10,11 @@ type BoolDefaultTrue = bool;
 pub struct Args {
     /// radar input topic
     #[arg(long, env, default_value = "rt/radar/targets")]
-    pub radar_input_topic: String,
+    pub radar_pcd_topic: String,
+
+    /// lidar input topic
+    #[arg(long, env, default_value = "rt/lidar/points")]
+    pub lidar_pcd_topic: String,
 
     /// mask topic
     #[arg(long, env, default_value = "rt/model/mask")]
@@ -25,8 +29,12 @@ pub struct Args {
     pub info_topic: String,
 
     /// radar output topic
-    #[arg(long, env, default_value = "rt/fusion/targets")]
+    #[arg(long, env, default_value = "rt/fusion/radar")]
     pub radar_output_topic: String,
+
+    /// lidar output topic
+    #[arg(long, env, default_value = "rt/fusion/lidar")]
+    pub lidar_output_topic: String,
 
     /// occupancy output topic
     #[arg(long, env, default_value = "rt/fusion/occupancy")]
@@ -52,7 +60,7 @@ pub struct Args {
     /// of a 1x1 model output grid cell. If the model is polar, the width is
     /// in degrees.
     #[arg(long, env, value_delimiter = ' ', default_value = "1 1")]
-    pub model_grid_size: Vec<f64>,
+    pub model_grid_size: Vec<f32>,
 
     /// engine for model context
     #[arg(long, env, default_value = "npu")]
@@ -96,12 +104,12 @@ pub struct Args {
     /// range_bin_limit. Used for model grid. Used for occupancy if input PCD
     /// does not have cluster_id field.
     #[arg(long, env, num_args = 2, value_delimiter = ' ', default_value = "0 16")]
-    pub range_bin_limit: Vec<f64>,
+    pub range_bin_limit: Vec<f32>,
 
     /// range_bin_width. Used for model grid. Used for occupancy if input PCD
     /// does not have cluster_id field.
     #[arg(long, env, default_value = "1.0")]
-    pub range_bin_width: f64,
+    pub range_bin_width: f32,
 
     /// angle_bin_limit, 0 degrees is forwards. Used for occupancy if input PCD
     /// does not have cluster_id field. Used for model grid if model_polar.
@@ -113,21 +121,21 @@ pub struct Args {
         value_delimiter = ' ',
         default_value = "-55 55"
     )]
-    pub angle_bin_limit: Vec<f64>,
+    pub angle_bin_limit: Vec<f32>,
 
     /// angle_bin_width in degrees. Used for occupancy if input PCD
     /// does not have cluster_id field. Used for model grid if model_polar
     /// is true.
     #[arg(long, env, default_value = "6.875")]
-    pub angle_bin_width: f64,
+    pub angle_bin_width: f32,
 
     /// occlusion angle limit in degrees.
     #[arg(long, env, default_value = "20")]
-    pub occ_angle_limit: f64,
+    pub occ_angle_limit: f32,
 
     /// occlusion range limit.
     #[arg(long, env, default_value = "1.0")]
-    pub occ_range_limit: f64,
+    pub occ_range_limit: f32,
 
     /// occupancy threshold. Only used if input PCD does not have cluster_id
     /// field

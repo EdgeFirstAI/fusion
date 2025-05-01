@@ -340,7 +340,7 @@ async fn main() {
         let cam_mtx = info.k.map(|x| x as f32);
         let start = Instant::now();
         let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, im_shape);
-        println!("transform_and_project_points takes {:?}", start.elapsed());
+        trace!("transform_and_project_points takes {:?}", start.elapsed());
         let mask = match mask.lock() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().clone(),
             _ => continue,
