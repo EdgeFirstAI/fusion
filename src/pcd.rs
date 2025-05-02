@@ -2,6 +2,8 @@ use edgefirst_schemas::sensor_msgs::{point_field, PointCloud2, PointField};
 use log::error;
 use std::collections::HashMap;
 
+use crate::{FUSION_CLASS, VISION_CLASS};
+
 pub struct ParsedPoint {
     pub fields: HashMap<String, f32>,
     pub x: f32,
@@ -96,10 +98,10 @@ fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             "y" => p.y = val,
             "z" => p.z = val,
             "cluster_id" => {
-                p.id.insert(val as usize);
+                let _ = p.id.insert(val as usize);
             }
             _ => {
-                p.fields.insert(f.name.clone(), val);
+                let _ = p.fields.insert(f.name.clone(), val);
             }
         }
     }
@@ -181,10 +183,10 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             "y" => p.y = val,
             "z" => p.z = val,
             "cluster_id" => {
-                p.id.insert(val as usize);
+                let _ = p.id.insert(val as usize);
             }
             _ => {
-                p.fields.insert(f.name.clone(), val);
+                let _ = p.fields.insert(f.name.clone(), val);
             }
         }
     }
@@ -211,7 +213,12 @@ pub fn parse_pcd(pcd: &PointCloud2) -> Vec<ParsedPoint> {
     points
 }
 
-pub fn serialize_pcd(points: &Vec<ParsedPoint>, fields: &Vec<PointField>) -> Vec<u8> {
+pub fn serialize_pcd(
+    points: &[ParsedPoint],
+    fields: &[PointField],
+    vision_class: &[u8],
+    fusion_class: &[u8],
+) -> Vec<u8> {
     let mut name_to_field = HashMap::new();
     let mut point_step = 0;
     for f in fields {
@@ -222,36 +229,32 @@ pub fn serialize_pcd(points: &Vec<ParsedPoint>, fields: &Vec<PointField>) -> Vec
     let mut buf = vec![0u8; row_step];
 
     let mut point_offset = 0usize;
-    for p in points {
-        for (name, val) in [
-            ("x", &p.x),
-            ("y", &p.y),
-            ("z", &p.z),
-            ("cluster_id", &(p.id.unwrap_or(0) as f32)),
-        ] {
-            serialize_field(&name_to_field, name, val, point_offset, &mut buf);
-        }
-        for (name, val) in &p.fields {
-            serialize_field(&name_to_field, name, val, point_offset, &mut buf);
+    for (i, p) in points.iter().enumerate() {
+        for f in fields {
+            match f.name.as_str() {
+                "x" => serialize_field_f32(f, &p.x, point_offset, &mut buf),
+                "y" => serialize_field_f32(f, &p.y, point_offset, &mut buf),
+                "z" => serialize_field_f32(f, &p.z, point_offset, &mut buf),
+                "cluster_id" => {
+                    serialize_field_usize(f, &p.id.unwrap_or_default(), point_offset, &mut buf)
+                }
+                VISION_CLASS => serialize_field_u8(f, &vision_class[i], point_offset, &mut buf),
+                FUSION_CLASS => serialize_field_u8(f, &fusion_class[i], point_offset, &mut buf),
+                s => {
+                    if let Some(v) = p.fields.get(s) {
+                        serialize_field_f32(f, v, point_offset, &mut buf);
+                    }
+                }
+            }
         }
         point_offset += point_step;
     }
     buf
 }
 
-fn serialize_field(
-    name_to_field: &HashMap<String, &PointField>,
-    name: &str,
-    val: &f32,
-    point_offset: usize,
-    buf: &mut [u8],
-) {
-    let field = match name_to_field.get(name) {
-        Some(v) => v,
-        None => {
-            return;
-        }
-    };
+// TODO: see if there is some trait which can make this better than three copy
+// and pasted functions
+fn serialize_field_f32(field: &PointField, val: &f32, point_offset: usize, buf: &mut [u8]) {
     let start = point_offset + field.offset as usize;
     let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
     match field.datatype {
@@ -280,7 +283,91 @@ fn serialize_field(
             buf[start..end].copy_from_slice(&d);
         }
         point_field::FLOAT32 => {
-            let d = (*val).to_ne_bytes();
+            let d = (*val as f32).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::FLOAT64 => {
+            let d = (*val as f64).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        d => {
+            error!("Unknown datatype in PointField: {}", d);
+        }
+    }
+}
+
+fn serialize_field_u8(field: &PointField, val: &u8, point_offset: usize, buf: &mut [u8]) {
+    let start = point_offset + field.offset as usize;
+    let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
+    match field.datatype {
+        point_field::INT8 => {
+            let d = (*val as i8).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::UINT8 => {
+            let d = (*val as u8).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::INT16 => {
+            let d = (*val as i16).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::UINT16 => {
+            let d = (*val as u16).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::INT32 => {
+            let d = (*val as i32).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::UINT32 => {
+            let d = (*val as u32).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::FLOAT32 => {
+            let d = (*val as f32).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::FLOAT64 => {
+            let d = (*val as f64).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        d => {
+            error!("Unknown datatype in PointField: {}", d);
+        }
+    }
+}
+
+fn serialize_field_usize(field: &PointField, val: &usize, point_offset: usize, buf: &mut [u8]) {
+    let start = point_offset + field.offset as usize;
+    let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
+    match field.datatype {
+        point_field::INT8 => {
+            let d = (*val as i8).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::UINT8 => {
+            let d = (*val as u8).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::INT16 => {
+            let d = (*val as i16).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::UINT16 => {
+            let d = (*val as u16).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::INT32 => {
+            let d = (*val as i32).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::UINT32 => {
+            let d = (*val as u32).to_ne_bytes();
+            buf[start..end].copy_from_slice(&d);
+        }
+        point_field::FLOAT32 => {
+            let d = (*val as f32).to_ne_bytes();
             buf[start..end].copy_from_slice(&d);
         }
         point_field::FLOAT64 => {

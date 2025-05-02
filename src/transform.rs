@@ -94,33 +94,6 @@ pub(crate) fn transform_and_project_points(
         .collect()
 }
 
-pub fn project_point(
-    points: &[ParsedPoint],
-    cam_mtx: &[f32; 9],
-    offset: &[f32; 3],
-) -> Vec<(f32, f32)> {
-    let mtx = Array2::from_shape_fn([3, 3], |(i, j)| cam_mtx[i * 3 + j]);
-    // println!("mtx={:?}", mtx);
-    // convert from normal ROS conventions to optical conventions
-    let coords = Array2::from_shape_fn([3, points.len()], |(i, j)| match i {
-        0 => points[j].y + offset[1],
-        1 => points[j].z + offset[2],
-        2 => points[j].x + offset[0],
-        _ => 0.0,
-    });
-    // println!("coords={:?}", coords);
-    let proj = &mtx.dot(&coords);
-    // println!("proj={:?}", proj);
-    let mut projected = Vec::new();
-    for i in 0..points.len() {
-        projected.push((
-            proj.get((0, i)).unwrap() / proj.get((2, i)).unwrap(),
-            proj.get((1, i)).unwrap() / proj.get((2, i)).unwrap(),
-        ));
-    }
-    projected
-}
-
 #[cfg(test)]
 mod projection_test {
     use std::collections::HashMap;
@@ -160,7 +133,20 @@ mod projection_test {
             0.0,
             1.0,
         ];
-        let proj = project_point(&points, &cam_mtx, &[0.0, 0.0, 0.0]);
+        let transform = Transform {
+            translation: Vector3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            rotation: Quaternion {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+        };
+        let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, (1.0, 1.0));
         println!("Projected values: {:?}", proj);
     }
 }

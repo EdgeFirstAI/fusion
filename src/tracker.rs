@@ -19,9 +19,8 @@ pub struct ByteTrack {
     pub removed_tracks: Vec<Tracklet>,
     pub frame_count: i32,
     pub timestamp: u64,
-    pub uuid_map_vision_class: HashMap<Uuid, i32>,
-
-    pub uuid_map_fusion_class: HashMap<Uuid, i32>,
+    pub uuid_map_vision_class: HashMap<Uuid, u8>,
+    pub uuid_map_fusion_class: HashMap<Uuid, u8>,
     pub settings: ByteTrackSettings,
 }
 #[derive(Debug, Clone)]
@@ -42,9 +41,8 @@ pub struct TrackerBox {
     pub xmax: f32,
     pub ymax: f32,
     pub score: f32,
-    pub vision_class: i32,
-
-    pub fusion_class: i32,
+    pub vision_class: u8,
+    pub fusion_class: u8,
 }
 
 impl Tracklet {
