@@ -105,23 +105,17 @@ mod projection_test {
     fn test_basic() {
         let mut points = Vec::new();
         points.push(ParsedPoint {
-            fields: HashMap::new(),
             x: 10.0,
             y: 20.0,
             z: 30.0,
             id: None,
-            angle: 0.0,
-            range: 1000.0,
         });
 
         points.push(ParsedPoint {
-            fields: HashMap::new(),
             x: 1.0,
             y: 2.0,
             z: 3.0,
             id: None,
-            angle: 0.0,
-            range: 1000.0,
         });
         let cam_mtx = [
             1260.0 / 1920.0,

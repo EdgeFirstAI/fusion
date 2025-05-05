@@ -1,5 +1,5 @@
 use args::{Args, PCDSource};
-use cdr::{CdrLe, Infinite};
+use cdr::{CdrLe, Infinite, LittleEndian};
 use clap::Parser;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
@@ -16,9 +16,8 @@ use std::{
     collections::{hash_map::Entry, HashMap},
     hash::Hash,
     sync::Arc,
-    thread,
-    thread::JoinHandle,
-    time::Duration,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 use tokio::{join, sync::Mutex};
 use tracing::instrument;
@@ -93,41 +92,25 @@ fn mark_grid(bin: &mut Bin, curr: u128) {
 
 fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (ParsedPoint, u8, u8) {
     let mut grid_point = ParsedPoint {
-        fields: HashMap::new(),
         x: 0.0,
         y: 0.0,
         z: 0.0,
         id: None,
-        angle: args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0],
-        range: args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0],
     };
     let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
     let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
 
-    grid_point.x = grid_point.angle.to_radians().cos() * grid_point.range;
-    grid_point.y = grid_point.angle.to_radians().sin() * grid_point.range;
+    let angle = args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0];
+    let range = args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0];
+    grid_point.x = angle.to_radians().cos() * range;
+    grid_point.y = angle.to_radians().sin() * range;
     grid_point.x = 0.0;
-    grid_point.fields.insert(
-        "vision_count".to_string(),
-        bins[i][j].vision_classes.len() as f32,
-    );
-    grid_point.fields.insert(
-        "radar_count".to_string(),
-        bins[i][j].fusion_classes.len() as f32,
-    );
-    let speed = if !bins[i][j].speeds.is_empty() {
-        bins[i][j].speeds.iter().fold(0.0, |a, b| a + b) / bins[i][j].speeds.len() as f32
-    } else {
-        0.0
-    };
-    grid_point.fields.insert("speed".to_string(), speed);
     (grid_point, vision_class, fusion_class)
 }
 
 struct Bin {
     vision_classes: Vec<u8>,
     fusion_classes: Vec<u8>,
-    speeds: Vec<f32>,
     last_masked: u128,
     first_marked: u128,
 }
@@ -248,25 +231,49 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let radar_sub = session
-        .declare_subscriber(args.radar_pcd_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh subscriber");
+    let radar_sub = if args.radar_pcd_topic != "" {
+        Some(
+            session
+                .declare_subscriber(args.radar_pcd_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh subscriber"),
+        )
+    } else {
+        None
+    };
 
-    let radar_publ = session
-        .declare_publisher(args.radar_output_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh publisher");
+    let radar_publ = if args.radar_output_topic != "" {
+        Some(
+            session
+                .declare_publisher(args.radar_output_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
 
-    let lidar_sub = session
-        .declare_subscriber(args.radar_pcd_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh subscriber");
+    let lidar_sub = if args.lidar_pcd_topic != "" {
+        Some(
+            session
+                .declare_subscriber(args.lidar_pcd_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh subscriber"),
+        )
+    } else {
+        None
+    };
 
-    let lidar_publ = session
-        .declare_publisher(args.radar_output_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh publisher");
+    let lidar_publ = if args.lidar_output_topic != "" {
+        Some(
+            session
+                .declare_publisher(args.lidar_output_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
 
     let grid_publ = session
         .declare_publisher(args.occ_topic.clone())
@@ -324,16 +331,18 @@ async fn main() {
         PCDSource::Lidar => zenoh_lidar.bbox_publ = Some(bbox_publ),
         _ => {}
     }
-    let radar_handle = spawn_fusion_thread(data_radar, zenoh_radar, args.clone());
     let lidar_handle = spawn_fusion_thread(data_lidar, zenoh_lidar, args.clone());
 
-    let _ = radar_handle.join();
+    // let radar_handle = spawn_fusion_thread(data_radar, zenoh_radar,
+    // args.clone());
+
     let _ = lidar_handle.join();
+    // let _ = radar_handle.join();
 }
 
 pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHandle<()> {
     thread::Builder::new()
-        .name("model".to_string())
+        .name("fusion_thread".to_string())
         .spawn(move || {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -347,8 +356,8 @@ pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHa
 #[derive(Debug)]
 pub struct ZenohCtx {
     session: Session,
-    pcd_sub: Subscriber<FifoChannelHandler<Sample>>,
-    pcd_publ: Publisher<'static>,
+    pcd_sub: Option<Subscriber<FifoChannelHandler<Sample>>>,
+    pcd_publ: Option<Publisher<'static>>,
     grid_publ: Option<Publisher<'static>>,
     bbox_publ: Option<Publisher<'static>>,
 }
@@ -374,7 +383,9 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         track_iou: 0.01,
         track_update: 0.5,
     });
-
+    if zenoh.pcd_sub.is_none() {
+        return;
+    }
     let mut bins = Vec::new();
     let mut frame_index = 0;
     let mut i = args.angle_bin_limit[0];
@@ -385,7 +396,6 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             range_bins.push(Bin {
                 vision_classes: Vec::new(),
                 fusion_classes: Vec::new(),
-                speeds: Vec::new(),
                 last_masked: 0,
                 first_marked: u128::MAX,
             });
@@ -396,14 +406,16 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     }
 
     loop {
-        let msg = match drain_recv(&zenoh.pcd_sub, Duration::from_secs(2)).await {
+        let msg = match drain_recv(zenoh.pcd_sub.as_ref().unwrap(), Duration::from_secs(2)).await {
             Some(v) => v,
             None => continue,
         };
-
+        let start = Instant::now();
         let mut pcd: PointCloud2 = cdr::deserialize(&msg.payload().to_bytes()).unwrap();
-        let mut points = parse_pcd(&pcd);
 
+        println!("cdr::deserialize {:?}", start.elapsed());
+        let mut points = parse_pcd(&pcd);
+        println!("parse_pcd {:?}", start.elapsed());
         let transform = data
             .tf_static
             .lock()
@@ -442,6 +454,7 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             &cam_mtx,
             (cam_info.width as f32, cam_info.height as f32),
         );
+        println!("transform_and_project_points {:?}", start.elapsed());
         pcd.header.frame_id = BASE_LINK_FRAME_ID.to_string(); // frame_id is base link because the tf transform was applied
 
         let mask = match data.mask.lock().await {
@@ -455,56 +468,98 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         } else {
             late_fusion_no_cluster(&points, &proj, &mask, 0.02, args)
         };
-
+        println!("late_fusion {:?}", start.elapsed());
         let fusion_predictions = if args.track {
             grid_radar_tracked(&data.grid, &mut tracker, args, zenoh.session.clone()).await
         } else {
             grid_radar(&data.grid, args).await
         };
-
+        println!("grid predictions {:?}", start.elapsed());
         let fusion_class = if has_cluster_ids {
             grid_nearest_cluster(&fusion_predictions, &points, &ids)
         } else {
             grid_nearest_point_no_cluster(&fusion_predictions, &points)
         };
+        println!("grid occupancy {:?}", start.elapsed());
 
-        let boxes_msg = if has_cluster_ids && zenoh.bbox_publ.is_some() {
-            Some(get_3d_bbox(
+        let bbox_msg = if has_cluster_ids && zenoh.bbox_publ.is_some() {
+            let bbox_msg = Some(get_3d_bbox(
                 pcd.header.clone(),
                 &points,
                 &vision_class,
                 &ids,
-            ))
+            ));
+            println!("boxes {:?}", start.elapsed());
+            bbox_msg
         } else {
             None
         };
 
-        insert_field(
-            &mut pcd,
-            PointField {
-                name: FUSION_CLASS.to_string(),
-                offset: 0, // offset is calculated by the insert field function
-                datatype: point_field::UINT8,
-                count: 1,
-            },
-        );
+        let publ_bbox = async || {
+            if let Some((msg, enc)) = bbox_msg {
+                match zenoh
+                    .bbox_publ
+                    .as_ref()
+                    .unwrap()
+                    .put(msg)
+                    .encoding(enc)
+                    .await
+                {
+                    Ok(_) => trace!("BBox3D Message Sent"),
+                    Err(e) => error!("BBox3D Message Error: {:?}", e),
+                }
+            }
+        };
 
-        insert_field(
-            &mut pcd,
-            PointField {
-                name: VISION_CLASS.to_string(),
-                offset: 0, // offset is calculated by the insert field function
-                datatype: point_field::UINT8,
-                count: 1,
-            },
-        );
-        let data = serialize_pcd(&points, &pcd.fields, &vision_class, &fusion_class);
-        pcd.row_step = data.len() as u32;
-        pcd.data = data;
-        pcd.is_bigendian = cfg!(target_endian = "big");
+        let pcd_msg = if zenoh.pcd_publ.is_some() {
+            pcd.fields = Vec::new();
+            for (char, datatype) in [
+                ("x", point_field::FLOAT32),
+                ("y", point_field::FLOAT32),
+                ("z", point_field::FLOAT32),
+                ("cluster_id", point_field::UINT32),
+                (FUSION_CLASS, point_field::UINT8),
+                (VISION_CLASS, point_field::UINT8),
+            ] {
+                insert_field(
+                    &mut pcd,
+                    PointField {
+                        name: char.to_string(),
+                        offset: 0, // offset is calculated by the insert field function
+                        datatype,
+                        count: 1,
+                    },
+                );
+            }
+            let data = serialize_pcd(&points, &pcd.fields, &vision_class, &fusion_class);
+            println!("serialize_pcd {:?}", start.elapsed());
+            pcd.row_step = data.len() as u32;
+            pcd.data = data;
+            pcd.is_bigendian = cfg!(target_endian = "big");
 
-        let buf_pcd = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
-        let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+            let buf_pcd = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
+            let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+            println!("cdr::serialize {:?}", start.elapsed());
+            Some((buf_pcd, enc_pcd))
+        } else {
+            None
+        };
+
+        let publ_pcd = async || {
+            if let Some((msg, enc)) = pcd_msg {
+                match zenoh
+                    .pcd_publ
+                    .as_ref()
+                    .unwrap()
+                    .put(msg)
+                    .encoding(enc)
+                    .await
+                {
+                    Ok(_) => trace!("PointCloud2 Message Sent"),
+                    Err(e) => error!("PointCloud2 Message Error: {:?}", e),
+                }
+            }
+        };
 
         let grid_msg = if zenoh.grid_publ.is_none() {
             None
@@ -529,11 +584,6 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             ))
         };
 
-        let publ_pcd = async || match zenoh.pcd_publ.put(buf_pcd).encoding(enc_pcd).await {
-            Ok(_) => trace!("PointCloud2 Message Sent"),
-            Err(e) => error!("PointCloud2 Message Error: {:?}", e),
-        };
-
         let publ_grid = async || {
             if let Some((msg, enc)) = grid_msg {
                 match zenoh
@@ -549,25 +599,8 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
                 }
             }
         };
-
-        let publ_bbox = async || {
-            if let Some((msg, enc)) = boxes_msg {
-                match zenoh
-                    .bbox_publ
-                    .as_ref()
-                    .unwrap()
-                    .put(msg)
-                    .encoding(enc)
-                    .await
-                {
-                    Ok(_) => trace!("BBox3D Message Sent"),
-                    Err(e) => error!("BBox3D Message Error: {:?}", e),
-                }
-            }
-        };
-
-        join!(publ_pcd(), publ_grid(), publ_bbox());
-
+        join!(publ_bbox(), publ_pcd(), publ_grid());
+        println!("publ {:?}", start.elapsed());
         clear_bins(&mut bins, frame_index, args);
         frame_index += 1;
 
@@ -579,7 +612,7 @@ fn get_3d_bbox(
     header: Header,
     points: &[ParsedPoint],
     classes: &[u8],
-    cluster_ids: &HashMap<usize, Vec<usize>>,
+    cluster_ids: &HashMap<u32, Vec<usize>>,
 ) -> (ZBytes, Encoding) {
     let mut bbox_3d = Vec::new();
     for inds in cluster_ids.values() {
@@ -597,6 +630,7 @@ fn get_3d_bbox(
 
         for ind in inds.iter() {
             let p = &points[*ind];
+            assert_eq!(class, classes[*ind]);
             x_max = x_max.max(p.x);
             x_min = x_min.min(p.x);
 
@@ -657,7 +691,7 @@ fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedP
 fn grid_nearest_cluster(
     fusion_predictions: &[Box2D],
     points: &[ParsedPoint],
-    clusters: &HashMap<usize, Vec<usize>>,
+    clusters: &HashMap<u32, Vec<usize>>,
 ) -> Vec<u8> {
     let mut class = vec![0; points.len()];
     let mut min_dist = 9999999.9;
@@ -738,7 +772,7 @@ fn late_fusion_clustered(
     points: &[ParsedPoint],
     proj: &[[f32; 2]],
     mask: &Mask,
-    clusters: &HashMap<usize, Vec<usize>>,
+    clusters: &HashMap<u32, Vec<usize>>,
     args: &Args,
 ) -> Vec<u8> {
     let mask_height = mask.height as usize;
@@ -780,7 +814,7 @@ fn late_fusion_clustered(
     class
 }
 
-fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<usize, Vec<usize>>) {
+fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
     let mut has_cluster_id = false;
     let mut cluster_ids = HashMap::new();
     for (i, point) in points.iter().enumerate() {
@@ -958,7 +992,7 @@ fn get_occupied_cluster(
     points: &[ParsedPoint],
     vision_class: &[u8],
     fusion_class: &[u8],
-    cluster_ids: &HashMap<usize, Vec<usize>>,
+    cluster_ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
     let capacity = cluster_ids.len();
@@ -976,25 +1010,17 @@ fn get_occupied_cluster(
             xyzv[0] += points[*ind].x;
             xyzv[1] += points[*ind].y;
             xyzv[2] += points[*ind].z;
-            if let Some(v) = points[*ind].fields.get("speed") {
-                xyzv[3] += v;
-            }
             xyzv
         });
         for v in xyzv.iter_mut() {
             *v /= id.1.len() as f32
         }
-        let mut p = ParsedPoint {
-            fields: HashMap::new(),
-            angle: 0.0,
+        let p = ParsedPoint {
             x: xyzv[0],
             y: xyzv[1],
             z: xyzv[2],
             id: Some(*id.0),
-            range: 0.0,
         };
-        p.fields.insert("speed".to_string(), xyzv[3]);
-        p.fields.insert("count".to_string(), id.1.len() as f32);
 
         centroid_points.push(p);
         centriod_vision_class.push(vision_class);
@@ -1061,20 +1087,15 @@ fn get_occupied_cluster(
         // nearby points still should've been updated
 
         let mut p = ParsedPoint {
-            fields: HashMap::new(),
-            angle: 0.0,
             x: 0.0,
             y: 0.0,
             z: 0.0,
             id: Some(0),
-            range: 0.0,
         };
 
         let predicted = i.get_predicted_location();
         p.x = (predicted.xmin + predicted.xmax) / 2.0;
         p.y = (predicted.ymin + predicted.ymax) / 2.0;
-        p.fields.insert("speed".to_string(), 0.0);
-        p.fields.insert("count".to_string(), 0.0);
         centroid_points.push(p);
         centriod_vision_class.push(point_tracker.uuid_map_vision_class[&i.id]);
         centriod_fusion_class.push(point_tracker.uuid_map_fusion_class[&i.id]);
@@ -1092,22 +1113,20 @@ fn get_occupied_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in [
-        "x",
-        "y",
-        "z",
-        "speed",
-        "count",
-        "cluster_id",
-        FUSION_CLASS,
-        VISION_CLASS,
+    for (char, datatype) in [
+        ("x", point_field::FLOAT32),
+        ("y", point_field::FLOAT32),
+        ("z", point_field::FLOAT32),
+        ("cluster_id", point_field::UINT32),
+        (FUSION_CLASS, point_field::UINT8),
+        (VISION_CLASS, point_field::UINT8),
     ] {
         insert_field(
             &mut centroid_pcd,
             PointField {
                 name: char.to_string(),
                 offset: 0, // offset is calculated by the insert field function
-                datatype: point_field::FLOAT32,
+                datatype,
                 count: 1,
             },
         );
@@ -1140,8 +1159,9 @@ fn get_occupied_no_cluster(
     args: &Args,
 ) -> (ZBytes, Encoding) {
     for (ind, p) in points.iter().enumerate() {
-        let mut angle = p.angle;
-        let mut range = p.range;
+        let mut range = (p.x.powi(2) + p.y.powi(2) + p.z.powi(2)).sqrt();
+        let mut angle = p.y.atan2(p.x).to_degrees();
+
         if angle < args.angle_bin_limit[0] {
             angle = args.angle_bin_limit[0]
         }
@@ -1164,10 +1184,6 @@ fn get_occupied_no_cluster(
         let fusion_class = fusion_class[ind];
         if fusion_class > 0 {
             bins[i][j].fusion_classes.push(fusion_class);
-        }
-
-        if let Some(speed) = p.fields.get("speed") {
-            bins[i][j].speeds.push(*speed);
         }
     }
     let mut grid_points = Vec::new();
@@ -1288,13 +1304,20 @@ fn get_occupied_no_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for char in ["x", "y", "z", "speed", "count", FUSION_CLASS, VISION_CLASS] {
+    for (char, datatype) in [
+        ("x", point_field::FLOAT32),
+        ("y", point_field::FLOAT32),
+        ("z", point_field::FLOAT32),
+        ("cluster_id", point_field::UINT32),
+        (FUSION_CLASS, point_field::UINT8),
+        (VISION_CLASS, point_field::UINT8),
+    ] {
         insert_field(
             &mut grid_pcd,
             PointField {
                 name: char.to_string(),
                 offset: 0, // offset is calculated by the insert field function
-                datatype: point_field::FLOAT32,
+                datatype,
                 count: 1,
             },
         );

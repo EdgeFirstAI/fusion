@@ -316,6 +316,7 @@ async fn main() {
                 }
             },
         };
+        let start = Instant::now();
         let pcd: PointCloud2 = match cdr::deserialize(&s.payload().to_bytes()) {
             Ok(v) => v,
             Err(e) => {
@@ -323,11 +324,13 @@ async fn main() {
                 return;
             }
         };
+        println!("cdr::deserialize {:?}", start.elapsed());
         if let Ok(mut id) = lidar_frame_id.try_lock() {
             *id = Some(pcd.header.frame_id.clone());
         }
 
         let mut points = parse_pcd(&pcd);
+        println!("parse_pcd {:?}", start.elapsed());
         let transform = match transform.lock() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().transform.clone(),
             _ => continue,
@@ -338,9 +341,8 @@ async fn main() {
         };
         let im_shape = (info.width as f32, info.height as f32);
         let cam_mtx = info.k.map(|x| x as f32);
-        let start = Instant::now();
         let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, im_shape);
-        trace!("transform_and_project_points takes {:?}", start.elapsed());
+        println!("transform_and_project_points {:?}", start.elapsed());
         let mask = match mask.lock() {
             Ok(v) if v.is_some() => v.as_ref().unwrap().clone(),
             _ => continue,
@@ -384,7 +386,7 @@ async fn main() {
                 bbox_id.insert(class);
             }
         }
-
+        println!("bbox_id {:?}", start.elapsed());
         for i in bbox_id {
             let (mut x_max, mut y_max, mut z_max) = (-99999f32, -99999f32, -99999f32);
             let (mut x_min, mut y_min, mut z_min) = (99999f32, 99999f32, 99999f32);
@@ -427,6 +429,7 @@ async fn main() {
             output_time: pcd.header.stamp.clone(),
             boxes: bbox_3d,
         };
+        println!("new_msg {:?}", start.elapsed());
         let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&new_msg, Infinite).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
         match boxes3d_publ.put(msg).encoding(enc).await {

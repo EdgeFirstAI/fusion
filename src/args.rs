@@ -15,11 +15,11 @@ pub enum PCDSource {
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// radar input topic
+    /// radar input topic. leave empty to disable
     #[arg(long, env, default_value = "rt/radar/targets")]
     pub radar_pcd_topic: String,
 
-    /// lidar input topic
+    /// lidar input topic. leave empty to disable
     #[arg(long, env, default_value = "rt/lidar/points")]
     pub lidar_pcd_topic: String,
 
@@ -35,11 +35,11 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/camera/info")]
     pub info_topic: String,
 
-    /// radar output topic
+    /// radar output topic. leave empty to disable
     #[arg(long, env, default_value = "rt/fusion/radar")]
     pub radar_output_topic: String,
 
-    /// lidar output topic
+    /// lidar output topic. leave empty to disable
     #[arg(long, env, default_value = "rt/fusion/lidar")]
     pub lidar_output_topic: String,
 

@@ -5,13 +5,10 @@ use std::collections::HashMap;
 use crate::{FUSION_CLASS, VISION_CLASS};
 
 pub struct ParsedPoint {
-    pub fields: HashMap<String, f32>,
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    pub id: Option<usize>,
-    pub angle: f32,
-    pub range: f32,
+    pub id: Option<u32>,
 }
 
 const SIZE_OF_DATATYPE: [usize; 9] = [
@@ -24,17 +21,13 @@ const SIZE_OF_DATATYPE: [usize; 9] = [
     4, // pub const FLOAT32: u8 = 7;
     8, //pub const FLOAT64: u8 = 8;
 ];
-const DEFAULT_PCD_RANGE: f32 = 100000.0;
 
 fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
     let mut p = ParsedPoint {
-        fields: HashMap::new(),
         x: 0.0,
         y: 0.0,
         z: 0.0,
         id: None,
-        angle: 0.0,
-        range: DEFAULT_PCD_RANGE,
     };
     for f in fields {
         let start = f.offset as usize;
@@ -98,29 +91,21 @@ fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             "y" => p.y = val,
             "z" => p.z = val,
             "cluster_id" => {
-                let _ = p.id.insert(val as usize);
+                let _ = p.id.insert(val as u32);
             }
-            _ => {
-                let _ = p.fields.insert(f.name.clone(), val);
-            }
+            _ => {}
         }
     }
-
-    p.range = (p.x.powi(2) + p.y.powi(2) + p.z.powi(2)).sqrt();
-    p.angle = p.y.atan2(p.x).to_degrees();
 
     p
 }
 
 fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
     let mut p = ParsedPoint {
-        fields: HashMap::new(),
         x: 0.0,
         y: 0.0,
         z: 0.0,
         id: None,
-        angle: 0.0,
-        range: DEFAULT_PCD_RANGE,
     };
     for f in fields {
         let start = f.offset as usize;
@@ -183,16 +168,12 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             "y" => p.y = val,
             "z" => p.z = val,
             "cluster_id" => {
-                let _ = p.id.insert(val as usize);
+                let _ = p.id.insert(val as u32);
             }
-            _ => {
-                let _ = p.fields.insert(f.name.clone(), val);
-            }
+            _ => {}
         }
     }
 
-    p.range = (p.x.powi(2) + p.y.powi(2) + p.z.powi(2)).sqrt();
-    p.angle = p.y.atan2(p.x).to_degrees();
     p
 }
 
@@ -236,15 +217,11 @@ pub fn serialize_pcd(
                 "y" => serialize_field_f32(f, &p.y, point_offset, &mut buf),
                 "z" => serialize_field_f32(f, &p.z, point_offset, &mut buf),
                 "cluster_id" => {
-                    serialize_field_usize(f, &p.id.unwrap_or_default(), point_offset, &mut buf)
+                    serialize_field_u32(f, &p.id.unwrap_or_default(), point_offset, &mut buf)
                 }
                 VISION_CLASS => serialize_field_u8(f, &vision_class[i], point_offset, &mut buf),
                 FUSION_CLASS => serialize_field_u8(f, &fusion_class[i], point_offset, &mut buf),
-                s => {
-                    if let Some(v) = p.fields.get(s) {
-                        serialize_field_f32(f, v, point_offset, &mut buf);
-                    }
-                }
+                _ => {}
             }
         }
         point_offset += point_step;
@@ -338,7 +315,7 @@ fn serialize_field_u8(field: &PointField, val: &u8, point_offset: usize, buf: &m
     }
 }
 
-fn serialize_field_usize(field: &PointField, val: &usize, point_offset: usize, buf: &mut [u8]) {
+fn serialize_field_u32(field: &PointField, val: &u32, point_offset: usize, buf: &mut [u8]) {
     let start = point_offset + field.offset as usize;
     let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
     match field.datatype {
@@ -363,7 +340,7 @@ fn serialize_field_usize(field: &PointField, val: &usize, point_offset: usize, b
             buf[start..end].copy_from_slice(&d);
         }
         point_field::UINT32 => {
-            let d = (*val as u32).to_ne_bytes();
+            let d = (*val).to_ne_bytes();
             buf[start..end].copy_from_slice(&d);
         }
         point_field::FLOAT32 => {
