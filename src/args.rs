@@ -1,10 +1,17 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use serde_json::json;
 use std::path::PathBuf;
 use tracing::level_filters::LevelFilter;
 use zenoh::config::{Config, WhatAmI};
 
 type BoolDefaultTrue = bool;
+
+#[derive(Debug, Clone, ValueEnum, Copy, Eq, PartialEq)]
+pub enum PCDSource {
+    Disabled,
+    Radar,
+    Lidar,
+}
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -36,9 +43,21 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/fusion/lidar")]
     pub lidar_output_topic: String,
 
-    /// occupancy output topic
+    /// occupancy grid output topic
     #[arg(long, env, default_value = "rt/fusion/occupancy")]
     pub occ_topic: String,
+
+    /// occupancy grid source
+    #[arg(long, env, default_value = "radar")]
+    pub occ_src: PCDSource,
+
+    /// bbox3d output topic
+    #[arg(long, env, default_value = "rt/fusion/boxes3d")]
+    pub bbox3d_topic: String,
+
+    /// bbox3d source
+    #[arg(long, env, default_value = "lidar")]
+    pub bbox3d_src: PCDSource,
 
     /// model
     #[arg(short, long, env)]

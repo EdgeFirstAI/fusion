@@ -2,14 +2,13 @@
 // licensed under MIT
 // Modified by Au-Zone Technologies 2025
 
-use edgefirst_schemas::geometry_msgs::{Quaternion, Transform, Vector3};
+use edgefirst_schemas::geometry_msgs::Transform;
 use nalgebra::{
     self,
     geometry::{Isometry3, Translation3, UnitQuaternion},
     ArrayStorage, Matrix2x3, Matrix3, Matrix3x4, Matrix4xX,
 };
 
-use ndarray::Array2;
 #[cfg(feature = "profiling")]
 use tracing::instrument;
 
@@ -97,6 +96,8 @@ pub(crate) fn transform_and_project_points(
 #[cfg(test)]
 mod projection_test {
     use std::collections::HashMap;
+
+    use edgefirst_schemas::geometry_msgs::{Quaternion, Vector3};
 
     use super::*;
 

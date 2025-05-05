@@ -283,7 +283,7 @@ fn serialize_field_f32(field: &PointField, val: &f32, point_offset: usize, buf: 
             buf[start..end].copy_from_slice(&d);
         }
         point_field::FLOAT32 => {
-            let d = (*val as f32).to_ne_bytes();
+            let d = { *val }.to_ne_bytes();
             buf[start..end].copy_from_slice(&d);
         }
         point_field::FLOAT64 => {
@@ -305,7 +305,7 @@ fn serialize_field_u8(field: &PointField, val: &u8, point_offset: usize, buf: &m
             buf[start..end].copy_from_slice(&d);
         }
         point_field::UINT8 => {
-            let d = (*val as u8).to_ne_bytes();
+            let d = { *val }.to_ne_bytes();
             buf[start..end].copy_from_slice(&d);
         }
         point_field::INT16 => {

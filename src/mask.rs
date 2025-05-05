@@ -129,7 +129,7 @@ fn get_valid_neighbours(
         .iter()
         .filter_map(|x| {
             let new_ind = ind as isize + *x;
-            if new_ind < 0 || new_ind > mask.len() as isize {
+            if new_ind < 0 || new_ind >= mask.len() as isize {
                 return None;
             }
             let new_ind = new_ind as usize;
