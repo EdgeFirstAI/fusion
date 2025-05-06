@@ -16,11 +16,11 @@ pub enum PCDSource {
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// radar input topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/radar/targets")]
+    #[arg(long, env, default_value = "rt/radar/clusters")]
     pub radar_pcd_topic: String,
 
     /// lidar input topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/lidar/points")]
+    #[arg(long, env, default_value = "rt/lidar/clusters")]
     pub lidar_pcd_topic: String,
 
     /// mask topic
@@ -40,7 +40,7 @@ pub struct Args {
     pub radar_output_topic: String,
 
     /// lidar output topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/fusion/lidar")]
+    #[arg(long, env, default_value = "")]
     pub lidar_output_topic: String,
 
     /// occupancy grid output topic
