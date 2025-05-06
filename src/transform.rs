@@ -9,6 +9,7 @@ use nalgebra::{
     ArrayStorage, Matrix2x3, Matrix3, Matrix3x4, Matrix4xX,
 };
 
+use tracing::instrument;
 #[cfg(feature = "profiling")]
 use tracing::instrument;
 
@@ -44,6 +45,7 @@ const CONVERT_COORD: Matrix2x3<f32> =
 
 // Applies the given transforms onto points. Then projects the points on the
 // given camera matrix and returns the projected coordinates
+#[instrument(skip_all)]
 pub(crate) fn transform_and_project_points(
     points: &mut [ParsedPoint],
     transforms: &[Transform],

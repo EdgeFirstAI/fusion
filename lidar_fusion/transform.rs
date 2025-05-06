@@ -2,7 +2,7 @@
 // licensed under MIT
 // Modified by Au-Zone Technologies 2025
 
-use edgefirst_schemas::geometry_msgs::{Quaternion, Transform, Vector3};
+use edgefirst_schemas::geometry_msgs::Transform;
 use nalgebra::{
     self,
     geometry::{Isometry3, Translation3, UnitQuaternion},

@@ -168,10 +168,6 @@ pub struct Args {
     #[arg(long, env, default_value = "3")]
     pub bin_delay: u128,
 
-    /// Application log level
-    #[arg(long, env, default_value = "info")]
-    pub rust_log: LevelFilter,
-
     /// Enable Tracy profiler broadcast
     #[arg(long, env)]
     pub tracy: bool,

@@ -1,5 +1,5 @@
 use args::{Args, PCDSource};
-use cdr::{CdrLe, Infinite, LittleEndian};
+use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
@@ -17,10 +17,10 @@ use std::{
     hash::Hash,
     sync::Arc,
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::{join, sync::Mutex};
-use tracing::instrument;
+use tracing::{info_span, instrument, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracker::{ByteTrack, ByteTrackSettings, TrackerBox};
 use tracy_client::frame_mark;
@@ -46,103 +46,9 @@ mod transform;
 
 const BASE_LINK_FRAME_ID: &str = "base_link";
 
-fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
-    for i in bins {
-        for j in i {
-            j.vision_classes.clear();
-            j.fusion_classes.clear();
-            if j.last_masked + args.bin_delay < curr {
-                j.first_marked = 0;
-            }
-        }
-    }
-}
-
-fn get_val_in_bin(bins: &[Vec<Bin>], i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
-    if i + offset_i < 0 {
-        return 0;
-    }
-    if i + offset_i >= bins.len() as i32 {
-        return 0;
-    }
-
-    if j + offset_j < 0 {
-        return 0;
-    }
-    if j + offset_j > bins[0].len() as i32 {
-        return 0;
-    }
-
-    let radar = bins[(i + offset_i) as usize][(j + offset_j) as usize]
-        .fusion_classes
-        .len() as u32;
-    let vision = bins[(i + offset_i) as usize][(j + offset_j) as usize]
-        .vision_classes
-        .len() as u32;
-
-    radar + vision
-}
-
-fn mark_grid(bin: &mut Bin, curr: u128) {
-    bin.last_masked = curr;
-    if bin.first_marked == u128::MAX {
-        bin.first_marked = curr;
-    }
-}
-
-fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (ParsedPoint, u8, u8) {
-    let mut grid_point = ParsedPoint {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-        id: None,
-    };
-    let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
-    let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
-
-    let angle = args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0];
-    let range = args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0];
-    grid_point.x = angle.to_radians().cos() * range;
-    grid_point.y = angle.to_radians().sin() * range;
-    grid_point.x = 0.0;
-    (grid_point, vision_class, fusion_class)
-}
-
-struct Bin {
-    vision_classes: Vec<u8>,
-    fusion_classes: Vec<u8>,
-    last_masked: u128,
-    first_marked: u128,
-}
-
 type Grid = (Vec<Vec<f32>>, u64);
 const FUSION_CLASS: &str = "fusion_class";
 const VISION_CLASS: &str = "vision_class";
-
-// If the receiver is empty, waits for the next message, otherwise returns the
-// most recent message on this receiver. If the receiver is closed, returns None
-async fn drain_recv(
-    sub: &Subscriber<zenoh::handlers::FifoChannelHandler<Sample>>,
-    timeout: std::time::Duration,
-) -> Option<Sample> {
-    if let Some(v) = sub.drain().last() {
-        Some(v)
-    } else {
-        match sub.recv_timeout(timeout) {
-            Ok(v) => match v {
-                Some(v) => Some(v),
-                None => {
-                    warn!("Timeout on {}", sub.key_expr());
-                    None
-                }
-            },
-            Err(e) => {
-                error!("error receiving radar cube on {}: {:?}", sub.key_expr(), e);
-                None
-            }
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -150,17 +56,29 @@ async fn main() {
 
     args.tracy.then(tracy_client::Client::start);
 
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
     let stdout_log = tracing_subscriber::fmt::layer()
         .pretty()
-        .with_filter(args.rust_log);
+        .with_filter(env_filter);
+
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
 
     let journald = match tracing_journald::layer() {
-        Ok(journald) => Some(journald.with_filter(args.rust_log)),
+        Ok(journald) => Some(journald.with_filter(env_filter)),
         Err(_) => None,
     };
 
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy();
+
     let tracy = match args.tracy {
-        true => Some(tracing_tracy::TracyLayer::default().with_filter(args.rust_log)),
+        true => Some(tracing_tracy::TracyLayer::default().with_filter(env_filter)),
         false => None,
     };
 
@@ -231,7 +149,7 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let radar_sub = if args.radar_pcd_topic != "" {
+    let radar_sub = if !args.radar_pcd_topic.is_empty() {
         Some(
             session
                 .declare_subscriber(args.radar_pcd_topic.clone())
@@ -242,7 +160,7 @@ async fn main() {
         None
     };
 
-    let radar_publ = if args.radar_output_topic != "" {
+    let radar_publ = if !args.radar_output_topic.is_empty() {
         Some(
             session
                 .declare_publisher(args.radar_output_topic.clone())
@@ -286,7 +204,8 @@ async fn main() {
         .expect("Failed to declare Zenoh publisher");
 
     let grid: Arc<Mutex<Option<Grid>>> = Arc::new(Mutex::new(None));
-    spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
+    let fusion_model_handle =
+        spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
 
     // wait 2s for the tf_static to get transforms
     thread::sleep(Duration::from_secs(2));
@@ -332,12 +251,11 @@ async fn main() {
         _ => {}
     }
     let lidar_handle = spawn_fusion_thread(data_lidar, zenoh_lidar, args.clone());
-
-    // let radar_handle = spawn_fusion_thread(data_radar, zenoh_radar,
-    // args.clone());
+    let radar_handle = spawn_fusion_thread(data_radar, zenoh_radar, args.clone());
 
     let _ = lidar_handle.join();
-    // let _ = radar_handle.join();
+    let _ = radar_handle.join();
+    let _ = fusion_model_handle.join();
 }
 
 pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHandle<()> {
@@ -371,6 +289,9 @@ pub struct Mutexes {
 }
 
 async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
+    if zenoh.pcd_sub.is_none() {
+        return;
+    }
     let mut tracker = ByteTrack::new_with_settings(ByteTrackSettings {
         track_high_conf: args.track_high_conf,
         track_extra_lifespan: args.track_extra_lifespan,
@@ -383,9 +304,6 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         track_iou: 0.01,
         track_update: 0.5,
     });
-    if zenoh.pcd_sub.is_none() {
-        return;
-    }
     let mut bins = Vec::new();
     let mut frame_index = 0;
     let mut i = args.angle_bin_limit[0];
@@ -410,12 +328,11 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             Some(v) => v,
             None => continue,
         };
-        let start = Instant::now();
-        let mut pcd: PointCloud2 = cdr::deserialize(&msg.payload().to_bytes()).unwrap();
 
-        println!("cdr::deserialize {:?}", start.elapsed());
+        let mut pcd: PointCloud2 = info_span!("deserialize")
+            .in_scope(|| cdr::deserialize(&msg.payload().to_bytes()).unwrap());
+
         let mut points = parse_pcd(&pcd);
-        println!("parse_pcd {:?}", start.elapsed());
         let transform = data
             .tf_static
             .lock()
@@ -454,7 +371,6 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             &cam_mtx,
             (cam_info.width as f32, cam_info.height as f32),
         );
-        println!("transform_and_project_points {:?}", start.elapsed());
         pcd.header.frame_id = BASE_LINK_FRAME_ID.to_string(); // frame_id is base link because the tf transform was applied
 
         let mask = match data.mask.lock().await {
@@ -464,33 +380,28 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
 
         let (has_cluster_ids, ids) = get_cluster_ids(&points);
         let vision_class = if has_cluster_ids {
-            late_fusion_clustered(&points, &proj, &mask, &ids, args)
+            late_fusion_clustered(&points, &proj, &mask, &ids)
         } else {
-            late_fusion_no_cluster(&points, &proj, &mask, 0.02, args)
+            late_fusion_no_cluster(&points, &proj, &mask, 0.02)
         };
-        println!("late_fusion {:?}", start.elapsed());
         let fusion_predictions = if args.track {
             grid_radar_tracked(&data.grid, &mut tracker, args, zenoh.session.clone()).await
         } else {
             grid_radar(&data.grid, args).await
         };
-        println!("grid predictions {:?}", start.elapsed());
         let fusion_class = if has_cluster_ids {
             grid_nearest_cluster(&fusion_predictions, &points, &ids)
         } else {
             grid_nearest_point_no_cluster(&fusion_predictions, &points)
         };
-        println!("grid occupancy {:?}", start.elapsed());
 
         let bbox_msg = if has_cluster_ids && zenoh.bbox_publ.is_some() {
-            let bbox_msg = Some(get_3d_bbox(
+            Some(get_3d_bbox(
                 pcd.header.clone(),
                 &points,
                 &vision_class,
                 &ids,
-            ));
-            println!("boxes {:?}", start.elapsed());
-            bbox_msg
+            ))
         } else {
             None
         };
@@ -532,14 +443,13 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
                 );
             }
             let data = serialize_pcd(&points, &pcd.fields, &vision_class, &fusion_class);
-            println!("serialize_pcd {:?}", start.elapsed());
             pcd.row_step = data.len() as u32;
             pcd.data = data;
             pcd.is_bigendian = cfg!(target_endian = "big");
-
-            let buf_pcd = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
+            let buf = info_span!("cdr::serialize pcd")
+                .in_scope(|| cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
+            let buf_pcd = ZBytes::from(buf);
             let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
-            println!("cdr::serialize {:?}", start.elapsed());
             Some((buf_pcd, enc_pcd))
         } else {
             None
@@ -600,7 +510,6 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             }
         };
         join!(publ_bbox(), publ_pcd(), publ_grid());
-        println!("publ {:?}", start.elapsed());
         clear_bins(&mut bins, frame_index, args);
         frame_index += 1;
 
@@ -608,6 +517,7 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     }
 }
 
+#[instrument(skip_all)]
 fn get_3d_bbox(
     header: Header,
     points: &[ParsedPoint],
@@ -668,6 +578,7 @@ fn get_3d_bbox(
     (msg, enc)
 }
 
+#[instrument(skip_all)]
 fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedPoint]) -> Vec<u8> {
     let mut class = vec![0; points.len()];
     let mut min_dist = 9999999.9;
@@ -688,6 +599,7 @@ fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedP
     class
 }
 
+#[instrument(skip_all)]
 fn grid_nearest_cluster(
     fusion_predictions: &[Box2D],
     points: &[ParsedPoint],
@@ -722,12 +634,12 @@ fn grid_nearest_cluster(
     class
 }
 
+#[instrument(skip_all)]
 fn late_fusion_no_cluster(
     points: &[ParsedPoint],
     proj: &[[f32; 2]],
     mask: &Mask,
     point_size: f32,
-    args: &Args,
 ) -> Vec<u8> {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
@@ -768,12 +680,12 @@ fn late_fusion_no_cluster(
     class
 }
 
+#[instrument(skip_all)]
 fn late_fusion_clustered(
     points: &[ParsedPoint],
     proj: &[[f32; 2]],
     mask: &Mask,
     clusters: &HashMap<u32, Vec<usize>>,
-    args: &Args,
 ) -> Vec<u8> {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
@@ -814,6 +726,7 @@ fn late_fusion_clustered(
     class
 }
 
+#[instrument(skip_all)]
 fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
     let mut has_cluster_id = false;
     let mut cluster_ids = HashMap::new();
@@ -935,6 +848,7 @@ async fn grid_radar_tracked(
     class
 }
 
+#[instrument(skip_all)]
 async fn grid_radar(grid: &Arc<Mutex<Option<Grid>>>, args: &Args) -> Vec<Box2D> {
     let mut class = Vec::new();
 
@@ -1344,4 +1258,98 @@ fn mode_slice<T: Ord + Hash>(numbers: &[T]) -> Option<&T> {
         *count += 1;
         *count
     })
+}
+
+fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
+    for i in bins {
+        for j in i {
+            j.vision_classes.clear();
+            j.fusion_classes.clear();
+            if j.last_masked + args.bin_delay < curr {
+                j.first_marked = 0;
+            }
+        }
+    }
+}
+
+fn get_val_in_bin(bins: &[Vec<Bin>], i: i32, j: i32, offset_i: i32, offset_j: i32) -> u32 {
+    if i + offset_i < 0 {
+        return 0;
+    }
+    if i + offset_i >= bins.len() as i32 {
+        return 0;
+    }
+
+    if j + offset_j < 0 {
+        return 0;
+    }
+    if j + offset_j > bins[0].len() as i32 {
+        return 0;
+    }
+
+    let radar = bins[(i + offset_i) as usize][(j + offset_j) as usize]
+        .fusion_classes
+        .len() as u32;
+    let vision = bins[(i + offset_i) as usize][(j + offset_j) as usize]
+        .vision_classes
+        .len() as u32;
+
+    radar + vision
+}
+
+fn mark_grid(bin: &mut Bin, curr: u128) {
+    bin.last_masked = curr;
+    if bin.first_marked == u128::MAX {
+        bin.first_marked = curr;
+    }
+}
+
+fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (ParsedPoint, u8, u8) {
+    let mut grid_point = ParsedPoint {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        id: None,
+    };
+    let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
+    let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
+
+    let angle = args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0];
+    let range = args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0];
+    grid_point.x = angle.to_radians().cos() * range;
+    grid_point.y = angle.to_radians().sin() * range;
+    grid_point.x = 0.0;
+    (grid_point, vision_class, fusion_class)
+}
+
+struct Bin {
+    vision_classes: Vec<u8>,
+    fusion_classes: Vec<u8>,
+    last_masked: u128,
+    first_marked: u128,
+}
+
+// If the receiver is empty, waits for the next message, otherwise returns the
+// most recent message on this receiver. If the receiver is closed, returns None
+async fn drain_recv(
+    sub: &Subscriber<zenoh::handlers::FifoChannelHandler<Sample>>,
+    timeout: std::time::Duration,
+) -> Option<Sample> {
+    if let Some(v) = sub.drain().last() {
+        Some(v)
+    } else {
+        match sub.recv_timeout(timeout) {
+            Ok(v) => match v {
+                Some(v) => Some(v),
+                None => {
+                    warn!("Timeout on {}", sub.key_expr());
+                    None
+                }
+            },
+            Err(e) => {
+                error!("error receiving radar cube on {}: {:?}", sub.key_expr(), e);
+                None
+            }
+        }
+    }
 }

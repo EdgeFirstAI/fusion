@@ -6,7 +6,7 @@ use ndarray::{
 use std::{
     f32::consts::E,
     sync::Arc,
-    thread::{self},
+    thread::{self, JoinHandle},
 };
 use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
@@ -16,7 +16,11 @@ use crate::{
     args::Args, rtm_model::run_rtm_fusion_model, tflite_model::run_tflite_fusion_model, Grid,
 };
 
-pub fn spawn_fusion_model_thread(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
+pub fn spawn_fusion_model_thread(
+    session: Session,
+    args: Args,
+    grid: Arc<Mutex<Option<Grid>>>,
+) -> JoinHandle<()> {
     thread::Builder::new()
         .name("model".to_string())
         .spawn(move || {
@@ -26,7 +30,7 @@ pub fn spawn_fusion_model_thread(session: Session, args: Args, grid: Arc<Mutex<O
                 .unwrap()
                 .block_on(run_fusion_model(session, args, grid));
         })
-        .unwrap();
+        .unwrap()
 }
 
 pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {

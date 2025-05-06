@@ -1,6 +1,7 @@
 use edgefirst_schemas::sensor_msgs::{point_field, PointCloud2, PointField};
 use log::error;
 use std::collections::HashMap;
+use tracing::instrument;
 
 use crate::{FUSION_CLASS, VISION_CLASS};
 
@@ -177,6 +178,7 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
     p
 }
 
+#[instrument(skip_all)]
 pub fn parse_pcd(pcd: &PointCloud2) -> Vec<ParsedPoint> {
     let mut points = Vec::new();
     for i in 0..pcd.height {
@@ -194,6 +196,7 @@ pub fn parse_pcd(pcd: &PointCloud2) -> Vec<ParsedPoint> {
     points
 }
 
+#[instrument(skip_all)]
 pub fn serialize_pcd(
     points: &[ParsedPoint],
     fields: &[PointField],
