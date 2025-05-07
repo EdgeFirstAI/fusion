@@ -395,6 +395,8 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             grid_nearest_point_no_cluster(&fusion_predictions, &points)
         };
 
+        // Only create 3d bbox message when there are cluster IDs and bbox publishing is
+        // enabled
         let bbox_msg = if has_cluster_ids && zenoh.bbox_publ.is_some() {
             Some(get_3d_bbox(
                 pcd.header.clone(),
@@ -406,22 +408,9 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             None
         };
 
-        let publ_bbox = async || {
-            if let Some((msg, enc)) = bbox_msg {
-                match zenoh
-                    .bbox_publ
-                    .as_ref()
-                    .unwrap()
-                    .put(msg)
-                    .encoding(enc)
-                    .await
-                {
-                    Ok(_) => trace!("BBox3D Message Sent"),
-                    Err(e) => error!("BBox3D Message Error: {:?}", e),
-                }
-            }
-        };
+        let publ_bbox = publ_msg_if_some(zenoh.bbox_publ.as_ref(), bbox_msg);
 
+        // Only create the PCD message when PCD publishing is enabled
         let pcd_msg = if zenoh.pcd_publ.is_some() {
             pcd.fields = Vec::new();
             for (char, datatype) in [
@@ -454,23 +443,9 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         } else {
             None
         };
+        let publ_pcd = publ_msg_if_some(zenoh.pcd_publ.as_ref(), pcd_msg);
 
-        let publ_pcd = async || {
-            if let Some((msg, enc)) = pcd_msg {
-                match zenoh
-                    .pcd_publ
-                    .as_ref()
-                    .unwrap()
-                    .put(msg)
-                    .encoding(enc)
-                    .await
-                {
-                    Ok(_) => trace!("PointCloud2 Message Sent"),
-                    Err(e) => error!("PointCloud2 Message Error: {:?}", e),
-                }
-            }
-        };
-
+        // Only create the occupancy grid message when grid publishing is enabled
         let grid_msg = if zenoh.grid_publ.is_none() {
             None
         } else if has_cluster_ids {
@@ -494,26 +469,25 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             ))
         };
 
-        let publ_grid = async || {
-            if let Some((msg, enc)) = grid_msg {
-                match zenoh
-                    .grid_publ
-                    .as_ref()
-                    .unwrap()
-                    .put(msg)
-                    .encoding(enc)
-                    .await
-                {
-                    Ok(_) => trace!("PointCloud2 Grid Message Sent"),
-                    Err(e) => error!("PointCloud2 Message Error: {:?}", e),
-                }
-            }
-        };
-        join!(publ_bbox(), publ_pcd(), publ_grid());
+        let publ_grid = publ_msg_if_some(zenoh.grid_publ.as_ref(), grid_msg);
+        join!(publ_bbox, publ_pcd, publ_grid);
+
         clear_bins(&mut bins, frame_index, args);
         frame_index += 1;
 
         args.tracy.then(frame_mark);
+    }
+}
+
+// Publishes the message if publ is Some and msg_enc is Some
+async fn publ_msg_if_some(publ: Option<&Publisher<'_>>, msg_enc: Option<(ZBytes, Encoding)>) {
+    if let Some((msg, enc)) = msg_enc {
+        if let Some(publ) = publ {
+            match publ.put(msg).encoding(enc).await {
+                Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
+                Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
+            }
+        }
     }
 }
 

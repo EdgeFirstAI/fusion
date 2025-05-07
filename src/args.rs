@@ -58,7 +58,7 @@ pub struct Args {
     #[arg(long, env, default_value = "lidar")]
     pub bbox3d_src: PCDSource,
 
-    /// model
+    /// model, leave empty to disable
     #[arg(short, long, env)]
     pub model: Option<PathBuf>,
 
