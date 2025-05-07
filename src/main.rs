@@ -194,7 +194,7 @@ async fn main() {
     };
 
     let grid_publ = session
-        .declare_publisher(args.occ_topic.clone())
+        .declare_publisher(args.grid_topic.clone())
         .await
         .expect("Failed to declare Zenoh publisher");
 
@@ -239,7 +239,7 @@ async fn main() {
         grid,
     };
 
-    match args.occ_src {
+    match args.grid_src {
         PCDSource::Radar => zenoh_radar.grid_publ = Some(grid_publ),
         PCDSource::Lidar => zenoh_lidar.grid_publ = Some(grid_publ),
         _ => {}
@@ -293,7 +293,7 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         return;
     }
     let mut tracker = ByteTrack::new_with_settings(ByteTrackSettings {
-        track_high_conf: args.track_high_conf,
+        track_high_conf: 0.5,
         track_extra_lifespan: args.track_extra_lifespan,
         track_iou: args.track_iou,
         track_update: args.track_update,

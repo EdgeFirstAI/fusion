@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use edgefirst_schemas::edgefirst_msgs::Mask;
 use itertools::Itertools;

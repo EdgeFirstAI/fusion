@@ -22,18 +22,6 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/lidar/clusters")]
     pub lidar_pcd_topic: String,
 
-    /// mask topic
-    #[arg(long, env, default_value = "rt/model/mask")]
-    pub mask_topic: String,
-
-    /// zenoh key expression for camera DMA buffers
-    #[arg(long, env, default_value = "rt/camera/dma")]
-    pub camera_topic: String,
-
-    /// camera info topic
-    #[arg(long, env, default_value = "rt/camera/info")]
-    pub info_topic: String,
-
     /// radar output topic. leave empty to disable
     #[arg(long, env, default_value = "rt/fusion/radar")]
     pub radar_output_topic: String,
@@ -42,13 +30,13 @@ pub struct Args {
     #[arg(long, env, default_value = "")]
     pub lidar_output_topic: String,
 
-    /// occupancy grid output topic
-    #[arg(long, env, default_value = "rt/fusion/occupancy")]
-    pub occ_topic: String,
+    /// mask input topic
+    #[arg(long, env, default_value = "rt/model/mask")]
+    pub mask_topic: String,
 
-    /// occupancy grid source
-    #[arg(long, env, default_value = "radar")]
-    pub occ_src: PCDSource,
+    /// camera info input topic
+    #[arg(long, env, default_value = "rt/camera/info")]
+    pub info_topic: String,
 
     /// bbox3d output topic
     #[arg(long, env, default_value = "rt/fusion/boxes3d")]
@@ -57,6 +45,18 @@ pub struct Args {
     /// bbox3d source
     #[arg(long, env, default_value = "lidar")]
     pub bbox3d_src: PCDSource,
+
+    /// camera DMA buffers input topic
+    #[arg(long, env, default_value = "rt/camera/dma")]
+    pub camera_topic: String,
+
+    /// radarcube input topic
+    #[arg(long, env, default_value = "rt/radar/cube")]
+    pub radarcube_topic: String,
+
+    /// radar model output
+    #[arg(long, env, default_value = "rt/fusion/model_output")]
+    pub model_output_topic: String,
 
     /// model, leave empty to disable
     #[arg(short, long, env)]
@@ -70,7 +70,7 @@ pub struct Args {
     #[arg(long, env, action)]
     pub model_polar: bool,
 
-    /// model threshold.
+    /// Model threshold for the model output topic
     #[arg(long, env, default_value = "0.5")]
     pub model_threshold: f32,
 
@@ -84,14 +84,6 @@ pub struct Args {
     #[arg(long, env, default_value = "npu")]
     pub engine: String,
 
-    /// radarcube input topic
-    #[arg(long, env, default_value = "rt/radar/cube")]
-    pub radarcube_topic: String,
-
-    /// radar model output
-    #[arg(long, env, default_value = "rt/fusion/model_output")]
-    pub model_output_topic: String,
-
     /// apply sigmoid the model output
     #[arg(long, env, default_value = "true")]
     pub logits: BoolDefaultTrue,
@@ -100,31 +92,35 @@ pub struct Args {
     #[arg(long, env, action)]
     pub track: bool,
 
-    // currently unused
-    #[arg(long, env, default_value = "0.5")]
-    pub track_high_conf: f32,
-
-    /// number of seconds the tracked object can be missing for before being
+    /// The number of seconds the tracked object can be missing for before being
     /// removed.
     #[arg(long, env, default_value = "0.5")]
     pub track_extra_lifespan: f32,
 
-    /// tracking iou threshold for box association. Higher values will require
+    /// Tracking iou threshold for box association. Higher values will require
     /// boxes to have higher IOU to the predicted track to be associated.
     #[arg(long, env, default_value = "0.1")]
     pub track_iou: f32,
 
-    /// tracking update factor. Higher update factor will also mean
+    /// Higher update factor will also mean
     /// less smoothing but more rapid response to change (0.0 to 1.0)
     #[arg(long, env, default_value = "0.4")]
     pub track_update: f32,
 
-    /// range_bin_limit. Used for model grid. Used for occupancy if input PCD
+    /// Occupancy grid output topic
+    #[arg(long, env, default_value = "rt/fusion/occupancy")]
+    pub grid_topic: String,
+
+    /// Occupancy grid source
+    #[arg(long, env, default_value = "radar")]
+    pub grid_src: PCDSource,
+
+    /// Used for model grid. Used for occupancy if input PCD
     /// does not have cluster_id field.
     #[arg(long, env, num_args = 2, value_delimiter = ' ', default_value = "0 16")]
     pub range_bin_limit: Vec<f32>,
 
-    /// range_bin_width. Used for model grid. Used for occupancy if input PCD
+    /// Used for model grid. Used for occupancy if input PCD
     /// does not have cluster_id field.
     #[arg(long, env, default_value = "1.0")]
     pub range_bin_width: f32,
