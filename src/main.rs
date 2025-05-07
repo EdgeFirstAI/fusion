@@ -818,7 +818,7 @@ async fn grid_radar_tracked(
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
         session
-            .put("rt/fusion/mask_output_tracked", buf)
+            .put(format!("{}/tracked", args.model_output_topic), buf)
             .encoding(enc)
             .await
             .unwrap();
