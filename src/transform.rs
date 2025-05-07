@@ -97,7 +97,6 @@ pub(crate) fn transform_and_project_points(
 
 #[cfg(test)]
 mod projection_test {
-    use std::collections::HashMap;
 
     use edgefirst_schemas::geometry_msgs::{Quaternion, Vector3};
 

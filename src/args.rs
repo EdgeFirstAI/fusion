@@ -1,7 +1,6 @@
 use clap::{Parser, ValueEnum};
 use serde_json::json;
 use std::path::PathBuf;
-use tracing::level_filters::LevelFilter;
 use zenoh::config::{Config, WhatAmI};
 
 type BoolDefaultTrue = bool;

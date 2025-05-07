@@ -171,7 +171,7 @@ async fn main() {
         None
     };
 
-    let lidar_sub = if args.lidar_pcd_topic != "" {
+    let lidar_sub = if !args.lidar_pcd_topic.is_empty() {
         Some(
             session
                 .declare_subscriber(args.lidar_pcd_topic.clone())
@@ -182,7 +182,7 @@ async fn main() {
         None
     };
 
-    let lidar_publ = if args.lidar_output_topic != "" {
+    let lidar_publ = if !args.lidar_output_topic.is_empty() {
         Some(
             session
                 .declare_publisher(args.lidar_output_topic.clone())
