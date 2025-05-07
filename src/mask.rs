@@ -4,10 +4,10 @@ use edgefirst_schemas::edgefirst_msgs::Mask;
 use itertools::Itertools;
 use log::error;
 use tokio::sync::Mutex;
-use tracing::info_span;
+use tracing::{info_span, instrument};
 use zenoh::Session;
 
-use crate::{args::Args, drain_recv};
+use crate::{args::Args, drain_recv, DrainRecvTimeoutSettings};
 
 // Finds the argmax of the slice. Panics if the slice is empty
 pub fn argmax_slice<T: Ord>(slice: &[T]) -> u8 {
@@ -28,8 +28,9 @@ pub async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<M
         .declare_subscriber(args.mask_topic.clone())
         .await
         .expect("Failed to declare Zenoh subscriber");
+    let mut timeout = DrainRecvTimeoutSettings::default();
     loop {
-        let sample = match drain_recv(&mask_sub, Duration::from_secs(2)).await {
+        let sample = match drain_recv(&mask_sub, &mut timeout).await {
             Some(v) => v,
             None => continue,
         };
@@ -65,6 +66,7 @@ pub async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<M
     }
 }
 
+#[instrument(skip_all)]
 pub fn mask_instance(mask: &[u8], width: usize) -> Vec<Box2D> {
     let offsets = [-1, 1, -(width as isize), width as isize];
     let mut visited = vec![false; mask.len()];

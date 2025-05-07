@@ -323,10 +323,13 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         i += args.angle_bin_width;
     }
 
+    let mut timeout = DrainRecvTimeoutSettings::default();
     loop {
-        let msg = match drain_recv(zenoh.pcd_sub.as_ref().unwrap(), Duration::from_secs(2)).await {
+        let msg = match drain_recv(zenoh.pcd_sub.as_ref().unwrap(), &mut timeout).await {
             Some(v) => v,
-            None => continue,
+            None => {
+                continue;
+            }
         };
 
         let mut pcd: PointCloud2 = info_span!("deserialize")
@@ -1323,21 +1326,48 @@ struct Bin {
     first_marked: u128,
 }
 
+struct DrainRecvTimeoutSettings {
+    initial_timeout: std::time::Duration,
+    max_timeout: std::time::Duration,
+    curr_timeout: std::time::Duration,
+    multiplier: u32,
+}
+
+impl Default for DrainRecvTimeoutSettings {
+    fn default() -> Self {
+        Self {
+            initial_timeout: Duration::from_secs(2),
+            curr_timeout: Duration::from_secs(2),
+            max_timeout: Duration::from_secs(3600),
+            multiplier: 2,
+        }
+    }
+}
+
 /// If the receiver is empty, waits for the next message, otherwise returns the
 /// most recent message on this receiver. If the receiver times out or is
 /// closed, returns None
 async fn drain_recv(
     sub: &Subscriber<zenoh::handlers::FifoChannelHandler<Sample>>,
-    timeout: std::time::Duration,
+    timeout: &mut DrainRecvTimeoutSettings,
 ) -> Option<Sample> {
     if let Some(v) = sub.drain().last() {
         Some(v)
     } else {
-        match sub.recv_timeout(timeout) {
+        match sub.recv_timeout(timeout.curr_timeout) {
             Ok(v) => match v {
-                Some(v) => Some(v),
+                Some(v) => {
+                    timeout.curr_timeout = timeout.initial_timeout;
+                    Some(v)
+                }
                 None => {
-                    warn!("Timeout on {}", sub.key_expr());
+                    warn!(
+                        "Timeout on {} after waiting for {:?}",
+                        sub.key_expr(),
+                        timeout.curr_timeout
+                    );
+                    timeout.curr_timeout =
+                        (timeout.curr_timeout * timeout.multiplier).min(timeout.max_timeout);
                     None
                 }
             },
