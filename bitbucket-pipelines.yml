@@ -1,4 +1,4 @@
-image: deepview/rust:1.84.1
+image: deepview/rust:1.86.0
 
 clone:
   depth: full
