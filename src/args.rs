@@ -147,14 +147,6 @@ pub struct Args {
     #[arg(long, env, default_value = "6.875")]
     pub angle_bin_width: f32,
 
-    /// occlusion angle limit in degrees.
-    #[arg(long, env, default_value = "20")]
-    pub occ_angle_limit: f32,
-
-    /// occlusion range limit.
-    #[arg(long, env, default_value = "1.0")]
-    pub occ_range_limit: f32,
-
     /// occupancy threshold. Only used if input PCD does not have cluster_id
     /// field
     #[arg(long, env, default_value = "1")]
