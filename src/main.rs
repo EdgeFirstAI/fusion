@@ -382,7 +382,7 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         let vision_class = if has_cluster_ids {
             late_fusion_clustered(&points, &proj, &mask, &ids)
         } else {
-            late_fusion_no_cluster(&points, &proj, &mask, 0.02)
+            late_fusion_no_cluster(&proj, &mask, 0.02)
         };
         let fusion_predictions = if args.track {
             grid_radar_tracked(&data.grid, &mut tracker, args, zenoh.session.clone()).await
@@ -491,6 +491,9 @@ async fn publ_msg_if_some(publ: Option<&Publisher<'_>>, msg_enc: Option<(ZBytes,
     }
 }
 
+// Gets 3D bounding boxes from the PCD points. Any clusters that have class > 0
+// will get a 3D bounding box generated. It is assumed that all points in the
+// same cluster ID will have the same class.
 #[instrument(skip_all)]
 fn get_3d_bbox(
     header: Header,
@@ -509,6 +512,8 @@ fn get_3d_bbox(
         if class == 0 {
             continue;
         }
+
+        // get the max and min x,y,z values of the cluster
         let (mut x_max, mut y_max, mut z_max) = (-99999f32, -99999f32, -99999f32);
         let (mut x_min, mut y_min, mut z_min) = (99999f32, 99999f32, 99999f32);
 
@@ -524,6 +529,9 @@ fn get_3d_bbox(
             z_max = z_max.max(p.z);
             z_min = z_min.min(p.z);
         }
+
+        // Add a 3D box using the max and min x,y,z values
+        // TODO: Add 3D tracking to improve smoothness
         bbox_3d.push(DetectBox2D {
             center_x: (y_max + y_min) / 2.0,
             center_y: (z_max + z_min) / 2.0,
@@ -553,19 +561,22 @@ fn get_3d_bbox(
 }
 
 #[instrument(skip_all)]
+// For each predicted grid box, find the nearest point in the PCD. If the
+// nearest point is within 2m, set the class of the point to the class of the
+// grid box
 fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedPoint]) -> Vec<u8> {
     let mut class = vec![0; points.len()];
-    let mut min_dist = 9999999.9;
+    let mut min_dist2 = 9999999.9;
     let mut min_point_ind = 0;
     for b in fusion_predictions {
         for (ind, p) in points.iter().enumerate() {
-            let dist = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
-            if dist < min_dist {
-                min_dist = dist;
+            let dist2 = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
+            if dist2 < min_dist2 {
+                min_dist2 = dist2;
                 min_point_ind = ind;
             }
         }
-        if min_dist < 2.0 {
+        if min_dist2 < 2.0 * 2.0 {
             class[min_point_ind] = b.label;
         }
     }
@@ -573,6 +584,9 @@ fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedP
     class
 }
 
+// For each predicted grid box, find the nearest cluster in the PCD. If the
+// nearest cluster is within 2m, set the class of all points in the cluster to
+// the class of the grid box
 #[instrument(skip_all)]
 fn grid_nearest_cluster(
     fusion_predictions: &[Box2D],
@@ -580,7 +594,7 @@ fn grid_nearest_cluster(
     clusters: &HashMap<u32, Vec<usize>>,
 ) -> Vec<u8> {
     let mut class = vec![0; points.len()];
-    let mut min_dist = 9999999.9;
+    let mut min_dist2 = 9999999.9;
     let mut min_point_ind = 0;
     for b in fusion_predictions {
         for (ind, p) in points.iter().enumerate() {
@@ -590,13 +604,13 @@ fn grid_nearest_cluster(
             if p.id.unwrap() == 0 {
                 continue;
             }
-            let dist = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
-            if dist < min_dist {
-                min_dist = dist;
+            let dist2 = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
+            if dist2 < min_dist2 {
+                min_dist2 = dist2;
                 min_point_ind = ind;
             }
         }
-        if min_dist > 2.0 {
+        if min_dist2 > 2.0 * 2.0 {
             continue;
         }
         let cluster_id = points[min_point_ind].id.unwrap();
@@ -608,13 +622,14 @@ fn grid_nearest_cluster(
     class
 }
 
+/// For each point, get the class of the point using the projection onto the
+/// mask. If point_radius > 0, then also checks 8 points in a circle around the
+/// projection, and uses the first non-zero class found as the class of
+/// the point.
+///
+/// Assumes that the mask is already argmax'd
 #[instrument(skip_all)]
-fn late_fusion_no_cluster(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
-    mask: &Mask,
-    point_size: f32,
-) -> Vec<u8> {
+fn late_fusion_no_cluster(projection: &[[f32; 2]], mask: &Mask, point_radius: f32) -> Vec<u8> {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
     let index_mask = |x: f32, y: f32| -> u8 {
@@ -623,30 +638,29 @@ fn late_fusion_no_cluster(
         mask.mask[y * mask_width + x]
     };
 
-    let mut class = vec![0; points.len()];
-    if point_size <= 0.0 {
-        for i in 0..points.len() {
-            let [x, y] = proj[i];
-            if !(0.0..1.0).contains(&y) || !(0.0..1.0).contains(&x) {
+    let mut class = vec![0; projection.len()];
+    if point_radius <= 0.0 {
+        for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
+            if !(0.0..1.0).contains(x) || !(0.0..1.0).contains(y) {
                 continue;
             }
-            class[i] = index_mask(x, y);
+            *class = index_mask(*x, *y);
         }
         return class;
     }
-    for i in 0..points.len() {
+    for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
         // first do the center of the point, then 8 points around circumference
         // negative -45 represetns the center
         for angle in (-45..360).step_by(45) {
-            let range = if angle < 0 { 0.0 } else { 0.02 };
-            let x = proj[i][0] + (range * (angle as f32).to_radians().sin());
-            let y = proj[i][1] + (range * (angle as f32).to_radians().cos());
-            if !(0.0..1.0).contains(&y) || !(0.0..1.0).contains(&x) {
+            let range = if angle < 0 { 0.0 } else { point_radius };
+            let new_x = *x + (range * (angle as f32).to_radians().sin());
+            let new_y = *y + (range * (angle as f32).to_radians().cos());
+            if !(0.0..1.0).contains(&new_y) || !(0.0..1.0).contains(&new_x) {
                 continue;
             }
-            let argmax = index_mask(x, y);
+            let argmax = index_mask(new_x, new_y);
             if argmax != 0 {
-                class[i] = argmax;
+                *class = argmax;
                 break;
             }
         }
@@ -654,6 +668,10 @@ fn late_fusion_no_cluster(
     class
 }
 
+/// For each mask instance, (found using flood fill of the mask), find the most
+/// common cluster ID that projects only the mask. All points with that cluster
+/// ID will become the class of that mask instance.
+/// Assumes that the mask is already argmax'd
 #[instrument(skip_all)]
 fn late_fusion_clustered(
     points: &[ParsedPoint],
@@ -700,6 +718,9 @@ fn late_fusion_clustered(
     class
 }
 
+/// Checks if there are any cluster IDs in the PCD. Each cluster IDs and a
+/// vector of the indicies of all points with that cluster ID are placed into a
+/// HashMap. Noise points are not included in the HashMap.
 #[instrument(skip_all)]
 fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
     let mut has_cluster_id = false;
@@ -872,8 +893,8 @@ fn grid_to_xy(i: f32, j: f32, width: usize, args: &Args) -> (f32, f32) {
     }
 }
 
-// Return the centroid of clusters that have class_id. All points in a class
-// should have the same class_id
+/// Returns the centroid of clusters that have non-zero class_id. All points in
+/// a class should have the same class_id
 #[instrument(skip_all)]
 fn get_occupied_cluster(
     header: Header,
@@ -1035,7 +1056,7 @@ fn get_occupied_cluster(
     (buf, enc)
 }
 
-// Do a grid and highlight the grid based on point classes
+/// Do a grid and highlight the grid based on point classes
 #[instrument(skip_all)]
 fn get_occupied_no_cluster(
     header: Header,
@@ -1221,9 +1242,8 @@ fn get_occupied_no_cluster(
     (buf, enc)
 }
 
-/* Returns the mode of the slice. Returns None if the slice is empty.
- * https://stackoverflow.com/a/50000027
- */
+/// Returns the mode of the slice. Returns None if the slice is empty.
+/// From https://stackoverflow.com/a/50000027
 fn mode_slice<T: Ord + Hash>(numbers: &[T]) -> Option<&T> {
     let mut counts = HashMap::new();
 
@@ -1303,8 +1323,9 @@ struct Bin {
     first_marked: u128,
 }
 
-// If the receiver is empty, waits for the next message, otherwise returns the
-// most recent message on this receiver. If the receiver is closed, returns None
+/// If the receiver is empty, waits for the next message, otherwise returns the
+/// most recent message on this receiver. If the receiver times out or is
+/// closed, returns None
 async fn drain_recv(
     sub: &Subscriber<zenoh::handlers::FifoChannelHandler<Sample>>,
     timeout: std::time::Duration,
