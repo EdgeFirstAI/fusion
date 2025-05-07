@@ -21,10 +21,6 @@ debug = true
 name = "maivin-fusion"
 path = "src/main.rs"
 
-[[bin]]
-name = "lidar-fusion"
-path = "lidar_fusion/main.rs"
-
 [features]
 default = ["tracy"]
 tracy = ["tracing-tracy/enable", "tracy-client/enable"]
