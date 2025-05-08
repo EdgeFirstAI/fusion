@@ -383,6 +383,7 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
                 length: 1,
                 encoding: "".to_string(),
                 mask,
+                boxed: false,
             };
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
             let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");

@@ -404,6 +404,7 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
                         ]
                     })
                     .collect(),
+                boxed: false,
             };
 
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());

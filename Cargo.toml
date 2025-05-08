@@ -38,7 +38,7 @@ clap = { version = "4.5.30", features = ["derive", "env"] }
 deepviewrt = "0.7.0"
 dma-buf = "0.4.0"
 dma-heap = "0.4.0"
-edgefirst-schemas = "1.2.4"
+edgefirst-schemas = "1.2.11"
 g2d-sys = { version = "1.0.0", path = "g2d-sys" }
 itertools = "0.14.0"
 lapjv = "0.2.1"

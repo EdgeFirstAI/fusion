@@ -813,6 +813,7 @@ async fn grid_radar_tracked(
                 length: 1,
                 encoding: "".to_string(),
                 mask,
+                boxed: false,
             };
 
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
