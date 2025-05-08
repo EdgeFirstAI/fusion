@@ -758,70 +758,72 @@ async fn grid_radar_tracked(
         return class;
     }
     let (g, timestamp) = guard.as_ref().unwrap();
-    let mut boxes = Vec::new();
-    for (i, g_i) in g.iter().enumerate() {
-        for (j, g_ij) in g_i.iter().enumerate() {
-            if *g_ij < args.model_threshold {
-                continue;
-            }
-            boxes.push(TrackerBox {
-                xmin: j as f32 - 1.0,
-                ymin: i as f32 - 1.0,
-                xmax: j as f32 + 1.0,
-                ymax: i as f32 + 1.0,
-                score: 1.0,
-                vision_class: 1,
-
-                fusion_class: 1,
-            });
-        }
-    }
-    if *timestamp > grid_tracker.timestamp {
-        grid_tracker.update(&mut boxes, *timestamp);
-    }
 
     let height = g.len();
     let width = g[0].len();
 
-    {
-        let mut tracked_g = vec![vec![0.0; width]; height];
-        for tracklet in grid_tracker.get_tracklets() {
-            if tracklet.count < 3 {
-                continue;
+    if *timestamp > grid_tracker.timestamp {
+        let mut boxes = Vec::new();
+        for (i, g_i) in g.iter().enumerate() {
+            for (j, g_ij) in g_i.iter().enumerate() {
+                if *g_ij < args.model_threshold {
+                    continue;
+                }
+                boxes.push(TrackerBox {
+                    xmin: j as f32 - 1.0,
+                    ymin: i as f32 - 1.0,
+                    xmax: j as f32 + 1.0,
+                    ymax: i as f32 + 1.0,
+                    score: 1.0,
+                    vision_class: 1,
+
+                    fusion_class: 1,
+                });
             }
-            let pred = tracklet.get_predicted_location();
-            let i = ((pred.ymin + pred.ymax) / 2.0).round() as i32;
-            let j = ((pred.xmin + pred.xmax) / 2.0).round() as i32;
-            if i < 0 || i >= height as i32 {
-                continue;
-            }
-            if j < 0 || j >= width as i32 {
-                continue;
-            }
-            tracked_g[i as usize][j as usize] = 1.0
         }
 
-        let mask = tracked_g
-            .iter()
-            .flatten()
-            .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
-            .collect();
-        let msg = Mask {
-            height: height as u32,
-            width: width as u32,
-            length: 1,
-            encoding: "".to_string(),
-            mask,
-        };
+        grid_tracker.update(&mut boxes, *timestamp);
 
-        let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+        {
+            let mut tracked_g = vec![vec![0.0; width]; height];
+            for tracklet in grid_tracker.get_tracklets() {
+                if tracklet.count < 3 {
+                    continue;
+                }
+                let pred = tracklet.get_predicted_location();
+                let i = ((pred.ymin + pred.ymax) / 2.0).round() as i32;
+                let j = ((pred.xmin + pred.xmax) / 2.0).round() as i32;
+                if i < 0 || i >= height as i32 {
+                    continue;
+                }
+                if j < 0 || j >= width as i32 {
+                    continue;
+                }
+                tracked_g[i as usize][j as usize] = 1.0
+            }
 
-        session
-            .put(format!("{}/tracked", args.model_output_topic), buf)
-            .encoding(enc)
-            .await
-            .unwrap();
+            let mask = tracked_g
+                .iter()
+                .flatten()
+                .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
+                .collect();
+            let msg = Mask {
+                height: height as u32,
+                width: width as u32,
+                length: 1,
+                encoding: "".to_string(),
+                mask,
+            };
+
+            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+
+            session
+                .put(format!("{}/tracked", args.model_output_topic), buf)
+                .encoding(enc)
+                .await
+                .unwrap();
+        }
     }
 
     for tracklet in grid_tracker.get_tracklets() {
