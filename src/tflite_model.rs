@@ -35,7 +35,6 @@ use crate::{
 };
 
 static NPU_PATH: &str = "libvx_delegate.so";
-static TFLITEC_PATH: &str = "libtensorflowlite_c.so";
 
 pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
     if args.model.is_none() {
@@ -53,7 +52,7 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
 
     info!("Model read from file");
 
-    let tflite_lib = match TFLiteLib::new(TFLITEC_PATH) {
+    let tflite_lib = match TFLiteLib::new() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open TFLite library: {e}");
