@@ -4,7 +4,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 use delegate::Delegate;
-use std::{os::raw::c_void, path::Path, ptr};
+use log::debug;
+use std::{os::raw::c_void, path::Path, ptr, time::Instant};
 use tensor::{Tensor, TensorMut};
 include!("ffi.rs");
 
@@ -47,12 +48,13 @@ impl TFLiteLib {
     pub fn new() -> Result<Self, libloading::Error> {
         // try a bunch of versions...
         // we don't know which specific version of tflite is installed so we try a bunch
-        // of them
+        // Takes around 25ms to try to open 500 shared library files on the EVK
         for versions in (1..50).rev() {
             for patch in (0..10).rev() {
                 if let Ok(tflite_lib) = TFLiteLib::new_with_path(format!(
                     "{DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}"
                 )) {
+                    debug!("Found TFLiteLib: {DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}");
                     return Ok(tflite_lib);
                 }
             }
