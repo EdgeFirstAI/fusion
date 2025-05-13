@@ -5,7 +5,7 @@
 
 use delegate::Delegate;
 use log::debug;
-use std::{os::raw::c_void, path::Path, ptr, time::Instant};
+use std::{os::raw::c_void, path::Path, ptr};
 use tensor::{Tensor, TensorMut};
 include!("ffi.rs");
 

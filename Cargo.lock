@@ -667,9 +667,9 @@ checksum = "feeef44e73baff3a26d371801df019877a9866a8c493d315ab00177843314f35"
 
 [[package]]
 name = "edgefirst-schemas"
-version = "1.2.11"
+version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07d8c3788ae58f068ed2350e3f791c3879e291672a03bc9bd8b23257e6ca3288"
+checksum = "db75b74b4f8599b6c5cf8cd90a0fe6cd763621750ad7e1d0887c1a038c101bae"
 dependencies = [
  "serde",
  "serde_derive",
@@ -2832,6 +2832,7 @@ version = "1.0.0"
 dependencies = [
  "libc",
  "libloading",
+ "log",
  "num",
  "num-derive",
  "num-traits",
