@@ -574,7 +574,10 @@ fn load_frame_dmabuf(
             };
             let mut dest_mapped = dest.mmap();
             let data = dest_mapped.as_slice_mut();
-
+            if tensor_channels == DATA_CHANNELS {
+                tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
+                return Ok(());
+            }
             for i in 0..tensor_vol / tensor_channels {
                 for j in 0..tensor_channels {
                     tensor_mapped[i * tensor_channels + j] = data[i * DATA_CHANNELS + j];
