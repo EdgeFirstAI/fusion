@@ -200,6 +200,7 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
             return;
         }
     };
+    info!("Opened G2D with version {}", img_mgr.version());
 
     let mut dest = match Image::new(
         camera_input_shape[2] as u32,
@@ -572,7 +573,7 @@ fn load_frame_dmabuf(
                 Ok(v) => v,
                 Err(e) => return Err(e.to_string()),
             };
-            let mut dest_mapped = dest.mmap();
+            let mut dest_mapped: crate::image::MappedImage = dest.mmap();
             let data = dest_mapped.as_slice_mut();
             if tensor_channels == DATA_CHANNELS {
                 tensor_mapped.copy_from_slice(&data[0..tensor_vol]);

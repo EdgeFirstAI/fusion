@@ -211,6 +211,7 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
             return;
         }
     };
+    info!("Opened G2D with version {}", img_mgr.version());
 
     let mut dest = match Image::new(
         camera_input_shape[2] as u32,

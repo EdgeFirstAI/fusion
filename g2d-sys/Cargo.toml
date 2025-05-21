@@ -7,12 +7,10 @@ repository = "https://github.com/DeepViewML/videostream-rs"
 documentation = "https://docs.rs/videostream"
 keywords = ["deepview", "visionpack"]
 categories = ["computer-vision", "multimedia::video", "external-ffi-bindings"]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 
 [dependencies]
-libc = "0.2.170"
-libloading = "0.8.6"
+libloading = "0.8.1"
 dma-buf = "0.4.0"
 nix = { version = "0.29.0", features = ["ioctl"] }
-videostream = "0.9.1"

@@ -873,13 +873,11 @@ dependencies = [
 
 [[package]]
 name = "g2d-sys"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "dma-buf",
- "libc",
  "libloading",
  "nix",
- "videostream",
 ]
 
 [[package]]
