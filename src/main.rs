@@ -210,6 +210,13 @@ async fn main() {
     // wait 2s for the tf_static to get transforms
     thread::sleep(Duration::from_secs(2));
 
+    let tf_session = session.clone();
+    let tf_msg = build_tf_msg();
+    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
+    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
+    let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
+    std::mem::drop(tf_task);
+
     let mut zenoh_radar = ZenohCtx {
         session: session.clone(),
         pcd_sub: radar_sub,
@@ -536,8 +543,8 @@ fn get_3d_bbox(
         // Add a 3D box using the max and min x,y,z values
         // TODO: Add 3D tracking to improve smoothness
         bbox_3d.push(DetectBox2D {
-            center_x: (y_max + y_min) / 2.0,
-            center_y: (z_max + z_min) / 2.0,
+            center_x: -(y_max + y_min) / 2.0, // we use an optical frame, so positive X is right
+            center_y: -(z_max + z_min) / 2.0, // we use an optical frame, so positive Y is down
             width: (y_max - y_min),
             height: (z_max - z_min),
             distance: (x_max + x_min) / 2.0,
@@ -556,11 +563,54 @@ fn get_3d_bbox(
         model_time: Time { sec: 0, nanosec: 0 },
         output_time: header.stamp.clone(),
         boxes: bbox_3d,
-        header,
+        header: Header {
+            stamp: header.stamp,
+            frame_id: format!("{BASE_LINK_FRAME_ID}_optical"),
+        },
     };
     let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&new_msg, Infinite).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
     (msg, enc)
+}
+
+async fn tf_static(
+    session: Session,
+    msg: ZBytes,
+    enc: Encoding,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let topic = "rt/tf_static".to_string();
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+
+    loop {
+        interval.tick().await;
+        session
+            .put(&topic, msg.clone())
+            .encoding(enc.clone())
+            .await?;
+    }
+}
+
+fn build_tf_msg() -> TransformStamped {
+    TransformStamped {
+        header: Header {
+            frame_id: BASE_LINK_FRAME_ID.to_string(),
+            stamp: Time { sec: 0, nanosec: 0 },
+        },
+        child_frame_id: format!("{BASE_LINK_FRAME_ID}_optical"),
+        transform: Transform {
+            translation: Vector3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            rotation: Quaternion {
+                x: -1.0,
+                y: 1.0,
+                z: -1.0,
+                w: 1.0,
+            },
+        },
+    }
 }
 
 #[instrument(skip_all)]
