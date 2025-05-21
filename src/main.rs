@@ -92,22 +92,10 @@ async fn main() {
     let session = zenoh::open(args.clone()).await.unwrap();
 
     let info = Arc::new(Mutex::new(None));
-    let info_clone = info.clone();
+    let model_info_cb = model_info_callback(info.clone());
     let _info_sub = session
         .declare_subscriber(args.info_topic.clone())
-        .callback_mut(move |s| {
-            let new_info: CameraInfo = match cdr::deserialize(&s.payload().to_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    return;
-                }
-            };
-            let mut guard = info_clone.try_lock();
-            if let Ok(ref mut guard) = guard {
-                **guard = Some(new_info);
-            }
-        })
+        .callback_mut(model_info_cb)
         .await
         .expect("Failed to declare Zenoh subscriber");
 
@@ -127,86 +115,19 @@ async fn main() {
         .unwrap();
 
     let transform = Arc::new(Mutex::new(HashMap::<(String, String), Transform>::new()));
-    let transform_clone = transform.clone();
+    let tf_static_cb = tf_static_callback(transform.clone());
     let _transform_sub = session
         .declare_subscriber("rt/tf_static")
-        .callback_mut(move |s| {
-            let new_transform: TransformStamped = match cdr::deserialize(&s.payload().to_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    return;
-                }
-            };
-
-            if let Ok(mut guard) = transform_clone.try_lock() {
-                guard.insert(
-                    (new_transform.header.frame_id, new_transform.child_frame_id),
-                    new_transform.transform,
-                );
-            }
-        })
+        .callback_mut(tf_static_cb)
         .await
         .expect("Failed to declare Zenoh subscriber");
-
-    let radar_sub = if !args.radar_pcd_topic.is_empty() {
-        Some(
-            session
-                .declare_subscriber(args.radar_pcd_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh subscriber"),
-        )
-    } else {
-        None
-    };
-
-    let radar_publ = if !args.radar_output_topic.is_empty() {
-        Some(
-            session
-                .declare_publisher(args.radar_output_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh publisher"),
-        )
-    } else {
-        None
-    };
-
-    let lidar_sub = if !args.lidar_pcd_topic.is_empty() {
-        Some(
-            session
-                .declare_subscriber(args.lidar_pcd_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh subscriber"),
-        )
-    } else {
-        None
-    };
-
-    let lidar_publ = if !args.lidar_output_topic.is_empty() {
-        Some(
-            session
-                .declare_publisher(args.lidar_output_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh publisher"),
-        )
-    } else {
-        None
-    };
-
-    let grid_publ = session
-        .declare_publisher(args.grid_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh publisher");
-
-    let bbox_publ = session
-        .declare_publisher(args.bbox3d_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh publisher");
 
     let grid: Arc<Mutex<Option<Grid>>> = Arc::new(Mutex::new(None));
     let fusion_model_handle =
         spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
 
+    let (radar_sub, radar_publ, lidar_sub, lidar_publ, grid_publ, bbox_publ) =
+        declare_sub_pub(&session, &args).await;
     // wait 2s for the tf_static to get transforms
     thread::sleep(Duration::from_secs(2));
 
@@ -263,6 +184,112 @@ async fn main() {
     let _ = lidar_handle.join();
     let _ = radar_handle.join();
     let _ = fusion_model_handle.join();
+}
+
+fn model_info_callback(info: Arc<Mutex<Option<CameraInfo>>>) -> impl FnMut(zenoh::sample::Sample) {
+    move |s: Sample| {
+        let new_info: CameraInfo = match cdr::deserialize(&s.payload().to_bytes()) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to deserialize message: {:?}", e);
+                return;
+            }
+        };
+        let mut guard = info.try_lock();
+        if let Ok(ref mut guard) = guard {
+            **guard = Some(new_info);
+        }
+    }
+}
+
+fn tf_static_callback(
+    transform: Arc<Mutex<HashMap<(String, String), Transform>>>,
+) -> impl FnMut(zenoh::sample::Sample) {
+    move |s: Sample| {
+        let new_transform: TransformStamped = match cdr::deserialize(&s.payload().to_bytes()) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to deserialize message: {:?}", e);
+                return;
+            }
+        };
+
+        if let Ok(mut guard) = transform.try_lock() {
+            guard.insert(
+                (new_transform.header.frame_id, new_transform.child_frame_id),
+                new_transform.transform,
+            );
+        }
+    }
+}
+
+async fn declare_sub_pub(
+    session: &Session,
+    args: &Args,
+) -> (
+    Option<Subscriber<FifoChannelHandler<Sample>>>,
+    Option<Publisher<'static>>,
+    Option<Subscriber<FifoChannelHandler<Sample>>>,
+    Option<Publisher<'static>>,
+    Publisher<'static>,
+    Publisher<'static>,
+) {
+    let radar_sub = if !args.radar_pcd_topic.is_empty() {
+        Some(
+            session
+                .declare_subscriber(args.radar_pcd_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh subscriber"),
+        )
+    } else {
+        None
+    };
+
+    let radar_publ = if !args.radar_output_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.radar_output_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
+
+    let lidar_sub = if !args.lidar_pcd_topic.is_empty() {
+        Some(
+            session
+                .declare_subscriber(args.lidar_pcd_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh subscriber"),
+        )
+    } else {
+        None
+    };
+
+    let lidar_publ = if !args.lidar_output_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.lidar_output_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
+    let grid_publ = session
+        .declare_publisher(args.grid_topic.clone())
+        .await
+        .expect("Failed to declare Zenoh publisher");
+
+    let bbox_publ = session
+        .declare_publisher(args.bbox3d_topic.clone())
+        .await
+        .expect("Failed to declare Zenoh publisher");
+
+    (
+        radar_sub, radar_publ, lidar_sub, lidar_publ, grid_publ, bbox_publ,
+    )
 }
 
 pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHandle<()> {
