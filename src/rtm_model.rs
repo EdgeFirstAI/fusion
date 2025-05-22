@@ -1,7 +1,7 @@
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use deepviewrt::{
-    context::{self, Context},
+    context::Context,
     engine::Engine,
     model,
     tensor::{Tensor, TensorType},
@@ -21,7 +21,6 @@ use std::{
     },
     path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
@@ -93,7 +92,7 @@ fn identify_inputs(input_names: &[&str]) -> (usize, Option<usize>) {
             debug!("setting camera input index to {}", i);
         }
     }
-    return (radar_input_index, camera_input_index);
+    (radar_input_index, camera_input_index)
 }
 
 fn get_camera_input(
@@ -142,7 +141,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
         }
     };
 
-    let mut dest = match Image::new(
+    let dest = match Image::new(
         camera_input_shape[2] as u32,
         camera_input_shape[1] as u32,
         RGBA,
@@ -317,7 +316,7 @@ pub async fn run_rtm_fusion_model(
 }
 
 fn build_occupancy_grid(mask: &[f32], output_shape: &[u32]) -> Vec<Vec<f32>> {
-    let mut occupied_ = mask.into_iter();
+    let mut occupied_ = mask.iter();
     let mut occupied = Vec::new();
     for i in 0..output_shape[1] as usize {
         occupied.push(Vec::new());

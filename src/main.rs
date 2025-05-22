@@ -18,7 +18,6 @@ use std::{
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
-    usize,
 };
 use tokio::{join, sync::Mutex};
 use tracing::{info_span, instrument, level_filters::LevelFilter};

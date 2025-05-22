@@ -46,7 +46,7 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
         }
         Some(v) if v.eq_ignore_ascii_case("rtm") => {
             info!("Using RTM model type for {:?}", model_name);
-            run_rtm_fusion_model(session, args, grid).await;
+            let _ = run_rtm_fusion_model(session, args, grid).await;
         }
         Some(_) => {
             error!("Unknown model type extension for {:?}", model_name);
