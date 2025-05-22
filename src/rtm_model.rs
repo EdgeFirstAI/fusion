@@ -241,20 +241,7 @@ pub async fn run_rtm_fusion_model(
             .collect::<Vec<_>>();
         let cube = preprocess_cube(&radarcube.cube, &cube_shape, &radar_input_shape);
 
-        info_span!("cube_load").in_scope(|| {
-            let radar_input_tensor =
-                match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("Could not get input 0 from model: {:?}", e);
-                        return;
-                    }
-                };
-            let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
-            trace!("mapped input tensor: len={:?}", input_tensor_map.len());
-            input_tensor_map.copy_from_slice(&cube);
-            drop(input_tensor_map);
-        });
+        load_cube(&mut backbone, &input_tensor_index, radar_input_index, &cube);
 
         if camera_input_index.is_some() {
             let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
@@ -315,6 +302,27 @@ pub async fn run_rtm_fusion_model(
     }
 }
 
+#[instrument(skip_all)]
+fn load_cube(
+    backbone: &mut Context,
+    input_tensor_index: &[u32],
+    radar_input_index: usize,
+    cube: &[f32],
+) {
+    let radar_input_tensor =
+        match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Could not get input 0 from model: {:?}", e);
+                return;
+            }
+        };
+    let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
+    trace!("mapped input tensor: len={:?}", input_tensor_map.len());
+    input_tensor_map.copy_from_slice(cube);
+}
+
+#[instrument(skip_all)]
 fn build_occupancy_grid(mask: &[f32], output_shape: &[u32]) -> Vec<Vec<f32>> {
     let mut occupied_ = mask.iter();
     let mut occupied = Vec::new();

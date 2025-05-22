@@ -240,26 +240,9 @@ pub async fn run_tflite_fusion_model(
             .collect::<Vec<_>>();
         let cube = preprocess_cube(&radarcube.cube, &cube_shape, &radar_input_shape);
 
-        let mut backbone_inputs = match backbone.inputs_mut() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while getting inputs of backbone: {:?}", e);
-                return Err(e.into());
-            }
-        };
+        let mut backbone_inputs = backbone.inputs_mut()?;
 
-        info_span!("cube_load").in_scope(|| {
-            let radar_input_tensor = &mut backbone_inputs[radar_input_index];
-            let input_tensor_map = match radar_input_tensor.maprw() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Could not map radar input: {:?}", e);
-                    return;
-                }
-            };
-            input_tensor_map.copy_from_slice(&cube);
-            let _ = input_tensor_map;
-        });
+        load_cube(&mut backbone_inputs, radar_input_index, &cube);
 
         if camera_input_index.is_some() {
             let camera_input_tensor = &mut backbone_inputs[camera_input_index.unwrap()];
@@ -325,6 +308,19 @@ pub async fn run_tflite_fusion_model(
 
         args.tracy.then(|| secondary_frame_mark!("model"));
     }
+}
+
+#[instrument(skip_all)]
+fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: &[f32]) {
+    let radar_input_tensor = &mut backbone_inputs[radar_input_index];
+    let input_tensor_map = match radar_input_tensor.maprw() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not map radar input: {:?}", e);
+            return;
+        }
+    };
+    input_tensor_map.copy_from_slice(cube);
 }
 
 fn build_occupancy_grid(mask: &[f32], output_shape: &[usize]) -> Vec<Vec<f32>> {
