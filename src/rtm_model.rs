@@ -4,7 +4,7 @@ use deepviewrt::{
     context::Context,
     engine::Engine,
     model,
-    tensor::{Tensor, TensorType},
+    tensor::{self, Tensor, TensorType},
 };
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, Mask, RadarCube};
 use libc::memcpy;
@@ -566,93 +566,144 @@ fn load_frame_dmabuf(
             ))
         }
     }
+    load_input(
+        dest,
+        DATA_CHANNELS,
+        tensor,
+        tensor_vol,
+        tensor_channels,
+        preprocess,
+    )?;
+    Ok(())
+}
+
+fn load_input(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut Tensor,
+    tensor_vol: usize,
+    tensor_channels: usize,
+    preprocess: Preprocessing,
+) -> Result<(), String> {
     match tensor.tensor_type() {
-        TensorType::U8 => {
-            let mut tensor_mapped = match tensor.maprw() {
-                Ok(v) => v,
-                Err(e) => return Err(e.to_string()),
-            };
-            let mut dest_mapped = dest.mmap();
-            let data = dest_mapped.as_slice_mut();
-            if tensor_channels == DATA_CHANNELS {
-                tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
-                return Ok(());
-            }
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
-                    tensor_mapped[i * tensor_channels + j] = data[i * DATA_CHANNELS + j];
-                }
-            }
-        }
+        TensorType::U8 => load_input_u8(dest, data_channels, tensor, tensor_vol, tensor_channels)?,
         TensorType::I16 => todo!(),
         TensorType::U16 => todo!(),
         TensorType::I32 => todo!(),
         TensorType::RAW => todo!(),
         TensorType::STR => todo!(),
-        TensorType::I8 => {
-            let mut tensor_mapped = match tensor.maprw() {
-                Ok(v) => v,
-                Err(e) => return Err(e.to_string()),
-            };
-
-            let mut dest_mapped = dest.mmap();
-            let data = dest_mapped.as_slice_mut();
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
-                    tensor_mapped[i * tensor_channels + j] =
-                        (data[i * DATA_CHANNELS + j] as i16 - 128) as i8;
-                }
-            }
-        }
+        TensorType::I8 => load_input_i8(dest, data_channels, tensor, tensor_vol, tensor_channels)?,
         TensorType::U32 => todo!(),
         TensorType::I64 => todo!(),
         TensorType::U64 => todo!(),
         TensorType::F16 => todo!(),
-        TensorType::F32 => {
-            let mut tensor_mapped = match tensor.maprw() {
-                Ok(v) => v,
-                Err(e) => return Err(e.to_string()),
-            };
-            let mut dest_mapped = dest.mmap();
-            let data = dest_mapped.as_slice_mut();
-            match preprocess {
-                Preprocessing::Raw => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                data[i * DATA_CHANNELS + j] as f32;
-                        }
-                    }
-                }
-                Preprocessing::UnsignedNorm => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                data[i * DATA_CHANNELS + j] as f32 / 255.0;
-                        }
-                    }
-                }
-                Preprocessing::SignedNorm => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                data[i * DATA_CHANNELS + j] as f32 / 127.5 - 1.0;
-                        }
-                    }
-                }
-                Preprocessing::ImageNet => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                (data[i * DATA_CHANNELS + j] as f32 - RGB_MEANS_IMAGENET[j])
-                                    / RGB_STDS_IMAGENET[j];
-                        }
-                    }
+        TensorType::F32 => load_input_f32(
+            dest,
+            data_channels,
+            tensor,
+            tensor_vol,
+            tensor_channels,
+            preprocess,
+        )?,
+        TensorType::F64 => todo!(),
+    };
+    Ok(())
+}
+
+fn load_input_u8(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut Tensor,
+    tensor_vol: usize,
+    tensor_channels: usize,
+) -> Result<(), String> {
+    let mut tensor_mapped = match tensor.maprw() {
+        Ok(v) => v,
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut dest_mapped = dest.mmap();
+    let data = dest_mapped.as_slice_mut();
+    if tensor_channels == data_channels {
+        tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
+        return Ok(());
+    }
+    for i in 0..tensor_vol / tensor_channels {
+        for j in 0..tensor_channels {
+            tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j];
+        }
+    }
+    Ok(())
+}
+
+fn load_input_i8(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut Tensor,
+    tensor_vol: usize,
+    tensor_channels: usize,
+) -> Result<(), String> {
+    let mut tensor_mapped = match tensor.maprw() {
+        Ok(v) => v,
+        Err(e) => return Err(e.to_string()),
+    };
+
+    let mut dest_mapped = dest.mmap();
+    let data = dest_mapped.as_slice_mut();
+    for i in 0..tensor_vol / tensor_channels {
+        for j in 0..tensor_channels {
+            tensor_mapped[i * tensor_channels + j] =
+                (data[i * data_channels + j] as i16 - 128) as i8;
+        }
+    }
+    Ok(())
+}
+fn load_input_f32(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut Tensor,
+    tensor_vol: usize,
+    tensor_channels: usize,
+    preprocess: Preprocessing,
+) -> Result<(), String> {
+    let mut tensor_mapped = match tensor.maprw() {
+        Ok(v) => v,
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut dest_mapped = dest.mmap();
+    let data = dest_mapped.as_slice_mut();
+    match preprocess {
+        Preprocessing::Raw => {
+            for i in 0..tensor_vol / tensor_channels {
+                for j in 0..tensor_channels {
+                    tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j] as f32;
                 }
             }
         }
-        TensorType::F64 => todo!(),
-    };
-
+        Preprocessing::UnsignedNorm => {
+            for i in 0..tensor_vol / tensor_channels {
+                for j in 0..tensor_channels {
+                    tensor_mapped[i * tensor_channels + j] =
+                        data[i * data_channels + j] as f32 / 255.0;
+                }
+            }
+        }
+        Preprocessing::SignedNorm => {
+            for i in 0..tensor_vol / tensor_channels {
+                for j in 0..tensor_channels {
+                    tensor_mapped[i * tensor_channels + j] =
+                        data[i * data_channels + j] as f32 / 127.5 - 1.0;
+                }
+            }
+        }
+        Preprocessing::ImageNet => {
+            for i in 0..tensor_vol / tensor_channels {
+                for j in 0..tensor_channels {
+                    tensor_mapped[i * tensor_channels + j] = (data[i * data_channels + j] as f32
+                        - RGB_MEANS_IMAGENET[j])
+                        / RGB_STDS_IMAGENET[j];
+                }
+            }
+        }
+    }
     Ok(())
 }
