@@ -18,6 +18,7 @@ use std::{
     sync::Arc,
     thread::{self, JoinHandle},
     time::Duration,
+    usize,
 };
 use tokio::{join, sync::Mutex};
 use tracing::{info_span, instrument, level_filters::LevelFilter};
@@ -1372,8 +1373,7 @@ fn mark_cell_three_column(
         sum2 += get_val_in_bin(bins, i as i32, j as i32, 1, -2);
     }
 
-    if sum0 >= args.threshold {
-        mark_grid(&mut bins[i][j], frame_index);
+    let mut set_bins_occupied = |i: usize, bins: &mut [Vec<Bin>]| {
         angle_found_occupied[i] = true;
         if 0 < i {
             angle_found_occupied[i - 1] = true;
@@ -1381,30 +1381,23 @@ fn mark_cell_three_column(
         if i + 1 < bins.len() {
             angle_found_occupied[i + 1] = true;
         }
+    };
+
+    if sum0 >= args.threshold {
+        mark_grid(&mut bins[i][j], frame_index);
+        set_bins_occupied(i, bins);
         // don't check more ranges
         return true;
     }
     if sum0 + sum1 >= args.threshold {
         mark_grid(&mut bins[i][j - 1], frame_index);
-        angle_found_occupied[i] = true;
-        if 0 < i {
-            angle_found_occupied[i - 1] = true;
-        }
-        if i + 1 < bins.len() {
-            angle_found_occupied[i + 1] = true;
-        }
+        set_bins_occupied(i, bins);
         // don't check more ranges
         return true;
     }
     if sum0 + sum1 + sum2 >= args.threshold {
         mark_grid(&mut bins[i][j - 2], frame_index);
-        angle_found_occupied[i] = true;
-        if 0 < i {
-            angle_found_occupied[i - 1] = true;
-        }
-        if i + 1 < bins.len() {
-            angle_found_occupied[i + 1] = true;
-        }
+        set_bins_occupied(i, bins);
         // don't check more ranges
         return true;
     }

@@ -671,33 +671,21 @@ fn load_input_f32(
     };
     let mut dest_mapped = dest.mmap();
     let data = dest_mapped.as_slice_mut();
-    match preprocess {
-        Preprocessing::Raw => {
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
+    for i in 0..tensor_vol / tensor_channels {
+        for j in 0..tensor_channels {
+            match preprocess {
+                Preprocessing::Raw => {
                     tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j] as f32;
                 }
-            }
-        }
-        Preprocessing::UnsignedNorm => {
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
+                Preprocessing::UnsignedNorm => {
                     tensor_mapped[i * tensor_channels + j] =
                         data[i * data_channels + j] as f32 / 255.0;
                 }
-            }
-        }
-        Preprocessing::SignedNorm => {
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
+                Preprocessing::SignedNorm => {
                     tensor_mapped[i * tensor_channels + j] =
                         data[i * data_channels + j] as f32 / 127.5 - 1.0;
                 }
-            }
-        }
-        Preprocessing::ImageNet => {
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
+                Preprocessing::ImageNet => {
                     tensor_mapped[i * tensor_channels + j] = (data[i * data_channels + j] as f32
                         - RGB_MEANS_IMAGENET[j])
                         / RGB_STDS_IMAGENET[j];
