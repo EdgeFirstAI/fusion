@@ -126,7 +126,7 @@ impl<'a> InterpreterBuilder<'a> {
         self.delegates.push(d);
     }
 
-    pub fn build(mut self, model: &Model) -> Result<Interpreter<'a>, String> {
+    pub fn build(mut self, model: Model<'a>) -> Result<Interpreter<'a>, String> {
         let interpreter = unsafe {
             self.lib
                 .TfLiteInterpreterCreate(model.ptr.as_ptr(), self.options.as_ptr())
@@ -136,6 +136,7 @@ impl<'a> InterpreterBuilder<'a> {
                 .ok_or("TfLiteInterpreterCreate returned NULL")?,
             _delegates: std::mem::replace(&mut self.delegates, Vec::new()),
             lib: self.lib,
+            _model: model,
         };
         tflite_status_to_result(unsafe {
             self.lib
@@ -155,6 +156,7 @@ impl<'a> Drop for InterpreterBuilder<'a> {
 pub struct Interpreter<'a> {
     interpreter: ptr::NonNull<TfLiteInterpreter>,
     _delegates: Vec<Delegate>,
+    _model: Model<'a>,
     lib: &'a tensorflowlite_c,
 }
 
