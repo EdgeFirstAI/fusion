@@ -1,7 +1,7 @@
 use async_pidfd::PidFd;
 use cdr::{CdrLe, Infinite};
 use deepviewrt::{
-    context::Context,
+    context::{self, Context},
     engine::Engine,
     model,
     tensor::{Tensor, TensorType},
@@ -11,12 +11,15 @@ use libc::memcpy;
 use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
+    error::Error,
     ffi::c_void,
     fs::read,
+    io,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::io::OwnedFd,
     },
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -24,53 +27,38 @@ use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::{
     bytes::{Encoding, ZBytes},
+    handlers::FifoChannelHandler,
+    pubsub::Subscriber,
+    sample::Sample,
     Session,
 };
 
 use crate::{
     args::Args,
+    drain_recv,
     fusion_model::{apply_sigmoid, preprocess_cube},
     image::{Image, ImageManager, Rotation, RGBA},
-    Grid,
+    DrainRecvTimeoutSettings, Grid,
 };
 
-pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
-    if args.model.is_none() {
+fn load_model(model_name: Option<PathBuf>, engine: String) -> Option<Context> {
+    // let model_name = args.model.as_ref().unwrap().clone();
+    if model_name.is_none() {
         info!("No radar model was given");
-        return;
+        return None;
     }
-    let model_name = args.model.as_ref().unwrap().clone();
+    let model_name = model_name.unwrap();
     let model_data = match read(&model_name) {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open `{:?}` file: {:?}", model_name, e);
-            return;
+            return None;
         }
     };
 
     info!("Model read from file");
 
-    let sub_radarcube = session
-        .declare_subscriber(&args.radarcube_topic)
-        .await
-        .unwrap();
-    info!("Declared subscriber on {:?}", &args.radarcube_topic);
-
-    let publ_mask = match session
-        .declare_publisher(args.model_output_topic.clone())
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error while declaring detection publisher {}: {:?}",
-                &args.model_output_topic, e
-            );
-            return;
-        }
-    };
-
-    let engine = if args.engine.to_lowercase() == "npu" {
+    let engine = if engine.to_lowercase() == "npu" {
         Some(
             Engine::new("deepview-rt-openvx.so")
                 .expect("Initializing deepview-rt-openvx.so engine failed"),
@@ -86,54 +74,15 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
         Ok(_) => info!("Loaded backbone model {:?}", model_name),
         Err(e) => {
             error!("Could not load model file {:?}: {:?}", model_name, e);
-            return;
+            return None;
         }
     }
+    Some(backbone)
+}
 
-    let mut decoder = None;
-    if let Some(ref path) = args.model_decoder {
-        let model_name = path.clone();
-        let model_data = match read(&model_name) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not open `{:?}` file: {:?}", model_name, e);
-                return;
-            }
-        };
-        let mut decoder_ctx = Context::new(None, model::memory_size(&model_data), 4096 * 1024)
-            .expect("NNContext init failed");
-        info!("NNContext for decoder initialized");
-        match decoder_ctx.load_model(model_data) {
-            Ok(_) => info!("Loaded decoder model {:?}", model_name),
-            Err(e) => {
-                error!(
-                    "Could not load decoder model file {:?}: {:?}",
-                    model_name, e
-                );
-                return;
-            }
-        }
-        let _ = decoder.insert(decoder_ctx);
-    }
-
-    let input_match = match get_input_match(&backbone, &decoder) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not match backbone outputs to decoder inputs: {}", e);
-            return;
-        }
-    };
-
-    let input_tensor_index = model::inputs(backbone.model()).unwrap();
-
-    let input_names: Vec<_> = input_tensor_index
-        .iter()
-        .map(|v| model::layer_name(backbone.model(), *v as usize).unwrap_or("NO_NAME"))
-        .collect();
-
+fn identify_inputs(input_names: &[&str]) -> (usize, Option<usize>) {
     let mut radar_input_index = 0;
     let mut camera_input_index = None;
-
     for (i, name) in input_names.iter().enumerate() {
         debug!("Input #{} has name: {}", i, name);
         if name.contains("radar") {
@@ -144,60 +93,52 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
             debug!("setting camera input index to {}", i);
         }
     }
+    return (radar_input_index, camera_input_index);
+}
 
-    let radar_input_shape: Vec<_> =
-        match backbone.tensor_index(input_tensor_index[radar_input_index] as usize) {
-            Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
-            Err(e) => {
-                error!("Could not get input 0 from model: {:?}", e);
-                return;
-            }
-        };
-    debug!("got input tensor shape: {:?}", radar_input_shape);
-    let sub_camera = if camera_input_index.is_some() {
-        let s = session
-            .declare_subscriber(&args.camera_topic)
-            .await
-            .unwrap();
-        info!("Declared subscriber on {:?}", &args.camera_topic);
-        Some(s)
-    } else {
-        None
-    };
-    let mut camera_input_tensor = if let Some(camera_input_index) = camera_input_index {
+fn get_camera_input(
+    backbone: &Context,
+    input_tensor_index: &[u32],
+    camera_input_index: Option<usize>,
+) -> Result<(Option<Tensor>, Vec<usize>), String> {
+    let mut camera_input_tensor = None;
+    if let Some(camera_input_index) = camera_input_index {
         match backbone.tensor_index(input_tensor_index[camera_input_index] as usize) {
             Ok(v) => {
                 // needed because the dvrt borrow is still mutable even though the Tensor
                 // pointer itself isn't mutable
                 let tensor = unsafe { Tensor::from_ptr(v.to_mut_ptr(), false).unwrap() };
-                Some(tensor)
+                camera_input_tensor = Some(tensor)
             }
             Err(e) => {
                 error!(
                     "Could not get input {} from model: {:?}",
                     camera_input_index, e
                 );
-                return;
+                return Err(format!(
+                    "Could not get input {} from model: {:?}",
+                    camera_input_index, e
+                ));
             }
         }
-    } else {
-        None
-    };
-    let camera_input_shape = if let Some(ref camera_input_tensor) = camera_input_tensor {
-        camera_input_tensor
+    }
+    let mut camera_input_shape = vec![1, 1, 1, 1];
+    if let Some(ref camera_input_tensor) = camera_input_tensor {
+        camera_input_shape = camera_input_tensor
             .shape()
             .iter()
             .map(|v| *v as usize)
             .collect()
-    } else {
-        vec![1, 1, 1, 1]
-    };
+    }
+    Ok((camera_input_tensor, camera_input_shape))
+}
 
+fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), String> {
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open G2D: {:?}", e);
-            return;
+            return Err(e.to_string());
         }
     };
 
@@ -209,32 +150,87 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
         Ok(v) => v,
         Err(e) => {
             error!("Could not alloc CMA heap: {:?}", e);
-            return;
+            return Err(e.to_string());
+        }
+    };
+    Ok((img_mgr, dest))
+}
+
+pub async fn run_rtm_fusion_model(
+    session: Session,
+    args: Args,
+    grid: Arc<Mutex<Option<Grid>>>,
+) -> Result<(), Box<dyn Error>> {
+    let mut backbone = load_model(args.model.clone(), args.engine.clone()).unwrap();
+
+    let mut decoder = None;
+    if args.model_decoder.is_some() {
+        decoder = load_model(args.model_decoder.clone(), "cpu".to_string());
+    }
+
+    let input_match = get_input_match(&backbone, &decoder)?;
+
+    let input_tensor_index = model::inputs(backbone.model())?;
+
+    let input_names: Vec<_> = input_tensor_index
+        .iter()
+        .map(|v| model::layer_name(backbone.model(), *v as usize).unwrap_or("NO_NAME"))
+        .collect();
+
+    let (radar_input_index, camera_input_index) = identify_inputs(&input_names);
+
+    let radar_input_shape: Vec<_> =
+        match backbone.tensor_index(input_tensor_index[radar_input_index] as usize) {
+            Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
+            Err(e) => {
+                error!("Could not get input 0 from model: {:?}", e);
+                return Err(e.into());
+            }
+        };
+    debug!("got input tensor shape: {:?}", radar_input_shape);
+
+    let sub_radarcube = session
+        .declare_subscriber(&args.radarcube_topic)
+        .await
+        .unwrap();
+    info!("Declared subscriber on {:?}", &args.radarcube_topic);
+
+    let sub_camera = if camera_input_index.is_some() {
+        let s = session
+            .declare_subscriber(&args.camera_topic)
+            .await
+            .unwrap();
+        info!("Declared subscriber on {:?}", &args.camera_topic);
+        Some(s)
+    } else {
+        None
+    };
+
+    let publ_mask = match session
+        .declare_publisher(args.model_output_topic.clone())
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error while declaring detection publisher {}: {:?}",
+                &args.model_output_topic, e
+            );
+            return Err(e);
         }
     };
 
-    let timeout = Duration::from_millis(2000);
+    let (mut camera_input_tensor, camera_input_shape) =
+        get_camera_input(&backbone, &input_tensor_index, camera_input_index)?;
+
+    let (img_mgr, mut dest) = initialize_g2d(&camera_input_shape)?;
+
+    let mut timeout_radarcube = DrainRecvTimeoutSettings::default();
+    let mut timeout_camera = DrainRecvTimeoutSettings::default();
     loop {
-        let sample = if let Some(v) = sub_radarcube.drain().last() {
-            v
-        } else {
-            match sub_radarcube.recv_timeout(timeout) {
-                Ok(v) => match v {
-                    Some(v) => v,
-                    None => {
-                        warn!("Timeout on radar cube");
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    error!(
-                        "error receiving radar cube on {}: {:?}",
-                        sub_radarcube.key_expr(),
-                        e
-                    );
-                    continue;
-                }
-            }
+        let sample = match drain_recv(&sub_radarcube, &mut timeout_radarcube).await {
+            Some(v) => v,
+            None => continue,
         };
 
         let radarcube = info_span!("cube_deserialize")
@@ -264,80 +260,19 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
         if camera_input_index.is_some() {
             let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
             let sub_camera = sub_camera.as_ref().unwrap();
-            let sample = if let Some(v) = sub_camera.drain().last() {
-                v
-            } else {
-                match sub_camera.recv_timeout(timeout) {
-                    Ok(v) => match v {
-                        Some(v) => v,
-                        None => {
-                            warn!("Timeout on camera frame");
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        error!(
-                            "error receiving camera frame on {}: {:?}",
-                            sub_radarcube.key_expr(),
-                            e
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let mut cam_buffer = info_span!("camera_deserialize")
-                .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
-
-            let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                    "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                    cam_buffer.pid, e
-                );
-                    continue;
-                }
-            };
-
-            let fd = match get_file_from_pidfd(
-                pidfd.as_raw_fd(),
-                cam_buffer.fd,
-                GetFdFlags::empty(),
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                    "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-                    e
-                );
-                    continue;
-                }
-            };
-
-            cam_buffer.fd = fd.as_raw_fd();
-            trace!("Updated dma fd to {}", cam_buffer.fd);
-
-            match info_span!("camera_load").in_scope(|| {
-                load_frame_dmabuf(
-                    camera_input_tensor,
-                    &img_mgr,
-                    &mut dest,
-                    &cam_buffer,
-                    Preprocessing::UnsignedNorm,
-                )
-            }) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Error loading camera frame into input: {:?}", e);
-                    continue;
-                }
-            }
+            load_camera_frame(
+                camera_input_tensor,
+                sub_camera,
+                &mut timeout_camera,
+                &img_mgr,
+                &mut dest,
+            )
+            .await;
         }
 
         if let Err(e) = run_model(&backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
-            return;
+            return Err(e.into());
         }
 
         let output_ctx = match decoder {
@@ -345,27 +280,7 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
             None => &backbone,
         };
 
-        let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
-
-        let mask = info_span!("model_output").in_scope(|| {
-            let mut mask = if let Ok(tensor) = output_ctx.output(0) {
-                output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
-                let data = tensor.mapro_f32().unwrap();
-                let len = data.len();
-                let mut buffer = vec![0.0; len];
-                buffer.copy_from_slice(&data);
-                buffer
-            } else {
-                error!("Did not find model output");
-                Vec::new()
-            };
-
-            if args.logits {
-                apply_sigmoid(&mut mask);
-            }
-
-            mask
-        });
+        let (mask, output_shape) = get_model_output(output_ctx, args.logits);
 
         let (buf, enc) = info_span!("model_publish").in_scope(|| {
             let mask = mask
@@ -393,15 +308,7 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
 
         publ_mask.put(buf).encoding(enc).await.unwrap();
 
-        let mut occupied_ = mask.into_iter();
-        let mut occupied = Vec::new();
-        for i in 0..output_shape[1] as usize {
-            occupied.push(Vec::new());
-            for _ in 0..output_shape[2] {
-                let item = occupied_.next().unwrap();
-                occupied[i].push(item)
-            }
-        }
+        let occupied = build_occupancy_grid(&mask, &output_shape);
         let timestamp = radarcube.header.stamp.nanosec as u64
             + radarcube.header.stamp.sec as u64 * 1_000_000_000;
         let mut guard = grid.lock().await;
@@ -409,6 +316,106 @@ pub async fn run_rtm_fusion_model(session: Session, args: Args, grid: Arc<Mutex<
     }
 }
 
+fn build_occupancy_grid(mask: &[f32], output_shape: &[u32]) -> Vec<Vec<f32>> {
+    let mut occupied_ = mask.into_iter();
+    let mut occupied = Vec::new();
+    for i in 0..output_shape[1] as usize {
+        occupied.push(Vec::new());
+        for _ in 0..output_shape[2] {
+            let item = occupied_.next().unwrap();
+            occupied[i].push(*item)
+        }
+    }
+    occupied
+}
+
+#[instrument(skip_all)]
+fn get_model_output(output_ctx: &Context, logits: bool) -> (Vec<f32>, Vec<u32>) {
+    let mut output_shape: Vec<u32> = vec![0, 0, 0, 0];
+    let mut mask = if let Ok(tensor) = output_ctx.output(0) {
+        output_shape = tensor.shape().iter().map(|x| *x as u32).collect();
+        let data = tensor.mapro_f32().unwrap();
+        let len = data.len();
+        let mut buffer = vec![0.0; len];
+        buffer.copy_from_slice(&data);
+        buffer
+    } else {
+        error!("Did not find model output");
+        Vec::new()
+    };
+
+    if logits {
+        apply_sigmoid(&mut mask);
+    }
+
+    (mask, output_shape)
+}
+
+#[instrument(skip_all)]
+async fn load_camera_frame(
+    camera_input_tensor: &mut Tensor,
+    sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
+    timeout_camera: &mut DrainRecvTimeoutSettings,
+    img_mgr: &ImageManager,
+    dest: &mut Image,
+) {
+    let sample = match drain_recv(sub_camera, timeout_camera).await {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut cam_buffer = info_span!("camera_deserialize")
+        .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
+
+    if process_dmabuffer(&mut cam_buffer).is_err() {
+        return;
+    }
+    match info_span!("camera_load").in_scope(|| {
+        load_frame_dmabuf(
+            camera_input_tensor,
+            img_mgr,
+            dest,
+            &cam_buffer,
+            Preprocessing::UnsignedNorm,
+        )
+    }) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Error loading camera frame into input: {:?}", e);
+        }
+    }
+}
+
+#[instrument(skip_all)]
+fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<(), io::Error> {
+    let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                cam_buffer.pid, e
+            );
+            return Err(e);
+        }
+    };
+
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), cam_buffer.fd, GetFdFlags::empty()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
+            e
+            );
+            return Err(e);
+        }
+    };
+
+    cam_buffer.fd = fd.as_raw_fd();
+    trace!("Updated dma fd to {}", cam_buffer.fd);
+    Ok(())
+}
+
+#[instrument(skip_all)]
 fn get_input_match(
     backbone: &Context,
     decoder: &Option<Context>,
@@ -420,6 +427,7 @@ fn get_input_match(
     let backbone_outputs = model::outputs(backbone.model()).unwrap_or_default();
     let decoder_inputs = model::inputs(decoder.model()).unwrap_or_default();
     if backbone_outputs.len() != decoder_inputs.len() {
+        error!("backbone output count and decoder input count are not equal");
         return Err("backbone output count and decoder input count are not equal".to_string());
     }
     let mut matching = Vec::new();
@@ -441,6 +449,10 @@ fn get_input_match(
             }
         }
         if !found {
+            error!(
+                "could not find matching decoder input for backbone output with shape {}",
+                bb_out
+            );
             return Err(format!(
                 "could not find matching decoder input for backbone output with shape {}",
                 bb_out
