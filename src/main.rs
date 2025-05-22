@@ -616,18 +616,6 @@ async fn publ_grid(
     }
 }
 
-// Publishes the message if publ is Some and msg_enc is Some
-async fn publ_msg_if_some(publ: Option<&Publisher<'_>>, msg_enc: Option<(ZBytes, Encoding)>) {
-    if let Some((msg, enc)) = msg_enc {
-        if let Some(publ) = publ {
-            match publ.put(msg).encoding(enc).await {
-                Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
-                Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
-            }
-        }
-    }
-}
-
 // Gets 3D bounding boxes from the PCD points. Any clusters that have class > 0
 // will get a 3D bounding box generated. It is assumed that all points in the
 // same cluster ID will have the same class.
@@ -942,72 +930,8 @@ async fn grid_radar_tracked(
     }
     let (g, timestamp) = guard.as_ref().unwrap();
 
-    let height = g.len();
-    let width = g[0].len();
-
     if *timestamp > grid_tracker.timestamp {
-        let mut boxes = Vec::new();
-        for (i, g_i) in g.iter().enumerate() {
-            for (j, g_ij) in g_i.iter().enumerate() {
-                if *g_ij < args.model_threshold {
-                    continue;
-                }
-                boxes.push(TrackerBox {
-                    xmin: j as f32 - 1.0,
-                    ymin: i as f32 - 1.0,
-                    xmax: j as f32 + 1.0,
-                    ymax: i as f32 + 1.0,
-                    score: 1.0,
-                    vision_class: 1,
-
-                    fusion_class: 1,
-                });
-            }
-        }
-
-        grid_tracker.update(&mut boxes, *timestamp);
-
-        {
-            let mut tracked_g = vec![vec![0.0; width]; height];
-            for tracklet in grid_tracker.get_tracklets() {
-                if tracklet.count < 3 {
-                    continue;
-                }
-                let pred = tracklet.get_predicted_location();
-                let i = ((pred.ymin + pred.ymax) / 2.0).round() as i32;
-                let j = ((pred.xmin + pred.xmax) / 2.0).round() as i32;
-                if i < 0 || i >= height as i32 {
-                    continue;
-                }
-                if j < 0 || j >= width as i32 {
-                    continue;
-                }
-                tracked_g[i as usize][j as usize] = 1.0
-            }
-
-            let mask = tracked_g
-                .iter()
-                .flatten()
-                .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
-                .collect();
-            let msg = Mask {
-                height: height as u32,
-                width: width as u32,
-                length: 1,
-                encoding: "".to_string(),
-                mask,
-                boxed: false,
-            };
-
-            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
-            let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-
-            session
-                .put(format!("{}/tracked", args.model_output_topic), buf)
-                .encoding(enc)
-                .await
-                .unwrap();
-        }
+        grid_radar_update_tracker(g, timestamp, grid_tracker, args, session).await;
     }
 
     for tracklet in grid_tracker.get_tracklets() {
@@ -1019,7 +943,9 @@ async fn grid_radar_tracked(
         let j = (pred.xmin + pred.xmax) / 2.0;
 
         // center of grid
+        let width = g[0].len();
         let (x, y) = grid_to_xy(i, j, width, args);
+
         class.push(Box2D {
             center_x: x,
             center_y: y,
@@ -1030,6 +956,78 @@ async fn grid_radar_tracked(
     }
 
     class
+}
+
+async fn grid_radar_update_tracker(
+    g: &[Vec<f32>],
+    timestamp: &u64,
+    grid_tracker: &mut ByteTrack,
+    args: &Args,
+    session: &Session,
+) {
+    let height = g.len();
+    let width = g[0].len();
+
+    let mut boxes = Vec::new();
+    for (i, g_i) in g.iter().enumerate() {
+        for (j, g_ij) in g_i.iter().enumerate() {
+            if *g_ij < args.model_threshold {
+                continue;
+            }
+            boxes.push(TrackerBox {
+                xmin: j as f32 - 1.0,
+                ymin: i as f32 - 1.0,
+                xmax: j as f32 + 1.0,
+                ymax: i as f32 + 1.0,
+                score: 1.0,
+                vision_class: 1,
+
+                fusion_class: 1,
+            });
+        }
+    }
+
+    grid_tracker.update(&mut boxes, *timestamp);
+
+    {
+        let mut tracked_g = vec![vec![0.0; width]; height];
+        for tracklet in grid_tracker.get_tracklets() {
+            if tracklet.count < 3 {
+                continue;
+            }
+            let pred = tracklet.get_predicted_location();
+            let i = ((pred.ymin + pred.ymax) / 2.0).round() as i32;
+            let j = ((pred.xmin + pred.xmax) / 2.0).round() as i32;
+            if i < 0 || i >= height as i32 || j < 0 || j >= width as i32 {
+                continue;
+            }
+
+            tracked_g[i as usize][j as usize] = 1.0
+        }
+
+        let mask = tracked_g
+            .iter()
+            .flatten()
+            .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
+            .collect();
+        let msg = Mask {
+            height: height as u32,
+            width: width as u32,
+            length: 1,
+            encoding: "".to_string(),
+            mask,
+            boxed: false,
+        };
+
+        let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
+
+        session
+            .put(format!("{}/tracked", args.model_output_topic), buf)
+            .encoding(enc)
+            .await
+            .unwrap();
+    }
 }
 
 #[instrument(skip_all)]
@@ -1082,17 +1080,12 @@ fn grid_to_xy(i: f32, j: f32, width: usize, args: &Args) -> (f32, f32) {
     }
 }
 
-/// Returns the centroid of clusters that have non-zero class_id. All points in
-/// a class should have the same class_id
-#[instrument(skip_all)]
-fn get_occupied_cluster(
-    header: Header,
+fn centriods_get_class(
+    cluster_ids: &HashMap<u32, Vec<usize>>,
     points: &[ParsedPoint],
     vision_class: &[u8],
     fusion_class: &[u8],
-    cluster_ids: &HashMap<u32, Vec<usize>>,
-    point_tracker: &mut ByteTrack,
-) -> (ZBytes, Encoding) {
+) -> (Vec<ParsedPoint>, Vec<u8>, Vec<u8>) {
     let capacity = cluster_ids.len();
     let mut centroid_points = Vec::with_capacity(capacity);
     let mut centriod_vision_class = Vec::with_capacity(capacity);
@@ -1124,8 +1117,20 @@ fn get_occupied_cluster(
         centriod_vision_class.push(vision_class);
         centriod_fusion_class.push(fusion_class);
     }
+    (
+        centroid_points,
+        centriod_vision_class,
+        centriod_fusion_class,
+    )
+}
 
-    // want to track points that have class != 0
+fn centriods_update_tracker_classes(
+    centroid_points: &[ParsedPoint],
+    centriod_vision_class: &mut [u8],
+    centriod_fusion_class: &mut [u8],
+    point_tracker: &mut ByteTrack,
+    timestamp: u64,
+) {
     let mut boxes: Vec<TrackerBox> = centroid_points
         .iter()
         .enumerate()
@@ -1143,7 +1148,6 @@ fn get_occupied_cluster(
             fusion_class: centriod_fusion_class[ind],
         })
         .collect();
-    let timestamp = header.stamp.to_nanos();
     let track_info = point_tracker.update(&mut boxes, timestamp);
     for (i, inf) in track_info.into_iter().enumerate() {
         if inf.is_none() {
@@ -1166,6 +1170,15 @@ fn get_occupied_cluster(
             centriod_fusion_class[i] = point_tracker.uuid_map_fusion_class[&uuid];
         }
     }
+}
+
+fn centroids_add_tracks(
+    centroid_points: &mut Vec<ParsedPoint>,
+    centriod_vision_class: &mut Vec<u8>,
+    centriod_fusion_class: &mut Vec<u8>,
+    point_tracker: &mut ByteTrack,
+    timestamp: u64,
+) {
     for i in point_tracker.get_tracklets() {
         if i.last_updated == timestamp {
             continue;
@@ -1199,6 +1212,37 @@ fn get_occupied_cluster(
         centriod_fusion_class.push(point_tracker.uuid_map_fusion_class[&i.id]);
         trace!("added extra point");
     }
+}
+/// Returns the centroid of clusters that have non-zero class_id. All points in
+/// a class should have the same class_id
+#[instrument(skip_all)]
+fn get_occupied_cluster(
+    header: Header,
+    points: &[ParsedPoint],
+    vision_class: &[u8],
+    fusion_class: &[u8],
+    cluster_ids: &HashMap<u32, Vec<usize>>,
+    point_tracker: &mut ByteTrack,
+) -> (ZBytes, Encoding) {
+    let (mut centroid_points, mut centriod_vision_class, mut centriod_fusion_class) =
+        centriods_get_class(cluster_ids, points, vision_class, fusion_class);
+    // want to track points that have class != 0
+    let timestamp = header.stamp.to_nanos();
+    centriods_update_tracker_classes(
+        &centroid_points,
+        &mut centriod_vision_class,
+        &mut centriod_fusion_class,
+        point_tracker,
+        timestamp,
+    );
+
+    centroids_add_tracks(
+        &mut centroid_points,
+        &mut centriod_vision_class,
+        &mut centriod_fusion_class,
+        point_tracker,
+        timestamp,
+    );
 
     let mut centroid_pcd = PointCloud2 {
         header,
