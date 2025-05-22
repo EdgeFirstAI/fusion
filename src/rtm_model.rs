@@ -13,7 +13,7 @@ use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     error::Error,
     ffi::c_void,
-    fs::read,
+    fs::{read, File},
     io,
     os::{
         fd::{AsRawFd, FromRawFd},
@@ -373,9 +373,10 @@ async fn load_camera_frame(
     let mut cam_buffer = info_span!("camera_deserialize")
         .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
 
-    if process_dmabuffer(&mut cam_buffer).is_err() {
-        return;
-    }
+    let _fd = match process_dmabuffer(&mut cam_buffer) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
     match info_span!("camera_load").in_scope(|| {
         load_frame_dmabuf(
             camera_input_tensor,
@@ -393,7 +394,7 @@ async fn load_camera_frame(
 }
 
 #[instrument(skip_all)]
-fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<(), io::Error> {
+fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
     let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
         Ok(v) => v,
         Err(e) => {
@@ -417,8 +418,8 @@ fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<(), io::Error> {
     };
 
     cam_buffer.fd = fd.as_raw_fd();
-    trace!("Updated dma fd to {}", cam_buffer.fd);
-    Ok(())
+    debug!("Updated dma fd to {}", cam_buffer.fd);
+    Ok(fd)
 }
 
 #[instrument(skip_all)]

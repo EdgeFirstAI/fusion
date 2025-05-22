@@ -6,7 +6,7 @@ use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     ffi::c_void,
-    fs::read,
+    fs::{read, File},
     io,
     os::{
         fd::{AsRawFd, FromRawFd},
@@ -84,7 +84,7 @@ fn load_model(
         builder.add_owned_delegate(delegate);
     }
 
-    let backbone = match builder.build(&model) {
+    let backbone = match builder.build(model) {
         Ok(v) => v,
         Err(e) => {
             error!("Error while building backbone: {}", e);
@@ -359,7 +359,7 @@ fn get_model_output(outputs: &[Tensor], logits: bool) -> (Vec<f32>, Vec<usize>) 
 }
 
 #[instrument(skip_all)]
-fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<(), io::Error> {
+fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
     let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
         Ok(v) => v,
         Err(e) => {
@@ -383,8 +383,8 @@ fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<(), io::Error> {
     };
 
     cam_buffer.fd = fd.as_raw_fd();
-    trace!("Updated dma fd to {}", cam_buffer.fd);
-    Ok(())
+    debug!("Updated dma fd to {}", cam_buffer.fd);
+    Ok(fd)
 }
 
 fn get_input_match(
@@ -485,18 +485,17 @@ async fn load_camera_frame(
     let mut cam_buffer = info_span!("camera_deserialize")
         .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
 
-    if process_dmabuffer(&mut cam_buffer).is_err() {
-        return;
-    }
-    match info_span!("camera_load").in_scope(|| {
-        load_frame_dmabuf(
-            camera_input_tensor,
-            img_mgr,
-            dest,
-            &cam_buffer,
-            Preprocessing::UnsignedNorm,
-        )
-    }) {
+    let _fd = match process_dmabuffer(&mut cam_buffer) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    match load_frame_dmabuf(
+        camera_input_tensor,
+        img_mgr,
+        dest,
+        &cam_buffer,
+        Preprocessing::UnsignedNorm,
+    ) {
         Ok(_) => {}
         Err(e) => {
             error!("Error loading camera frame into input: {:?}", e);
