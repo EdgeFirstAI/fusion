@@ -41,6 +41,7 @@ use crate::{
 
 static NPU_PATH: &str = "libvx_delegate.so";
 
+#[instrument(skip_all)]
 fn load_model(
     model_name: Option<PathBuf>,
     engine: String,
@@ -94,6 +95,7 @@ fn load_model(
     Some(backbone)
 }
 
+#[instrument(skip_all)]
 fn identify_inputs(inputs: &[TensorMut]) -> (usize, Option<usize>) {
     let mut radar_input_index = 0;
     let mut camera_input_index = None;
@@ -111,6 +113,7 @@ fn identify_inputs(inputs: &[TensorMut]) -> (usize, Option<usize>) {
     (radar_input_index, camera_input_index)
 }
 
+#[instrument(skip_all)]
 fn get_input_shape(inputs: &[TensorMut], input_index: Option<usize>) -> Result<Vec<usize>, String> {
     if let Some(ref index) = input_index {
         match inputs[*index].shape() {
@@ -128,6 +131,7 @@ fn get_input_shape(inputs: &[TensorMut], input_index: Option<usize>) -> Result<V
     }
 }
 
+#[instrument(skip_all)]
 fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), String> {
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
@@ -151,6 +155,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
     Ok((img_mgr, dest))
 }
 
+#[instrument(skip_all)]
 pub async fn run_tflite_fusion_model(
     session: Session,
     args: Args,
@@ -176,20 +181,7 @@ pub async fn run_tflite_fusion_model(
         decoder = load_model(args.model_decoder.clone(), "cpu".to_string(), &tflite_lib);
         info!("TFLite context for decoder initialized");
     }
-
-    let sub_radarcube = session
-        .declare_subscriber(&args.radarcube_topic)
-        .await
-        .unwrap();
-    info!("Declared subscriber on {:?}", &args.radarcube_topic);
-
-    let publ_mask = session
-        .declare_publisher(args.model_output_topic.clone())
-        .await
-        .unwrap();
-
     let input_match = get_input_match(&backbone, &decoder)?;
-
     let inputs = match backbone.inputs_mut() {
         Ok(v) => v,
         Err(e) => {
@@ -197,6 +189,7 @@ pub async fn run_tflite_fusion_model(
             return Err(e.into());
         }
     };
+
     let (radar_input_index, camera_input_index) = identify_inputs(&inputs);
 
     let radar_input_shape: Vec<_> = get_input_shape(&inputs, Some(radar_input_index))?;
@@ -209,6 +202,17 @@ pub async fn run_tflite_fusion_model(
         error!("Failed to run model: {}", e);
         return Err(e.into());
     }
+
+    let sub_radarcube = session
+        .declare_subscriber(&args.radarcube_topic)
+        .await
+        .unwrap();
+    info!("Declared subscriber on {:?}", &args.radarcube_topic);
+
+    let publ_mask = session
+        .declare_publisher(args.model_output_topic.clone())
+        .await
+        .unwrap();
 
     let mut sub_camera = None;
     if camera_input_index.is_some() {
@@ -322,6 +326,7 @@ fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: 
     input_tensor_map.copy_from_slice(cube);
 }
 
+#[instrument(skip_all)]
 fn build_occupancy_grid(mask: &[f32], output_shape: &[usize]) -> Vec<Vec<f32>> {
     let mut occupied_ = mask.iter();
     let mut occupied = Vec::new();
@@ -387,6 +392,7 @@ fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
     Ok(fd)
 }
 
+#[instrument(skip_all)]
 fn get_input_match(
     backbone: &Interpreter,
     decoder: &Option<Interpreter>,
@@ -577,6 +583,7 @@ fn load_frame_dmabuf(
     Ok(())
 }
 
+#[instrument(skip_all)]
 fn load_input(
     dest: &mut Image,
     data_channels: usize,
@@ -622,6 +629,7 @@ fn load_input(
     Ok(())
 }
 
+#[instrument(skip_all)]
 fn load_input_u8(
     dest: &mut Image,
     data_channels: usize,
@@ -647,6 +655,7 @@ fn load_input_u8(
     Ok(())
 }
 
+#[instrument(skip_all)]
 fn load_input_i8(
     dest: &mut Image,
     data_channels: usize,
@@ -669,6 +678,8 @@ fn load_input_i8(
     }
     Ok(())
 }
+
+#[instrument(skip_all)]
 fn load_input_f32(
     dest: &mut Image,
     data_channels: usize,

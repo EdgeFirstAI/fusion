@@ -40,6 +40,7 @@ use crate::{
     DrainRecvTimeoutSettings, Grid,
 };
 
+#[instrument(skip_all)]
 fn load_model(model_name: Option<PathBuf>, engine: String) -> Option<Context> {
     // let model_name = args.model.as_ref().unwrap().clone();
     if model_name.is_none() {
@@ -79,6 +80,7 @@ fn load_model(model_name: Option<PathBuf>, engine: String) -> Option<Context> {
     Some(backbone)
 }
 
+#[instrument(skip_all)]
 fn identify_inputs(input_names: &[&str]) -> (usize, Option<usize>) {
     let mut radar_input_index = 0;
     let mut camera_input_index = None;
@@ -95,6 +97,7 @@ fn identify_inputs(input_names: &[&str]) -> (usize, Option<usize>) {
     (radar_input_index, camera_input_index)
 }
 
+#[instrument(skip_all)]
 fn get_camera_input(
     backbone: &Context,
     input_tensor_index: &[u32],
@@ -132,6 +135,7 @@ fn get_camera_input(
     Ok((camera_input_tensor, camera_input_shape))
 }
 
+#[instrument(skip_all)]
 fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), String> {
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
@@ -155,6 +159,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
     Ok((img_mgr, dest))
 }
 
+#[instrument(skip_all)]
 pub async fn run_rtm_fusion_model(
     session: Session,
     args: Args,
@@ -534,6 +539,7 @@ pub enum Preprocessing {
 static RGB_MEANS_IMAGENET: [f32; 4] = [0.485 * 255.0, 0.456 * 255.0, 0.406 * 255.0, 128.0]; // last value is for Alpha channel when needed
 static RGB_STDS_IMAGENET: [f32; 4] = [0.229 * 255.0, 0.224 * 255.0, 0.225 * 255.0, 64.0]; // last value is for Alpha channel when needed
 
+#[instrument(skip_all)]
 fn load_frame_dmabuf(
     tensor: &mut Tensor,
     img_mgr: &ImageManager,
@@ -596,6 +602,7 @@ fn load_frame_dmabuf(
     Ok(())
 }
 
+#[instrument(skip_all)]
 fn load_input(
     dest: &mut Image,
     data_channels: usize,
@@ -629,6 +636,7 @@ fn load_input(
     Ok(())
 }
 
+#[instrument(skip_all)]
 fn load_input_u8(
     dest: &mut Image,
     data_channels: usize,
@@ -654,6 +662,7 @@ fn load_input_u8(
     Ok(())
 }
 
+#[instrument(skip_all)]
 fn load_input_i8(
     dest: &mut Image,
     data_channels: usize,
@@ -676,6 +685,8 @@ fn load_input_i8(
     }
     Ok(())
 }
+
+#[instrument(skip_all)]
 fn load_input_f32(
     dest: &mut Image,
     data_channels: usize,
