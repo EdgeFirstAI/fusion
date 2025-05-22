@@ -322,6 +322,25 @@ pub struct Mutexes {
     grid: Arc<Mutex<Option<Grid>>>,
 }
 
+fn setup_bins(bins: &mut Vec<Vec<Bin>>, args: &Args) {
+    let mut i = args.angle_bin_limit[0];
+    while i <= args.angle_bin_limit[1] {
+        let mut range_bins = Vec::new();
+        let mut j = args.range_bin_limit[0];
+        while j <= args.range_bin_limit[1] {
+            range_bins.push(Bin {
+                vision_classes: Vec::new(),
+                fusion_classes: Vec::new(),
+                last_masked: 0,
+                first_marked: u128::MAX,
+            });
+            j += args.range_bin_width
+        }
+        bins.push(range_bins);
+        i += args.angle_bin_width;
+    }
+}
+
 async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     if zenoh.pcd_sub.is_none() {
         return;
@@ -340,22 +359,7 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     });
     let mut bins = Vec::new();
     let mut frame_index = 0;
-    let mut i = args.angle_bin_limit[0];
-    while i <= args.angle_bin_limit[1] {
-        let mut range_bins = Vec::new();
-        let mut j = args.range_bin_limit[0];
-        while j <= args.range_bin_limit[1] {
-            range_bins.push(Bin {
-                vision_classes: Vec::new(),
-                fusion_classes: Vec::new(),
-                last_masked: 0,
-                first_marked: u128::MAX,
-            });
-            j += args.range_bin_width
-        }
-        bins.push(range_bins);
-        i += args.angle_bin_width;
-    }
+    setup_bins(&mut bins, args);
 
     let mut timeout = DrainRecvTimeoutSettings::default();
     loop {
@@ -416,103 +420,199 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         };
 
         let (has_cluster_ids, ids) = get_cluster_ids(&points);
-        let vision_class = if has_cluster_ids {
-            late_fusion_clustered(&points, &proj, &mask, &ids)
-        } else {
-            late_fusion_no_cluster(&proj, &mask, 0.02)
-        };
-        let fusion_predictions = if args.track {
-            grid_radar_tracked(&data.grid, &mut tracker, args, zenoh.session.clone()).await
-        } else {
-            grid_radar(&data.grid, args).await
-        };
-        let fusion_class = if has_cluster_ids {
-            grid_nearest_cluster(&fusion_predictions, &points, &ids)
-        } else {
-            grid_nearest_point_no_cluster(&fusion_predictions, &points)
-        };
+        let vision_class = get_vision_class(&points, &proj, &mask, has_cluster_ids, &ids);
 
-        // Only create 3d bbox message when there are cluster IDs and bbox publishing is
-        // enabled
-        let bbox_msg = if has_cluster_ids && zenoh.bbox_publ.is_some() {
-            Some(get_3d_bbox(
-                pcd.header.clone(),
-                &points,
-                &vision_class,
-                &ids,
-            ))
-        } else {
-            None
-        };
+        let fusion_predictions =
+            get_fusion_predictions(args.track, &mut tracker, &data.grid, args, &zenoh.session)
+                .await;
+        let fusion_class = get_fusion_class(&points, &fusion_predictions, has_cluster_ids, &ids);
 
-        let publ_bbox = publ_msg_if_some(zenoh.bbox_publ.as_ref(), bbox_msg);
+        let pcd_header = pcd.header.clone();
 
-        // Only create the PCD message when PCD publishing is enabled
-        let pcd_msg = if zenoh.pcd_publ.is_some() {
-            pcd.fields = Vec::new();
-            for (char, datatype) in [
-                ("x", point_field::FLOAT32),
-                ("y", point_field::FLOAT32),
-                ("z", point_field::FLOAT32),
-                ("cluster_id", point_field::UINT32),
-                (FUSION_CLASS, point_field::UINT8),
-                (VISION_CLASS, point_field::UINT8),
-            ] {
-                insert_field(
-                    &mut pcd,
-                    PointField {
-                        name: char.to_string(),
-                        offset: 0, // offset is calculated by the insert field function
-                        datatype,
-                        count: 1,
-                    },
-                );
-            }
-            let data = serialize_pcd(&points, &pcd.fields, &vision_class, &fusion_class);
-            pcd.row_step = data.len() as u32;
-            pcd.data = data;
-            pcd.is_bigendian = cfg!(target_endian = "big");
-            let buf = info_span!("cdr::serialize pcd")
-                .in_scope(|| cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
-            let buf_pcd = ZBytes::from(buf);
-            let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
-            Some((buf_pcd, enc_pcd))
-        } else {
-            None
-        };
-        let publ_pcd = publ_msg_if_some(zenoh.pcd_publ.as_ref(), pcd_msg);
+        let points_data = (
+            points.as_slice(),
+            vision_class.as_slice(),
+            fusion_class.as_slice(),
+        );
+        let cluster_id_data = (has_cluster_ids, &ids);
 
-        // Only create the occupancy grid message when grid publishing is enabled
-        let grid_msg = if zenoh.grid_publ.is_none() {
-            None
-        } else if has_cluster_ids {
-            Some(get_occupied_cluster(
-                pcd.header.clone(),
-                &points,
-                &vision_class,
-                &fusion_class,
-                &ids,
-                &mut point_tracker,
-            ))
-        } else {
-            Some(get_occupied_no_cluster(
-                pcd.header.clone(),
-                &points,
-                &vision_class,
-                &fusion_class,
-                &mut bins,
-                frame_index,
-                args,
-            ))
-        };
+        let publ_bbox = publ_bbox3d(
+            zenoh.bbox_publ.as_ref(),
+            pcd_header.clone(),
+            points_data,
+            cluster_id_data,
+        );
 
-        let publ_grid = publ_msg_if_some(zenoh.grid_publ.as_ref(), grid_msg);
+        let publ_pcd = publ_pcd(zenoh.pcd_publ.as_ref(), &mut pcd, points_data);
+
+        let publ_grid = publ_grid(
+            zenoh.grid_publ.as_ref(),
+            pcd_header.clone(),
+            points_data,
+            &mut point_tracker,
+            (&mut bins, frame_index),
+            args,
+            cluster_id_data,
+        );
+
         join!(publ_bbox, publ_pcd, publ_grid);
 
         clear_bins(&mut bins, frame_index, args);
         frame_index += 1;
 
         args.tracy.then(frame_mark);
+    }
+}
+
+fn get_vision_class(
+    points: &[ParsedPoint],
+    proj: &[[f32; 2]],
+    mask: &Mask,
+    has_cluster_ids: bool,
+    ids: &HashMap<u32, Vec<usize>>,
+) -> Vec<u8> {
+    if has_cluster_ids {
+        late_fusion_clustered(points, proj, mask, ids)
+    } else {
+        late_fusion_no_cluster(proj, mask, 0.02)
+    }
+}
+
+fn get_fusion_class(
+    points: &[ParsedPoint],
+    fusion_predictions: &[Box2D],
+    has_cluster_ids: bool,
+    ids: &HashMap<u32, Vec<usize>>,
+) -> Vec<u8> {
+    if has_cluster_ids {
+        grid_nearest_cluster(fusion_predictions, points, ids)
+    } else {
+        grid_nearest_point_no_cluster(fusion_predictions, points)
+    }
+}
+
+async fn get_fusion_predictions(
+    track: bool,
+    tracker: &mut ByteTrack,
+    grid: &Arc<Mutex<Option<Grid>>>,
+    args: &Args,
+    session: &Session,
+) -> Vec<Box2D> {
+    if track {
+        grid_radar_tracked(grid, tracker, args, session).await
+    } else {
+        grid_radar(grid, args).await
+    }
+}
+
+async fn publ_bbox3d(
+    bbox_publ: Option<&Publisher<'_>>,
+    header: Header,
+    points_data: (&[ParsedPoint], &[u8], &[u8]),
+    cluster_id_data: (bool, &HashMap<u32, Vec<usize>>),
+) {
+    if bbox_publ.is_none() {
+        return;
+    }
+    let (has_cluster_ids, ids) = cluster_id_data;
+    // Only create 3d bbox message when there are cluster IDs and bbox publishing is
+    // enabled
+    if !has_cluster_ids {
+        return;
+    }
+
+    let bbox_publ = bbox_publ.unwrap();
+    let (points, vision_class, _) = points_data;
+    let (buf_bbox, enc_bbox) = get_3d_bbox(header, points, vision_class, ids);
+
+    match bbox_publ.put(buf_bbox).encoding(enc_bbox).await {
+        Ok(_) => trace!("Message Sent on {:?}", bbox_publ.key_expr()),
+        Err(e) => error!("Message Error on {:?}: {:?}", bbox_publ.key_expr(), e),
+    }
+}
+
+async fn publ_pcd(
+    publ: Option<&Publisher<'_>>,
+    pcd: &mut PointCloud2,
+    points_data: (&[ParsedPoint], &[u8], &[u8]),
+) {
+    if publ.is_none() {
+        return;
+    }
+    let (points, vision_class, fusion_class) = points_data;
+    let publ = publ.unwrap();
+    pcd.fields = Vec::new();
+    for (char, datatype) in [
+        ("x", point_field::FLOAT32),
+        ("y", point_field::FLOAT32),
+        ("z", point_field::FLOAT32),
+        ("cluster_id", point_field::UINT32),
+        (FUSION_CLASS, point_field::UINT8),
+        (VISION_CLASS, point_field::UINT8),
+    ] {
+        insert_field(
+            pcd,
+            PointField {
+                name: char.to_string(),
+                offset: 0, // offset is calculated by the insert field function
+                datatype,
+                count: 1,
+            },
+        );
+    }
+    let data = serialize_pcd(points, &pcd.fields, vision_class, fusion_class);
+    pcd.row_step = data.len() as u32;
+    pcd.data = data;
+    pcd.is_bigendian = cfg!(target_endian = "big");
+    let buf = info_span!("cdr::serialize pcd")
+        .in_scope(|| cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
+    let buf_pcd = ZBytes::from(buf);
+    let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+    match publ.put(buf_pcd).encoding(enc_pcd).await {
+        Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
+        Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
+    }
+}
+
+async fn publ_grid(
+    grid_publ: Option<&Publisher<'_>>,
+    header: Header,
+    points_data: (&[ParsedPoint], &[u8], &[u8]),
+    point_tracker: &mut ByteTrack,
+    bins_data: (&mut [Vec<Bin>], u128),
+    args: &Args,
+    cluster_id_data: (bool, &HashMap<u32, Vec<usize>>),
+) {
+    if grid_publ.is_none() {
+        return;
+    };
+    let grid_publ = grid_publ.unwrap();
+    let (has_cluster_ids, ids) = cluster_id_data;
+    let (points, vision_class, fusion_class) = points_data;
+    let (buf_grid, enc_grid) = if has_cluster_ids {
+        get_occupied_cluster(
+            header,
+            points,
+            vision_class,
+            fusion_class,
+            ids,
+            point_tracker,
+        )
+    } else {
+        let (bins, frame_index) = bins_data;
+        get_occupied_no_cluster(
+            header,
+            points,
+            vision_class,
+            fusion_class,
+            bins,
+            frame_index,
+            args,
+        )
+    };
+    match grid_publ.put(buf_grid).encoding(enc_grid).await {
+        Ok(_) => trace!("Message Sent on {:?}", grid_publ.key_expr()),
+        Err(e) => error!("Message Error on {:?}: {:?}", grid_publ.key_expr(), e),
     }
 }
 
@@ -826,7 +926,7 @@ async fn grid_radar_tracked(
     grid: &Arc<Mutex<Option<Grid>>>,
     grid_tracker: &mut ByteTrack,
     args: &Args,
-    session: Session,
+    session: &Session,
 ) -> Vec<Box2D> {
     let mut class = Vec::new();
 
