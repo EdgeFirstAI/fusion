@@ -1350,6 +1350,67 @@ fn mark_grid_one_column(
     }
 }
 
+fn mark_cell_three_column(
+    i: usize,
+    j: usize,
+    bins: &mut [Vec<Bin>],
+    frame_index: u128,
+    angle_found_occupied: &mut [bool],
+    args: &Args,
+) -> bool {
+    let mut sum0 = get_val_in_bin(bins, i as i32, j as i32, 0, 0);
+    let mut sum1 = get_val_in_bin(bins, i as i32, j as i32, 0, -1);
+    let mut sum2 = get_val_in_bin(bins, i as i32, j as i32, 0, -2);
+    if 0 < i && !angle_found_occupied[i - 1] {
+        sum0 += get_val_in_bin(bins, i as i32, j as i32, -1, 0);
+        sum1 += get_val_in_bin(bins, i as i32, j as i32, -1, -1);
+        sum2 += get_val_in_bin(bins, i as i32, j as i32, -1, -2);
+    }
+    if i + 1 < bins.len() && !angle_found_occupied[i + 1] {
+        sum0 += get_val_in_bin(bins, i as i32, j as i32, 1, 0);
+        sum1 += get_val_in_bin(bins, i as i32, j as i32, 1, -1);
+        sum2 += get_val_in_bin(bins, i as i32, j as i32, 1, -2);
+    }
+
+    if sum0 >= args.threshold {
+        mark_grid(&mut bins[i][j], frame_index);
+        angle_found_occupied[i] = true;
+        if 0 < i {
+            angle_found_occupied[i - 1] = true;
+        }
+        if i + 1 < bins.len() {
+            angle_found_occupied[i + 1] = true;
+        }
+        // don't check more ranges
+        return true;
+    }
+    if sum0 + sum1 >= args.threshold {
+        mark_grid(&mut bins[i][j - 1], frame_index);
+        angle_found_occupied[i] = true;
+        if 0 < i {
+            angle_found_occupied[i - 1] = true;
+        }
+        if i + 1 < bins.len() {
+            angle_found_occupied[i + 1] = true;
+        }
+        // don't check more ranges
+        return true;
+    }
+    if sum0 + sum1 + sum2 >= args.threshold {
+        mark_grid(&mut bins[i][j - 2], frame_index);
+        angle_found_occupied[i] = true;
+        if 0 < i {
+            angle_found_occupied[i - 1] = true;
+        }
+        if i + 1 < bins.len() {
+            angle_found_occupied[i + 1] = true;
+        }
+        // don't check more ranges
+        return true;
+    }
+    false
+}
+
 fn mark_grid_three_column(
     bins: &mut [Vec<Bin>],
     frame_index: u128,
@@ -1358,54 +1419,7 @@ fn mark_grid_three_column(
 ) {
     for i in 0..bins.len() {
         for j in 0..bins[i].len() {
-            let mut sum0 = get_val_in_bin(bins, i as i32, j as i32, 0, 0);
-            let mut sum1 = get_val_in_bin(bins, i as i32, j as i32, 0, -1);
-            let mut sum2 = get_val_in_bin(bins, i as i32, j as i32, 0, -2);
-            if 0 < i && !angle_found_occupied[i - 1] {
-                sum0 += get_val_in_bin(bins, i as i32, j as i32, -1, 0);
-                sum1 += get_val_in_bin(bins, i as i32, j as i32, -1, -1);
-                sum2 += get_val_in_bin(bins, i as i32, j as i32, -1, -2);
-            }
-            if i + 1 < bins.len() && !angle_found_occupied[i + 1] {
-                sum0 += get_val_in_bin(bins, i as i32, j as i32, 1, 0);
-                sum1 += get_val_in_bin(bins, i as i32, j as i32, 1, -1);
-                sum2 += get_val_in_bin(bins, i as i32, j as i32, 1, -2);
-            }
-
-            if sum0 >= args.threshold {
-                mark_grid(&mut bins[i][j], frame_index);
-                angle_found_occupied[i] = true;
-                if 0 < i {
-                    angle_found_occupied[i - 1] = true;
-                }
-                if i + 1 < bins.len() {
-                    angle_found_occupied[i + 1] = true;
-                }
-                // don't check more ranges
-                break;
-            }
-            if sum0 + sum1 >= args.threshold {
-                mark_grid(&mut bins[i][j - 1], frame_index);
-                angle_found_occupied[i] = true;
-                if 0 < i {
-                    angle_found_occupied[i - 1] = true;
-                }
-                if i + 1 < bins.len() {
-                    angle_found_occupied[i + 1] = true;
-                }
-                // don't check more ranges
-                break;
-            }
-            if sum0 + sum1 + sum2 >= args.threshold {
-                mark_grid(&mut bins[i][j - 2], frame_index);
-                angle_found_occupied[i] = true;
-                if 0 < i {
-                    angle_found_occupied[i - 1] = true;
-                }
-                if i + 1 < bins.len() {
-                    angle_found_occupied[i + 1] = true;
-                }
-                // don't check more ranges
+            if mark_cell_three_column(i, j, bins, frame_index, angle_found_occupied, args) {
                 break;
             }
         }

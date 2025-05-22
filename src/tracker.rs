@@ -233,66 +233,17 @@ impl ByteTrack {
         })
     }
 
-    pub fn update(&mut self, boxes: &mut [TrackerBox], timestamp: u64) -> Vec<Option<TrackInfo>> {
-        self.frame_count += 1;
-        let high_conf_ind = (0..boxes.len())
-            .filter(|x| boxes[*x].score >= self.settings.track_high_conf)
-            .collect::<Vec<usize>>();
-        let mut matched = vec![false; boxes.len()];
-        let mut tracked = vec![false; self.tracklets.len()];
-        let mut matched_info = vec![None; boxes.len()];
-        if !self.tracklets.is_empty() {
-            for track in &mut self.tracklets {
-                track.filter.predict();
-            }
-            let costs = self.compute_costs(
-                boxes,
-                self.settings.track_high_conf,
-                self.settings.track_iou,
-                &matched,
-                &tracked,
-            );
-            // With m boxes and n tracks, we compute a m x n array of costs for
-            // association cost is based on distance computed by the Kalman Filter
-            // Then we use lapjv (linear assignment) to minimize the cost of
-            // matching tracks to boxes
-            // The linear assignment will still assign some tracks to out of threshold
-            // scores/filtered tracks/filtered boxes But it will try to minimize
-            // the number of "invalid" assignments, since those are just very high costs
-            let ans = lapjv(&costs).unwrap();
-            for i in 0..ans.0.len() {
-                let x = ans.0[i];
-                if i < boxes.len() && x < self.tracklets.len() {
-                    // We need to filter out those "invalid" assignments
-                    if costs[(i, ans.0[i])] >= INVALID_MATCH {
-                        continue;
-                    }
-                    matched[i] = true;
-                    matched_info[i] = Some(TrackInfo {
-                        uuid: self.tracklets[x].id,
-                        count: self.tracklets[x].count,
-                        created: self.tracklets[x].created,
-                    });
-                    assert!(!tracked[x]);
-                    tracked[x] = true;
-
-                    let observed_box = boxes[i];
-
-                    let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
-                    xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                    self.uuid_map_vision_class
-                        .insert(self.tracklets[x].id, boxes[i].vision_class);
-
-                    self.uuid_map_fusion_class
-                        .insert(self.tracklets[x].id, boxes[i].fusion_class);
-                    self.tracklets[x].update(&observed_box, &self.settings, timestamp);
-                }
-            }
-        }
-
+    fn match_tracklets_low_score(
+        &mut self,
+        boxes: &mut [TrackerBox],
+        matched: &mut [bool],
+        tracked: &mut [bool],
+        matched_info: &mut [Option<TrackInfo>],
+        timestamp: u64,
+    ) {
         // try to match unmatched tracklets to low score detections as well
         if !self.tracklets.is_empty() {
-            let costs = self.compute_costs(boxes, 0.0, self.settings.track_iou, &matched, &tracked);
+            let costs = self.compute_costs(boxes, 0.0, self.settings.track_iou, matched, tracked);
             let ans = lapjv(&costs).unwrap();
             for i in 0..ans.0.len() {
                 let x = ans.0[i];
@@ -333,9 +284,9 @@ impl ByteTrack {
                 }
             }
         }
+    }
 
-        // move tracklets that don't have lifespan to the removed tracklets
-        // must iterate from the back
+    fn remove_expired_tracklets(&mut self, timestamp: u64) {
         for i in (0..self.tracklets.len()).rev() {
             if self.tracklets[i].expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
@@ -347,8 +298,16 @@ impl ByteTrack {
                 let _ = self.tracklets.swap_remove(i);
             }
         }
+    }
 
-        // unmatched high score boxes are then used to make new tracks
+    fn create_new_tracklets_from_high_score(
+        &mut self,
+        boxes: &[TrackerBox],
+        high_conf_ind: Vec<usize>,
+        matched: &[bool],
+        matched_info: &mut [Option<TrackInfo>],
+        timestamp: u64,
+    ) {
         for i in high_conf_ind {
             if !matched[i] {
                 let id = Uuid::new_v4();
@@ -375,6 +334,87 @@ impl ByteTrack {
                 self.uuid_map_fusion_class.insert(id, boxes[i].fusion_class);
             }
         }
+    }
+
+    pub fn update(&mut self, boxes: &mut [TrackerBox], timestamp: u64) -> Vec<Option<TrackInfo>> {
+        self.frame_count += 1;
+        let high_conf_ind = (0..boxes.len())
+            .filter(|x| boxes[*x].score >= self.settings.track_high_conf)
+            .collect::<Vec<usize>>();
+        let mut matched = vec![false; boxes.len()];
+        let mut tracked = vec![false; self.tracklets.len()];
+        let mut matched_info = vec![None; boxes.len()];
+        if !self.tracklets.is_empty() {
+            for track in &mut self.tracklets {
+                track.filter.predict();
+            }
+            let costs = self.compute_costs(
+                boxes,
+                self.settings.track_high_conf,
+                self.settings.track_iou,
+                &matched,
+                &tracked,
+            );
+            // With m boxes and n tracks, we compute a m x n array of costs for
+            // association cost is based on distance computed by the Kalman Filter
+            // Then we use lapjv (linear assignment) to minimize the cost of
+            // matching tracks to boxes
+            // The linear assignment will still assign some tracks to out of threshold
+            // scores/filtered tracks/filtered boxes But it will try to minimize
+            // the number of "invalid" assignments, since those are just very high costs
+            let ans = lapjv(&costs).unwrap();
+            for i in 0..ans.0.len() {
+                let x = ans.0[i];
+                if !(i < boxes.len() && x < self.tracklets.len()) {
+                    continue;
+                }
+                // We need to filter out those "invalid" assignments
+                if costs[(i, ans.0[i])] >= INVALID_MATCH {
+                    continue;
+                }
+                matched[i] = true;
+                matched_info[i] = Some(TrackInfo {
+                    uuid: self.tracklets[x].id,
+                    count: self.tracklets[x].count,
+                    created: self.tracklets[x].created,
+                });
+                assert!(!tracked[x]);
+                tracked[x] = true;
+
+                let observed_box = boxes[i];
+
+                let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
+                xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
+                self.uuid_map_vision_class
+                    .insert(self.tracklets[x].id, boxes[i].vision_class);
+
+                self.uuid_map_fusion_class
+                    .insert(self.tracklets[x].id, boxes[i].fusion_class);
+                self.tracklets[x].update(&observed_box, &self.settings, timestamp);
+            }
+        }
+
+        // try to match unmatched tracklets to low score detections as well
+        self.match_tracklets_low_score(
+            boxes,
+            &mut matched,
+            &mut tracked,
+            &mut matched_info,
+            timestamp,
+        );
+
+        // move tracklets that don't have lifespan to the removed tracklets
+        // must iterate from the back
+        self.remove_expired_tracklets(timestamp);
+
+        // unmatched high score boxes are then used to make new tracks
+        self.create_new_tracklets_from_high_score(
+            boxes,
+            high_conf_ind,
+            &matched,
+            &mut matched_info,
+            timestamp,
+        );
         matched_info
     }
 

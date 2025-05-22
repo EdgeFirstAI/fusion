@@ -4,7 +4,7 @@ use deepviewrt::{
     context::Context,
     engine::Engine,
     model,
-    tensor::{self, Tensor, TensorType},
+    tensor::{Tensor, TensorType},
 };
 use edgefirst_schemas::edgefirst_msgs::{DmaBuf, Mask, RadarCube};
 use libc::memcpy;
