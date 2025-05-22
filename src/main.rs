@@ -1289,33 +1289,20 @@ fn get_occupied_cluster(
     (buf, enc)
 }
 
-/// Do a grid and highlight the grid based on point classes
-#[instrument(skip_all)]
-fn get_occupied_no_cluster(
-    header: Header,
+fn update_bins(
     points: &[ParsedPoint],
     vision_class: &[u8],
     fusion_class: &[u8],
     bins: &mut [Vec<Bin>],
-    frame_index: u128,
     args: &Args,
-) -> (ZBytes, Encoding) {
+) {
     for (ind, p) in points.iter().enumerate() {
         let mut range = (p.x.powi(2) + p.y.powi(2) + p.z.powi(2)).sqrt();
         let mut angle = p.y.atan2(p.x).to_degrees();
 
-        if angle < args.angle_bin_limit[0] {
-            angle = args.angle_bin_limit[0]
-        }
-        if angle > args.angle_bin_limit[1] {
-            angle = args.angle_bin_limit[1] - 0.001;
-        }
-        if range < args.range_bin_limit[0] {
-            range = args.range_bin_limit[0];
-        }
-        if range > args.range_bin_limit[1] {
-            range = args.range_bin_limit[1] - 0.001;
-        }
+        angle = angle.clamp(args.angle_bin_limit[0], args.angle_bin_limit[1] - 0.001);
+        range = range.clamp(args.range_bin_limit[0], args.range_bin_limit[1] - 0.001);
+
         let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
         let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
         let vision_class = vision_class[ind];
@@ -1328,10 +1315,14 @@ fn get_occupied_no_cluster(
             bins[i][j].fusion_classes.push(fusion_class);
         }
     }
-    let mut grid_points = Vec::new();
-    let mut vision_class = Vec::new();
-    let mut fusion_class = Vec::new();
-    let mut angle_found_occupied = vec![false; bins.len()];
+}
+
+fn mark_grid_one_column(
+    bins: &mut [Vec<Bin>],
+    frame_index: u128,
+    angle_found_occupied: &mut [bool],
+    args: &Args,
+) {
     for i in 0..bins.len() {
         for j in 0..bins[i].len() {
             let sum0 = get_val_in_bin(bins, i as i32, j as i32, 0, 0);
@@ -1357,7 +1348,14 @@ fn get_occupied_no_cluster(
             }
         }
     }
+}
 
+fn mark_grid_three_column(
+    bins: &mut [Vec<Bin>],
+    frame_index: u128,
+    angle_found_occupied: &mut [bool],
+    args: &Args,
+) {
     for i in 0..bins.len() {
         for j in 0..bins[i].len() {
             let mut sum0 = get_val_in_bin(bins, i as i32, j as i32, 0, 0);
@@ -1412,6 +1410,17 @@ fn get_occupied_no_cluster(
             }
         }
     }
+}
+
+fn find_marked_bins(
+    bins: &[Vec<Bin>],
+    frame_index: u128,
+    args: &Args,
+) -> (Vec<ParsedPoint>, Vec<u8>, Vec<u8>) {
+    let mut grid_points = Vec::new();
+    let mut vision_class = Vec::new();
+    let mut fusion_class = Vec::new();
+
     let mut angle_found_marked = vec![false; bins.len()];
     for thresh in 0..=args.bin_delay {
         for i in 0..bins.len() {
@@ -1434,7 +1443,27 @@ fn get_occupied_no_cluster(
             }
         }
     }
+    (grid_points, vision_class, fusion_class)
+}
 
+/// Do a grid and highlight the grid based on point classes
+#[instrument(skip_all)]
+fn get_occupied_no_cluster(
+    header: Header,
+    points: &[ParsedPoint],
+    vision_class: &[u8],
+    fusion_class: &[u8],
+    bins: &mut [Vec<Bin>],
+    frame_index: u128,
+    args: &Args,
+) -> (ZBytes, Encoding) {
+    update_bins(points, vision_class, fusion_class, bins, args);
+
+    let mut angle_found_occupied = vec![false; bins.len()];
+    mark_grid_one_column(bins, frame_index, &mut angle_found_occupied, args);
+    mark_grid_three_column(bins, frame_index, &mut angle_found_occupied, args);
+
+    let (grid_points, vision_class, fusion_class) = find_marked_bins(bins, frame_index, args);
     let mut grid_pcd = PointCloud2 {
         header,
         height: 1,
