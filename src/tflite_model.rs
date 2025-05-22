@@ -7,16 +7,17 @@ use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     ffi::c_void,
     fs::read,
+    io,
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::io::OwnedFd,
     },
+    path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 use tflitec_sys::{
     delegate::Delegate,
-    tensor::{TensorMut, TensorType},
+    tensor::{Tensor, TensorMut, TensorType},
     Interpreter, TFLiteLib,
 };
 use tokio::sync::Mutex;
@@ -24,49 +25,157 @@ use tracing::{info_span, instrument};
 use tracy_client::secondary_frame_mark;
 use zenoh::{
     bytes::{Encoding, ZBytes},
+    handlers::FifoChannelHandler,
+    pubsub::Subscriber,
+    sample::Sample,
     Session,
 };
 
 use crate::{
     args::Args,
+    drain_recv,
     fusion_model::{apply_sigmoid, preprocess_cube},
     image::{Image, ImageManager, Rotation, RGBA},
-    Grid,
+    DrainRecvTimeoutSettings, Grid,
 };
 
 static NPU_PATH: &str = "libvx_delegate.so";
 
-pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
-    if args.model.is_none() {
+fn load_model(
+    model_name: Option<PathBuf>,
+    engine: String,
+    tflite_lib: &TFLiteLib,
+) -> Option<Interpreter<'_>> {
+    // let model_name = args.model.as_ref().unwrap().clone();
+    if model_name.is_none() {
         info!("No radar model was given");
-        return;
+        return None;
     }
-    let model_name = args.model.as_ref().unwrap().clone();
+    let model_name = model_name.unwrap();
     let model_data = match read(&model_name) {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open `{:?}` file: {:?}", model_name, e);
-            return;
+            return None;
         }
     };
 
     info!("Model read from file");
 
-    let tflite_lib = match TFLiteLib::new() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not open TFLite library: {e}");
-            return;
-        }
-    };
-
     let model = match tflite_lib.new_model_from_mem(model_data) {
         Ok(v) => v,
         Err(e) => {
             error!("Could not create TFLite model from {:?}: {e}", model_name);
-            return;
+            return None;
         }
     };
+
+    let mut builder = match tflite_lib.new_interpreter_builder() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while building backbone: {}", e);
+            return None;
+        }
+    };
+
+    if engine.to_lowercase() == "npu" {
+        info!("Using delegate {:?}", NPU_PATH);
+        let delegate = Delegate::load_external(NPU_PATH).unwrap();
+        builder.add_owned_delegate(delegate);
+    }
+
+    let backbone = match builder.build(&model) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while building backbone: {}", e);
+            return None;
+        }
+    };
+    Some(backbone)
+}
+
+fn identify_inputs(inputs: &[TensorMut]) -> (usize, Option<usize>) {
+    let mut radar_input_index = 0;
+    let mut camera_input_index = None;
+    for (i, inp) in inputs.iter().enumerate() {
+        debug!("found input: {:?}", inp);
+        if inp.name().contains("radar") {
+            radar_input_index = i;
+            debug!("setting radar input index to {}", i);
+        }
+        if inp.name().contains("camera") {
+            let _ = camera_input_index.insert(i);
+            debug!("setting camera input index to {}", i);
+        }
+    }
+    (radar_input_index, camera_input_index)
+}
+
+fn get_input_shape(inputs: &[TensorMut], input_index: Option<usize>) -> Result<Vec<usize>, String> {
+    if let Some(ref index) = input_index {
+        match inputs[*index].shape() {
+            Ok(v) => {
+                debug!("got input tensor shape: {:?}", v);
+                Ok(v)
+            }
+            Err(e) => {
+                error!("Could not get input shape: {}", e);
+                Err(e)
+            }
+        }
+    } else {
+        Ok(vec![1, 1, 1, 1])
+    }
+}
+
+fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), String> {
+    let img_mgr = match ImageManager::new() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open G2D: {:?}", e);
+            return Err(e.to_string());
+        }
+    };
+
+    let dest = match Image::new(
+        camera_input_shape[2] as u32,
+        camera_input_shape[1] as u32,
+        RGBA,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not alloc CMA heap: {:?}", e);
+            return Err(e.to_string());
+        }
+    };
+    Ok((img_mgr, dest))
+}
+
+pub async fn run_tflite_fusion_model(
+    session: Session,
+    args: Args,
+    grid: Arc<Mutex<Option<Grid>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if args.model.is_none() {
+        info!("No radar model was given");
+        return Err("No radar model was given".into());
+    }
+
+    let tflite_lib = match TFLiteLib::new() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open TFLite library: {e}");
+            return Err(e.into());
+        }
+    };
+
+    let mut backbone = load_model(args.model.clone(), args.engine.clone(), &tflite_lib).unwrap();
+    info!("TFLite context for backbone initialized");
+    let mut decoder = None;
+    if args.model_decoder.is_some() {
+        decoder = load_model(args.model_decoder.clone(), "cpu".to_string(), &tflite_lib);
+        info!("TFLite context for decoder initialized");
+    }
 
     let sub_radarcube = session
         .declare_subscriber(&args.radarcube_topic)
@@ -79,118 +188,26 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
         .await
         .unwrap();
 
-    let mut builder = match tflite_lib.new_interpreter_builder() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Error while building backbone: {}", e);
-            return;
-        }
-    };
-
-    if args.engine.to_lowercase() == "npu" {
-        info!("Using delegate {:?}", NPU_PATH);
-        let delegate = Delegate::load_external(NPU_PATH).unwrap();
-        builder.add_owned_delegate(delegate);
-    }
-    let mut backbone = match builder.build(&model) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Error while building backbone: {}", e);
-            return;
-        }
-    };
-
-    info!("TFLite context for backbone initialized");
-
-    let mut decoder = None;
-    if let Some(ref path) = args.model_decoder {
-        let model_name = path.clone();
-        let model_data = match read(&model_name) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not open `{:?}` file: {:?}", model_name, e);
-                return;
-            }
-        };
-        let model = match tflite_lib.new_model_from_mem(model_data) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not create TFLite model from {:?}: {e}", model_name);
-                return;
-            }
-        };
-        let builder = match tflite_lib.new_interpreter_builder() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while building decoder: {}", e);
-                return;
-            }
-        };
-        let decoder_ctx = match builder.build(&model) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while building decoder: {}", e);
-                return;
-            }
-        };
-        info!("TFLite context for decoder initialized");
-        let _ = decoder.insert(decoder_ctx);
-    }
-
-    let input_match = match get_input_match(&backbone, &decoder) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not match backbone outputs to decoder inputs: {}", e);
-            return;
-        }
-    };
-
-    let mut radar_input_index = 0;
-    let mut camera_input_index = None;
+    let input_match = get_input_match(&backbone, &decoder)?;
 
     let inputs = match backbone.inputs_mut() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not get backbone inputs: {}", e);
-            return;
+            return Err(e.into());
         }
     };
-    for (i, inp) in inputs.iter().enumerate() {
-        debug!("found input: {:?}", inp);
-        if inp.name().contains("radar") {
-            radar_input_index = i;
-            debug!("setting radar input index to {}", i);
-        }
-        if inp.name().contains("camera") {
-            let _ = camera_input_index.insert(i);
-            debug!("setting camera input index to {}", i);
-        }
-    }
-    let radar_input_shape: Vec<_> = match inputs[radar_input_index].shape() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not get input shape: {}", e);
-            return;
-        }
-    };
-    debug!("got input tensor shape: {:?}", radar_input_shape);
+    let (radar_input_index, camera_input_index) = identify_inputs(&inputs);
 
-    let camera_input_shape = if let Some(ref camera_input_index) = camera_input_index {
-        match inputs[*camera_input_index].shape() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not get input shape: {}", e);
-                return;
-            }
-        }
-    } else {
-        vec![1, 1, 1, 1]
-    };
+    let radar_input_shape: Vec<_> = get_input_shape(&inputs, Some(radar_input_index))?;
+
+    let camera_input_shape = get_input_shape(&inputs, camera_input_index)?;
     drop(inputs);
+
     // warmup the model. Tflite models load on first run, instead of on load.
     if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
         error!("Failed to run model: {}", e);
-        return;
+        return Err(e.into());
     }
 
     let sub_camera = if camera_input_index.is_some() {
@@ -204,48 +221,14 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
         None
     };
 
-    let img_mgr = match ImageManager::new() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not open G2D: {:?}", e);
-            return;
-        }
-    };
+    let (img_mgr, mut dest) = initialize_g2d(&camera_input_shape)?;
 
-    let mut dest = match Image::new(
-        camera_input_shape[2] as u32,
-        camera_input_shape[1] as u32,
-        RGBA,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not alloc CMA heap: {:?}", e);
-            return;
-        }
-    };
-
-    let timeout = Duration::from_millis(2000);
+    let mut timeout_radarcube = DrainRecvTimeoutSettings::default();
+    let mut timeout_camera = DrainRecvTimeoutSettings::default();
     loop {
-        let sample = if let Some(v) = sub_radarcube.drain().last() {
-            v
-        } else {
-            match sub_radarcube.recv_timeout(timeout) {
-                Ok(v) => match v {
-                    Some(v) => v,
-                    None => {
-                        warn!("timeout on radar cube");
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    error!(
-                        "error receiving radar cube on {}: {:?}",
-                        sub_radarcube.key_expr(),
-                        e
-                    );
-                    continue;
-                }
-            }
+        let sample = match drain_recv(&sub_radarcube, &mut timeout_radarcube).await {
+            Some(v) => v,
+            None => continue,
         };
 
         let radarcube = info_span!("cube_deserialize")
@@ -261,7 +244,7 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
             Ok(v) => v,
             Err(e) => {
                 error!("Error while getting inputs of backbone: {:?}", e);
-                return;
+                return Err(e.into());
             }
         };
 
@@ -280,87 +263,22 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
 
         if camera_input_index.is_some() {
             let camera_input_tensor = &mut backbone_inputs[camera_input_index.unwrap()];
-
             let sub_camera = sub_camera.as_ref().unwrap();
-            let sample = if let Some(v) = sub_camera.drain().last() {
-                v
-            } else {
-                match sub_camera.recv_timeout(timeout) {
-                    Ok(v) => match v {
-                        Some(v) => v,
-                        None => {
-                            warn!("timeout on camera frame");
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        error!(
-                            "error receiving camera frame on {}: {:?}",
-                            sub_camera.key_expr(),
-                            e
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let mut cam_buffer: DmaBuf = match cdr::deserialize(&sample.payload().to_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    continue;
-                }
-            };
-
-            let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                        "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                        cam_buffer.pid, e
-                    );
-                    continue;
-                }
-            };
-            let fd = match get_file_from_pidfd(
-                pidfd.as_raw_fd(),
-                cam_buffer.fd,
-                GetFdFlags::empty(),
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-                            e
-                        );
-                    continue;
-                }
-            };
-
-            cam_buffer.fd = fd.as_raw_fd();
-            trace!("Updated dma fd to {}", cam_buffer.fd);
-
-            match load_frame_dmabuf(
+            load_camera_frame(
                 camera_input_tensor,
+                sub_camera,
+                &mut timeout_camera,
                 &img_mgr,
                 &mut dest,
-                &cam_buffer,
-                Preprocessing::UnsignedNorm,
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Error loading camera frame into input: {:?}", e);
-                    continue;
-                }
-            }
-            trace!("finished load_frame_dmabuf");
+            )
+            .await;
         }
 
         drop(backbone_inputs);
 
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
-            return;
+            return Err(e.into());
         }
 
         let output_ctx = match decoder {
@@ -368,27 +286,11 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
             None => &backbone,
         };
 
-        let mut output_shape: Vec<usize> = vec![0, 0, 0, 0];
+        let outputs = output_ctx.outputs()?;
+
+        let (mask, output_shape) = get_model_output(&outputs, args.logits);
+
         let (mask, buf, enc) = info_span!("publish_output").in_scope(|| {
-            let outputs = output_ctx.outputs().unwrap();
-
-            let mut mask = if !outputs.is_empty() {
-                let tensor = &outputs[0];
-                output_shape = tensor.shape().unwrap();
-                let data = tensor.mapro().unwrap();
-                let len = data.len();
-                let mut buffer = vec![0.0f32; len];
-                buffer.copy_from_slice(data);
-                buffer
-            } else {
-                error!("Did not find model output");
-                Vec::new()
-            };
-
-            if args.logits {
-                apply_sigmoid(&mut mask);
-            }
-
             let msg = Mask {
                 height: output_shape[1] as u32,
                 width: output_shape[2] as u32,
@@ -414,15 +316,8 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
 
         publ_mask.put(buf).encoding(enc).await.unwrap();
 
-        let mut occupied_ = mask.into_iter();
-        let mut occupied = Vec::new();
-        for i in 0..output_shape[1] {
-            occupied.push(Vec::new());
-            for _ in 0..output_shape[2] {
-                let item = occupied_.next().unwrap();
-                occupied[i].push(item)
-            }
-        }
+        let occupied = build_occupancy_grid(&mask, &output_shape);
+
         let timestamp = radarcube.header.stamp.nanosec as u64
             + radarcube.header.stamp.sec as u64 * 1_000_000_000;
         let mut guard = grid.lock().await;
@@ -430,6 +325,71 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
 
         args.tracy.then(|| secondary_frame_mark!("model"));
     }
+}
+
+fn build_occupancy_grid(mask: &[f32], output_shape: &[usize]) -> Vec<Vec<f32>> {
+    let mut occupied_ = mask.iter();
+    let mut occupied = Vec::new();
+    for i in 0..output_shape[1] {
+        occupied.push(Vec::new());
+        for _ in 0..output_shape[2] {
+            let item = occupied_.next().unwrap();
+            occupied[i].push(*item)
+        }
+    }
+    occupied
+}
+
+#[instrument(skip_all)]
+fn get_model_output(outputs: &[Tensor], logits: bool) -> (Vec<f32>, Vec<usize>) {
+    let mut output_shape: Vec<usize> = vec![0, 0, 0, 0];
+    let mut mask = if !outputs.is_empty() {
+        let tensor = &outputs[0];
+        output_shape = tensor.shape().unwrap();
+        let data = tensor.mapro().unwrap();
+        let len = data.len();
+        let mut buffer = vec![0.0f32; len];
+        buffer.copy_from_slice(data);
+        buffer
+    } else {
+        error!("Did not find model output");
+        Vec::new()
+    };
+
+    if logits {
+        apply_sigmoid(&mut mask);
+    }
+
+    (mask, output_shape)
+}
+
+#[instrument(skip_all)]
+fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<(), io::Error> {
+    let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                cam_buffer.pid, e
+            );
+            return Err(e);
+        }
+    };
+
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), cam_buffer.fd, GetFdFlags::empty()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
+            e
+            );
+            return Err(e);
+        }
+    };
+
+    cam_buffer.fd = fd.as_raw_fd();
+    trace!("Updated dma fd to {}", cam_buffer.fd);
+    Ok(())
 }
 
 fn get_input_match(
@@ -443,6 +403,7 @@ fn get_input_match(
     let backbone_outputs = backbone.outputs()?;
     let decoder_inputs = decoder.inputs_mut()?;
     if backbone_outputs.len() != decoder_inputs.len() {
+        error!("backbone output count and decoder input count are not equal");
         return Err("backbone output count and decoder input count are not equal".to_string());
     }
     let mut matching = Vec::new();
@@ -458,6 +419,10 @@ fn get_input_match(
             }
         }
         if !found {
+            error!(
+                "could not find matching decoder input for backbone output with shape {}",
+                bb_out
+            );
             return Err(format!(
                 "could not find matching decoder input for backbone output with shape {}",
                 bb_out
@@ -507,6 +472,41 @@ fn run_model(
         }
     }
     decoder.invoke()
+}
+
+#[instrument(skip_all)]
+async fn load_camera_frame(
+    camera_input_tensor: &mut TensorMut<'_>,
+    sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
+    timeout_camera: &mut DrainRecvTimeoutSettings,
+    img_mgr: &ImageManager,
+    dest: &mut Image,
+) {
+    let sample = match drain_recv(sub_camera, timeout_camera).await {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut cam_buffer = info_span!("camera_deserialize")
+        .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
+
+    if process_dmabuffer(&mut cam_buffer).is_err() {
+        return;
+    }
+    match info_span!("camera_load").in_scope(|| {
+        load_frame_dmabuf(
+            camera_input_tensor,
+            img_mgr,
+            dest,
+            &cam_buffer,
+            Preprocessing::UnsignedNorm,
+        )
+    }) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Error loading camera frame into input: {:?}", e);
+        }
+    }
 }
 
 #[allow(dead_code)]

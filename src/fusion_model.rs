@@ -42,7 +42,7 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
     match model_name.extension() {
         Some(v) if v.eq_ignore_ascii_case("tflite") => {
             info!("Using TFLite model type for {:?}", model_name);
-            run_tflite_fusion_model(session, args, grid).await;
+            let _ = run_tflite_fusion_model(session, args, grid).await;
         }
         Some(v) if v.eq_ignore_ascii_case("rtm") => {
             info!("Using RTM model type for {:?}", model_name);
