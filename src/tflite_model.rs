@@ -210,16 +210,15 @@ pub async fn run_tflite_fusion_model(
         return Err(e.into());
     }
 
-    let sub_camera = if camera_input_index.is_some() {
+    let mut sub_camera = None;
+    if camera_input_index.is_some() {
         let s = session
             .declare_subscriber(&args.camera_topic)
             .await
             .unwrap();
         info!("Declared subscriber on {:?}", &args.camera_topic);
-        Some(s)
-    } else {
-        None
-    };
+        let _ = sub_camera.insert(s);
+    }
 
     let (img_mgr, mut dest) = initialize_g2d(&camera_input_shape)?;
 

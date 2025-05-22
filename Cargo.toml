@@ -73,5 +73,5 @@ tracy-client = { version = "0.18.0", default-features = false, features = [
 ] }
 uuid = { version = "1.16.0", features = ["v4"] }
 videostream = "0.9.1"
-zenoh = "1.2.1"
+zenoh = "1.4.0"
 zstd = { version = "0.13.3", features = ["experimental"] }

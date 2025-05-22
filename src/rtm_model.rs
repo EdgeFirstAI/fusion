@@ -194,16 +194,15 @@ pub async fn run_rtm_fusion_model(
         .unwrap();
     info!("Declared subscriber on {:?}", &args.radarcube_topic);
 
-    let sub_camera = if camera_input_index.is_some() {
+    let mut sub_camera = None;
+    if camera_input_index.is_some() {
         let s = session
             .declare_subscriber(&args.camera_topic)
             .await
             .unwrap();
         info!("Declared subscriber on {:?}", &args.camera_topic);
-        Some(s)
-    } else {
-        None
-    };
+        let _ = sub_camera.insert(s);
+    }
 
     let publ_mask = match session
         .declare_publisher(args.model_output_topic.clone())
