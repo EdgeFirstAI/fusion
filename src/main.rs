@@ -778,12 +778,10 @@ fn grid_nearest_cluster(
     let mut min_point_ind = 0;
     for b in fusion_predictions {
         for (ind, p) in points.iter().enumerate() {
-            if p.id.is_none() {
+            if p.id.is_none_or(|id| id == 0) {
                 continue;
             }
-            if p.id.unwrap() == 0 {
-                continue;
-            }
+
             let dist2 = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
             if dist2 < min_dist2 {
                 min_dist2 = dist2;
@@ -819,23 +817,27 @@ fn late_fusion_no_cluster(projection: &[[f32; 2]], mask: &Mask, point_radius: f3
     };
 
     let mut class = vec![0; projection.len()];
-    if point_radius <= 0.0 {
-        for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
-            if !(0.0..1.0).contains(x) || !(0.0..1.0).contains(y) {
-                continue;
-            }
-            *class = index_mask(*x, *y);
+    for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
+        if !check_in_bounds(x, y) {
+            continue;
         }
+        *class = index_mask(*x, *y);
+    }
+
+    if point_radius <= 0.0 {
         return class;
     }
+
     for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
+        if *class != 0 {
+            continue;
+        }
         // first do the center of the point, then 8 points around circumference
         // negative -45 represetns the center
-        for angle in (-45..360).step_by(45) {
-            let range = if angle < 0 { 0.0 } else { point_radius };
-            let new_x = *x + (range * (angle as f32).to_radians().sin());
-            let new_y = *y + (range * (angle as f32).to_radians().cos());
-            if !(0.0..1.0).contains(&new_y) || !(0.0..1.0).contains(&new_x) {
+        for angle in (0..360).step_by(45) {
+            let new_x = *x + (point_radius * (angle as f32).to_radians().sin());
+            let new_y = *y + (point_radius * (angle as f32).to_radians().cos());
+            if !check_in_bounds(&new_x, &new_y) {
                 continue;
             }
             let argmax = index_mask(new_x, new_y);
@@ -846,6 +848,10 @@ fn late_fusion_no_cluster(projection: &[[f32; 2]], mask: &Mask, point_radius: f3
         }
     }
     class
+}
+
+fn check_in_bounds(x: &f32, y: &f32) -> bool {
+    (0.0..1.0).contains(x) && (0.0..1.0).contains(y)
 }
 
 /// For each mask instance, (found using flood fill of the mask), find the most
