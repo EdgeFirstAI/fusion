@@ -8,10 +8,7 @@ use std::{
     ffi::c_void,
     fs::{read, File},
     io,
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::io::OwnedFd,
-    },
+    os::fd::AsRawFd,
     path::PathBuf,
     sync::Arc,
 };
@@ -34,7 +31,7 @@ use zenoh::{
 use crate::{
     args::Args,
     drain_recv,
-    fusion_model::{apply_sigmoid, preprocess_cube},
+    fusion_model::{apply_sigmoid, preprocess_cube, FusionError},
     image::{Image, ImageManager, Rotation, RGBA},
     DrainRecvTimeoutSettings, Grid,
 };
@@ -114,7 +111,10 @@ fn identify_inputs(inputs: &[TensorMut]) -> (usize, Option<usize>) {
 }
 
 #[instrument(skip_all)]
-fn get_input_shape(inputs: &[TensorMut], input_index: Option<usize>) -> Result<Vec<usize>, String> {
+fn get_input_shape(
+    inputs: &[TensorMut],
+    input_index: Option<usize>,
+) -> Result<Vec<usize>, FusionError> {
     if let Some(ref index) = input_index {
         match inputs[*index].shape() {
             Ok(v) => {
@@ -123,7 +123,7 @@ fn get_input_shape(inputs: &[TensorMut], input_index: Option<usize>) -> Result<V
             }
             Err(e) => {
                 error!("Could not get input shape: {}", e);
-                Err(e)
+                Err(e.into())
             }
         }
     } else {
@@ -132,12 +132,12 @@ fn get_input_shape(inputs: &[TensorMut], input_index: Option<usize>) -> Result<V
 }
 
 #[instrument(skip_all)]
-fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), String> {
+fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), FusionError> {
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open G2D: {:?}", e);
-            return Err(e.to_string());
+            return Err(e.to_string().into());
         }
     };
 
@@ -149,7 +149,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
         Ok(v) => v,
         Err(e) => {
             error!("Could not alloc CMA heap: {:?}", e);
-            return Err(e.to_string());
+            return Err(e.to_string().into());
         }
     };
     Ok((img_mgr, dest))
@@ -160,7 +160,7 @@ pub async fn run_tflite_fusion_model(
     session: Session,
     args: Args,
     grid: Arc<Mutex<Option<Grid>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), FusionError> {
     if args.model.is_none() {
         info!("No radar model was given");
         return Err("No radar model was given".into());
@@ -200,7 +200,7 @@ pub async fn run_tflite_fusion_model(
     // warmup the model. Tflite models load on first run, instead of on load.
     if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
         error!("Failed to run model: {}", e);
-        return Err(e.into());
+        return Err(e);
     }
 
     let sub_radarcube = session
@@ -264,7 +264,7 @@ pub async fn run_tflite_fusion_model(
 
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {}", e);
-            return Err(e.into());
+            return Err(e);
         }
 
         let output_ctx = match decoder {
@@ -396,7 +396,7 @@ fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
 fn get_input_match(
     backbone: &Interpreter,
     decoder: &Option<Interpreter>,
-) -> Result<Vec<(usize, usize)>, String> {
+) -> Result<Vec<(usize, usize)>, FusionError> {
     if decoder.is_none() {
         return Ok(Vec::new());
     }
@@ -405,7 +405,7 @@ fn get_input_match(
     let decoder_inputs = decoder.inputs_mut()?;
     if backbone_outputs.len() != decoder_inputs.len() {
         error!("backbone output count and decoder input count are not equal");
-        return Err("backbone output count and decoder input count are not equal".to_string());
+        return Err("backbone output count and decoder input count are not equal".into());
     }
     let mut matching = Vec::new();
     for (bb_out, outp) in backbone_outputs.iter().enumerate() {
@@ -427,7 +427,8 @@ fn get_input_match(
             return Err(format!(
                 "could not find matching decoder input for backbone output with shape {}",
                 bb_out
-            ));
+            )
+            .into());
         }
     }
 
@@ -439,7 +440,7 @@ fn run_model(
     backbone: &mut Interpreter,
     decoder: &mut Option<Interpreter>,
     input_match: &[(usize, usize)],
-) -> Result<(), String> {
+) -> Result<(), FusionError> {
     backbone.invoke()?;
     if decoder.is_none() {
         return Ok(());
@@ -453,14 +454,14 @@ fn run_model(
             Ok(v) => v,
             Err(e) => {
                 error!("Could not map output tensor from backbone");
-                return Err(e);
+                return Err(e.into());
             }
         };
         let input_map = match input.maprw::<u8>() {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not map input tensor from decoder");
-                return Err(e);
+                return Err(e.into());
             }
         };
         // TODO: what happens if the types are different?
@@ -472,7 +473,7 @@ fn run_model(
             );
         }
     }
-    decoder.invoke()
+    Ok(decoder.invoke()?)
 }
 
 #[instrument(skip_all)]
@@ -488,13 +489,9 @@ async fn load_camera_frame(
         None => return,
     };
 
-    let mut cam_buffer = info_span!("camera_deserialize")
+    let cam_buffer = info_span!("camera_deserialize")
         .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
 
-    let _fd = match process_dmabuffer(&mut cam_buffer) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
     match load_frame_dmabuf(
         camera_input_tensor,
         img_mgr,
@@ -527,30 +524,23 @@ fn load_frame_dmabuf(
     dest: &mut Image,
     dma_buf: &DmaBuf,
     preprocess: Preprocessing,
-) -> Result<(), String> {
+) -> Result<(), FusionError> {
     if dest.height() as usize != tensor.shape()?[1] {
         return Err(
-            "The height of the destination buffer is not equal to the height of the tensor"
-                .to_owned(),
+            "The height of the destination buffer is not equal to the height of the tensor".into(),
         );
     }
     if dest.width() as usize != tensor.shape()?[2] {
         return Err(
-            "The width of the destination buffer is not equal to the width of the tensor"
-                .to_owned(),
+            "The width of the destination buffer is not equal to the width of the tensor".into(),
         );
     }
     if dest.format() != RGBA {
-        return Err("The format of destination buffer is not RGBA".to_owned());
+        return Err("The format of destination buffer is not RGBA".into());
     }
     const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
 
-    let input = Image::new_preallocated(
-        unsafe { OwnedFd::from_raw_fd(dma_buf.fd) },
-        dma_buf.width,
-        dma_buf.height,
-        dma_buf.fourcc.into(),
-    );
+    let input = dma_buf.try_into()?;
     match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {
@@ -569,7 +559,8 @@ fn load_frame_dmabuf(
         _ => {
             return Err(format!(
                 "Input tensor has an invalid number of channels for images: {tensor_channels}"
-            ))
+            )
+            .into())
         }
     }
     load_input(
@@ -591,7 +582,7 @@ fn load_input(
     tensor_vol: usize,
     tensor_channels: usize,
     preprocess: Preprocessing,
-) -> Result<(), String> {
+) -> Result<(), FusionError> {
     match tensor.tensor_type() {
         TensorType::UInt8 => {
             load_input_u8(dest, data_channels, tensor, tensor_vol, tensor_channels)?
@@ -636,11 +627,8 @@ fn load_input_u8(
     tensor: &mut TensorMut,
     tensor_vol: usize,
     tensor_channels: usize,
-) -> Result<(), String> {
-    let tensor_mapped = match tensor.maprw() {
-        Ok(v) => v,
-        Err(e) => return Err(e.to_string()),
-    };
+) -> Result<(), FusionError> {
+    let tensor_mapped = tensor.maprw()?;
     let mut dest_mapped = dest.mmap();
     let data = dest_mapped.as_slice_mut();
     if tensor_channels == data_channels {
@@ -662,11 +650,8 @@ fn load_input_i8(
     tensor: &mut TensorMut,
     tensor_vol: usize,
     tensor_channels: usize,
-) -> Result<(), String> {
-    let tensor_mapped = match tensor.maprw() {
-        Ok(v) => v,
-        Err(e) => return Err(e.to_string()),
-    };
+) -> Result<(), FusionError> {
+    let tensor_mapped = tensor.maprw()?;
 
     let mut dest_mapped = dest.mmap();
     let data = dest_mapped.as_slice_mut();
@@ -687,11 +672,8 @@ fn load_input_f32(
     tensor_vol: usize,
     tensor_channels: usize,
     preprocess: Preprocessing,
-) -> Result<(), String> {
-    let tensor_mapped = match tensor.maprw() {
-        Ok(v) => v,
-        Err(e) => return Err(e.to_string()),
-    };
+) -> Result<(), FusionError> {
+    let tensor_mapped = tensor.maprw()?;
     let mut dest_mapped = dest.mmap();
     let data = dest_mapped.as_slice_mut();
     for i in 0..tensor_vol / tensor_channels {

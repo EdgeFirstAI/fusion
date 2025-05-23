@@ -5,9 +5,12 @@ use ndarray::{
 };
 use std::{
     f32::consts::E,
+    io,
     sync::Arc,
     thread::{self, JoinHandle},
 };
+use tflitec_sys::{LibloadingError, TfLiteError};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::Session;
@@ -113,6 +116,32 @@ fn normalize_cube(cube: &[i16]) -> Vec<f32> {
 pub(crate) fn apply_sigmoid(mask: &mut [f32]) {
     for v in mask.iter_mut() {
         *v = v.exp() / (1.0 + v.exp())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum FusionError {
+    #[error("{0}")]
+    String(String),
+    #[error("TfLite Error: {0:?}")]
+    TfLite(#[from] TfLiteError),
+    #[error("Rtm Error: {0:?}")]
+    Rtm(#[from] deepviewrt::error::Error),
+    #[error("LibLoading Error: {0:?}")]
+    LibLoading(#[from] LibloadingError),
+    #[error("IO Error: {0:?}")]
+    Io(#[from] io::Error),
+}
+
+impl From<String> for FusionError {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for FusionError {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
     }
 }
 

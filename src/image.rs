@@ -1,6 +1,8 @@
+use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
+use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
 use g2d_sys::{
     g2d as g2d_library, g2d_buf, g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_180,
     g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90, g2d_surface, G2DFormat,
@@ -8,6 +10,7 @@ use g2d_sys::{
 };
 use libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
 use log::warn;
+use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     error::Error,
     ffi::c_void,
@@ -431,6 +434,23 @@ impl TryFrom<&Image> for Frame {
             Err(e) => return Err(e),
         }
         Ok(frame)
+    }
+}
+
+impl TryFrom<&DmaBufMsg> for Image {
+    type Error = io::Error;
+
+    fn try_from(dma_buf: &DmaBufMsg) -> Result<Self, io::Error> {
+        let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
+        let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
+        let fourcc = dma_buf.fourcc.into();
+        // println!("src fourcc: {:?}", fourcc);
+        Ok(Image {
+            fd: fd.into(),
+            width: dma_buf.width,
+            height: dma_buf.height,
+            format: fourcc,
+        })
     }
 }
 

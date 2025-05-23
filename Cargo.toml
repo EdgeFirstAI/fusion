@@ -49,6 +49,7 @@ ndarray = { version = "0.16.1", features = ["rayon"] }
 pidfd_getfd = "0.2.2"
 serde_json = "1.0.140"
 tflitec-sys = { path = "./tflitec-sys" }
+thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = [
     "rt-multi-thread",
     "time",

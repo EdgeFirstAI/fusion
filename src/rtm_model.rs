@@ -11,14 +11,10 @@ use libc::memcpy;
 use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
-    error::Error,
     ffi::c_void,
     fs::{read, File},
     io,
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::io::OwnedFd,
-    },
+    os::fd::AsRawFd,
     path::PathBuf,
     sync::Arc,
 };
@@ -35,7 +31,7 @@ use zenoh::{
 use crate::{
     args::Args,
     drain_recv,
-    fusion_model::{apply_sigmoid, preprocess_cube},
+    fusion_model::{apply_sigmoid, preprocess_cube, FusionError},
     image::{Image, ImageManager, Rotation, RGBA},
     DrainRecvTimeoutSettings, Grid,
 };
@@ -102,7 +98,7 @@ fn get_camera_input(
     backbone: &Context,
     input_tensor_index: &[u32],
     camera_input_index: Option<usize>,
-) -> Result<(Option<Tensor>, Vec<usize>), String> {
+) -> Result<(Option<Tensor>, Vec<usize>), FusionError> {
     let mut camera_input_tensor = None;
     if let Some(camera_input_index) = camera_input_index {
         match backbone.tensor_index(input_tensor_index[camera_input_index] as usize) {
@@ -120,7 +116,8 @@ fn get_camera_input(
                 return Err(format!(
                     "Could not get input {} from model: {:?}",
                     camera_input_index, e
-                ));
+                )
+                .into());
             }
         }
     }
@@ -136,12 +133,12 @@ fn get_camera_input(
 }
 
 #[instrument(skip_all)]
-fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), String> {
+fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), FusionError> {
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not open G2D: {:?}", e);
-            return Err(e.to_string());
+            return Err(e.to_string().into());
         }
     };
 
@@ -153,7 +150,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
         Ok(v) => v,
         Err(e) => {
             error!("Could not alloc CMA heap: {:?}", e);
-            return Err(e.to_string());
+            return Err(e.to_string().into());
         }
     };
     Ok((img_mgr, dest))
@@ -164,7 +161,7 @@ pub async fn run_rtm_fusion_model(
     session: Session,
     args: Args,
     grid: Arc<Mutex<Option<Grid>>>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), FusionError> {
     let mut backbone = load_model(args.model.clone(), args.engine.clone()).unwrap();
 
     let mut decoder = None;
@@ -219,7 +216,7 @@ pub async fn run_rtm_fusion_model(
                 "Error while declaring detection publisher {}: {:?}",
                 &args.model_output_topic, e
             );
-            return Err(e);
+            return Err(e.to_string().into());
         }
     };
 
@@ -375,13 +372,9 @@ async fn load_camera_frame(
         None => return,
     };
 
-    let mut cam_buffer = info_span!("camera_deserialize")
+    let cam_buffer = info_span!("camera_deserialize")
         .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
 
-    let _fd = match process_dmabuffer(&mut cam_buffer) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
     match info_span!("camera_load").in_scope(|| {
         load_frame_dmabuf(
             camera_input_tensor,
@@ -546,30 +539,23 @@ fn load_frame_dmabuf(
     dest: &mut Image,
     dma_buf: &DmaBuf,
     preprocess: Preprocessing,
-) -> Result<(), String> {
+) -> Result<(), FusionError> {
     if dest.height() as i32 != tensor.shape()[1] {
         return Err(
-            "The height of the destination buffer is not equal to the height of the tensor"
-                .to_owned(),
+            "The height of the destination buffer is not equal to the height of the tensor".into(),
         );
     }
     if dest.width() as i32 != tensor.shape()[2] {
         return Err(
-            "The width of the destination buffer is not equal to the width of the tensor"
-                .to_owned(),
+            "The width of the destination buffer is not equal to the width of the tensor".into(),
         );
     }
     if dest.format() != RGBA {
-        return Err("The format of destination buffer is not RGBA".to_owned());
+        return Err("The format of destination buffer is not RGBA".into());
     }
     const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
 
-    let input = Image::new_preallocated(
-        unsafe { OwnedFd::from_raw_fd(dma_buf.fd) },
-        dma_buf.width,
-        dma_buf.height,
-        dma_buf.fourcc.into(),
-    );
+    let input = dma_buf.try_into()?;
     match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {
@@ -588,7 +574,8 @@ fn load_frame_dmabuf(
         _ => {
             return Err(format!(
                 "Input tensor has an invalid number of channels for images: {tensor_channels}"
-            ))
+            )
+            .into())
         }
     }
     load_input(

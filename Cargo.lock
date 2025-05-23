@@ -1526,6 +1526,7 @@ dependencies = [
  "pidfd_getfd",
  "serde_json",
  "tflitec-sys",
+ "thiserror 2.0.12",
  "tokio",
  "tracing",
  "tracing-journald",
@@ -3001,7 +3002,6 @@ dependencies = [
 name = "tflitec-sys"
 version = "1.0.0"
 dependencies = [
- "libc",
  "libloading",
  "log",
  "num",
