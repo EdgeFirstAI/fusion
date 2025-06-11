@@ -140,6 +140,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
             return Err(e.to_string().into());
         }
     };
+    info!("Opened G2D with version {}", img_mgr.version());
 
     let dest = match Image::new(
         camera_input_shape[2] as u32,
