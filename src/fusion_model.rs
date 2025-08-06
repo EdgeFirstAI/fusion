@@ -5,9 +5,12 @@ use ndarray::{
 };
 use std::{
     f32::consts::E,
+    io,
     sync::Arc,
-    thread::{self},
+    thread::{self, JoinHandle},
 };
+use tflitec_sys::{LibloadingError, TfLiteError};
+use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::Session;
@@ -16,7 +19,11 @@ use crate::{
     args::Args, rtm_model::run_rtm_fusion_model, tflite_model::run_tflite_fusion_model, Grid,
 };
 
-pub fn spawn_fusion_model_thread(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
+pub fn spawn_fusion_model_thread(
+    session: Session,
+    args: Args,
+    grid: Arc<Mutex<Option<Grid>>>,
+) -> JoinHandle<()> {
     thread::Builder::new()
         .name("model".to_string())
         .spawn(move || {
@@ -26,7 +33,7 @@ pub fn spawn_fusion_model_thread(session: Session, args: Args, grid: Arc<Mutex<O
                 .unwrap()
                 .block_on(run_fusion_model(session, args, grid));
         })
-        .unwrap();
+        .unwrap()
 }
 
 pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
@@ -37,18 +44,18 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
     let model_name = args.model.as_ref().unwrap().clone();
     match model_name.extension() {
         Some(v) if v.eq_ignore_ascii_case("tflite") => {
-            info!("Using TFLite model type for {:?}", model_name);
-            run_tflite_fusion_model(session, args, grid).await;
+            info!("Using TFLite model type for {model_name:?}");
+            let _ = run_tflite_fusion_model(session, args, grid).await;
         }
         Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            info!("Using RTM model type for {:?}", model_name);
-            run_rtm_fusion_model(session, args, grid).await;
+            info!("Using RTM model type for {model_name:?}");
+            let _ = run_rtm_fusion_model(session, args, grid).await;
         }
         Some(_) => {
-            error!("Unknown model type extension for {:?}", model_name);
+            error!("Unknown model type extension for {model_name:?}");
         }
         None => {
-            error!("No extension for {:?}", model_name);
+            error!("No extension for {model_name:?}");
         }
     }
 }
@@ -109,6 +116,32 @@ fn normalize_cube(cube: &[i16]) -> Vec<f32> {
 pub(crate) fn apply_sigmoid(mask: &mut [f32]) {
     for v in mask.iter_mut() {
         *v = v.exp() / (1.0 + v.exp())
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum FusionError {
+    #[error("{0}")]
+    String(String),
+    #[error("TfLite Error: {0:?}")]
+    TfLite(#[from] TfLiteError),
+    #[error("Rtm Error: {0:?}")]
+    Rtm(#[from] deepviewrt::error::Error),
+    #[error("LibLoading Error: {0:?}")]
+    LibLoading(#[from] LibloadingError),
+    #[error("IO Error: {0:?}")]
+    Io(#[from] io::Error),
+}
+
+impl From<String> for FusionError {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for FusionError {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
     }
 }
 

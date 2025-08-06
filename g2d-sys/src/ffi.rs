@@ -11,6 +11,11 @@ pub const g2d_format_G2D_ABGR8888: g2d_format = 7;
 pub const g2d_format_G2D_XRGB8888: g2d_format = 8;
 pub const g2d_format_G2D_XBGR8888: g2d_format = 9;
 pub const g2d_format_G2D_RGB888: g2d_format = 10;
+pub const g2d_format_G2D_BGR888: g2d_format = 11;
+pub const g2d_format_G2D_RGBA5551: g2d_format = 12;
+pub const g2d_format_G2D_RGBX5551: g2d_format = 13;
+pub const g2d_format_G2D_BGRA5551: g2d_format = 14;
+pub const g2d_format_G2D_BGRX5551: g2d_format = 15;
 pub const g2d_format_G2D_NV12: g2d_format = 20;
 pub const g2d_format_G2D_I420: g2d_format = 21;
 pub const g2d_format_G2D_YV12: g2d_format = 22;
@@ -21,7 +26,6 @@ pub const g2d_format_G2D_UYVY: g2d_format = 26;
 pub const g2d_format_G2D_VYUY: g2d_format = 27;
 pub const g2d_format_G2D_NV16: g2d_format = 28;
 pub const g2d_format_G2D_NV61: g2d_format = 29;
-pub const g2d_format_G2D_YUV4: g2d_format = 30;
 pub type g2d_format = ::std::os::raw::c_uint;
 pub const g2d_blend_func_G2D_ZERO: g2d_blend_func = 0;
 pub const g2d_blend_func_G2D_ONE: g2d_blend_func = 1;
@@ -39,13 +43,17 @@ pub const g2d_cap_mode_G2D_BLEND_DIM: g2d_cap_mode = 3;
 pub const g2d_cap_mode_G2D_BLUR: g2d_cap_mode = 4;
 pub const g2d_cap_mode_G2D_YUV_BT_601: g2d_cap_mode = 5;
 pub const g2d_cap_mode_G2D_YUV_BT_709: g2d_cap_mode = 6;
-pub const g2d_cap_mode_G2D_WARP: g2d_cap_mode = 7;
+pub const g2d_cap_mode_G2D_YUV_BT_601FR: g2d_cap_mode = 7;
+pub const g2d_cap_mode_G2D_YUV_BT_709FR: g2d_cap_mode = 8;
+pub const g2d_cap_mode_G2D_WARPING: g2d_cap_mode = 9;
 pub type g2d_cap_mode = ::std::os::raw::c_uint;
 pub const g2d_feature_G2D_SCALING: g2d_feature = 0;
 pub const g2d_feature_G2D_ROTATION: g2d_feature = 1;
 pub const g2d_feature_G2D_SRC_YUV: g2d_feature = 2;
 pub const g2d_feature_G2D_DST_YUV: g2d_feature = 3;
 pub const g2d_feature_G2D_MULTI_SOURCE_BLT: g2d_feature = 4;
+pub const g2d_feature_G2D_FAST_CLEAR: g2d_feature = 5;
+pub const g2d_feature_G2D_WARP_DEWARP: g2d_feature = 6;
 pub type g2d_feature = ::std::os::raw::c_uint;
 pub const g2d_rotation_G2D_ROTATION_0: g2d_rotation = 0;
 pub const g2d_rotation_G2D_ROTATION_90: g2d_rotation = 1;
@@ -61,11 +69,12 @@ pub type g2d_cache_mode = ::std::os::raw::c_uint;
 pub const g2d_hardware_type_G2D_HARDWARE_2D: g2d_hardware_type = 0;
 pub const g2d_hardware_type_G2D_HARDWARE_VG: g2d_hardware_type = 1;
 pub type g2d_hardware_type = ::std::os::raw::c_uint;
+pub type g2d_phys_addr_t = ::std::os::raw::c_int;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct g2d_surface {
     pub format: g2d_format,
-    pub planes: [::std::os::raw::c_int; 3usize],
+    pub planes: [g2d_phys_addr_t; 3usize],
     pub left: ::std::os::raw::c_int,
     pub top: ::std::os::raw::c_int,
     pub right: ::std::os::raw::c_int,
@@ -467,7 +476,6 @@ impl g2d {
         let library = ::libloading::Library::new(path)?;
         Self::from_library(library)
     }
-
     pub unsafe fn from_library<L>(library: L) -> Result<Self, ::libloading::Error>
     where
         L: Into<::libloading::Library>,
@@ -517,7 +525,6 @@ impl g2d {
             g2d_finish,
         })
     }
-
     pub unsafe fn g2d_open(
         &self,
         handle: *mut *mut ::std::os::raw::c_void,
@@ -527,14 +534,12 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle)
     }
-
     pub unsafe fn g2d_close(&self, handle: *mut ::std::os::raw::c_void) -> ::std::os::raw::c_int {
         (self
             .g2d_close
             .as_ref()
             .expect("Expected function, got error."))(handle)
     }
-
     pub unsafe fn g2d_make_current(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -545,7 +550,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, type_)
     }
-
     pub unsafe fn g2d_clear(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -556,7 +560,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, area)
     }
-
     pub unsafe fn g2d_blit(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -568,7 +571,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, src, dst)
     }
-
     pub unsafe fn g2d_copy(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -581,7 +583,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, d, s, size)
     }
-
     pub unsafe fn g2d_multi_blit(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -593,7 +594,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, sp, layers)
     }
-
     pub unsafe fn g2d_query_hardware(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -605,7 +605,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, type_, available)
     }
-
     pub unsafe fn g2d_query_feature(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -617,7 +616,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, feature, available)
     }
-
     pub unsafe fn g2d_query_cap(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -629,7 +627,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, cap, enable)
     }
-
     pub unsafe fn g2d_enable(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -640,7 +637,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, cap)
     }
-
     pub unsafe fn g2d_disable(
         &self,
         handle: *mut ::std::os::raw::c_void,
@@ -651,7 +647,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(handle, cap)
     }
-
     pub unsafe fn g2d_cache_op(
         &self,
         buf: *mut g2d_buf,
@@ -662,7 +657,6 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(buf, op)
     }
-
     pub unsafe fn g2d_alloc(
         &self,
         size: ::std::os::raw::c_int,
@@ -673,21 +667,18 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(size, cacheable)
     }
-
     pub unsafe fn g2d_buf_from_fd(&self, fd: ::std::os::raw::c_int) -> *mut g2d_buf {
         (self
             .g2d_buf_from_fd
             .as_ref()
             .expect("Expected function, got error."))(fd)
     }
-
     pub unsafe fn g2d_buf_export_fd(&self, arg1: *mut g2d_buf) -> ::std::os::raw::c_int {
         (self
             .g2d_buf_export_fd
             .as_ref()
             .expect("Expected function, got error."))(arg1)
     }
-
     pub unsafe fn g2d_buf_from_virt_addr(
         &self,
         vaddr: *mut ::std::os::raw::c_void,
@@ -698,21 +689,18 @@ impl g2d {
             .as_ref()
             .expect("Expected function, got error."))(vaddr, size)
     }
-
     pub unsafe fn g2d_free(&self, buf: *mut g2d_buf) -> ::std::os::raw::c_int {
         (self
             .g2d_free
             .as_ref()
             .expect("Expected function, got error."))(buf)
     }
-
     pub unsafe fn g2d_flush(&self, handle: *mut ::std::os::raw::c_void) -> ::std::os::raw::c_int {
         (self
             .g2d_flush
             .as_ref()
             .expect("Expected function, got error."))(handle)
     }
-
     pub unsafe fn g2d_finish(&self, handle: *mut ::std::os::raw::c_void) -> ::std::os::raw::c_int {
         (self
             .g2d_finish

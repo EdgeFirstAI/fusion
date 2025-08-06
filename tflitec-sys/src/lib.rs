@@ -4,36 +4,85 @@
 #![allow(clippy::missing_safety_doc)]
 
 use delegate::Delegate;
-use std::{os::raw::c_void, path::Path, ptr};
+use log::debug;
+use std::{error::Error, fmt, os::raw::c_void, path::Path, ptr};
 use tensor::{Tensor, TensorMut};
 include!("ffi.rs");
 
 pub mod delegate;
 pub mod tensor;
+pub use libloading::Error as LibloadingError;
 #[macro_use]
 extern crate num_derive;
 
-pub fn tflite_status_to_result(status: TfLiteStatus) -> Result<(), String> {
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct TfLiteError {
+    msg: String,
+    code: u32,
+}
+
+impl fmt::Display for TfLiteError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+impl Error for TfLiteError {}
+
+impl TfLiteError {
+    pub fn new<T: ToString>(msg: T) -> TfLiteError {
+        TfLiteError {
+            msg: msg.to_string(),
+            code: 0,
+        }
+    }
+}
+
+pub fn tflite_status_to_result(status: TfLiteStatus) -> Result<(), TfLiteError> {
     match status {
         TfLiteStatus_kTfLiteOk => Ok(()),
-        TfLiteStatus_kTfLiteError => Err(format!("TfLiteRuntimeError: {status}")),
-        TfLiteStatus_kTfLiteDelegateError => Err(format!("TfLiteDelegateError: {status}")),
-        TfLiteStatus_kTfLiteApplicationError => Err(format!("TfLiteApplicationError: {status}")),
-        TfLiteStatus_kTfLiteDelegateDataNotFound => {
-            Err(format!("TfLiteDelegateDataNotFound: {status}"))
-        }
-        TfLiteStatus_kTfLiteDelegateDataWriteError => {
-            Err(format!("TfLiteDelegateDataWriteError: {status}"))
-        }
-        TfLiteStatus_kTfLiteDelegateDataReadError => {
-            Err(format!("TfLiteDelegateDataReadError: {status}"))
-        }
-        TfLiteStatus_kTfLiteUnresolvedOps => Err(format!("TfLiteUnresolvedOps: {status}")),
-        TfLiteStatus_kTfLiteCancelled => Err(format!("TfLiteCancelled: {status}")),
-        TfLiteStatus_kTfLiteOutputShapeNotKnown => {
-            Err(format!("TfLiteOutputShapeNotKnown: {status}"))
-        }
-        _ => Err(format!("Unknown TfLite error: {status}")),
+        TfLiteStatus_kTfLiteError => Err(TfLiteError {
+            msg: "TfLiteRuntimeError".to_string(),
+            code: status,
+        }),
+        TfLiteStatus_kTfLiteDelegateError => Err(TfLiteError {
+            msg: "TfLiteDelegateError".to_string(),
+            code: status,
+        }),
+        TfLiteStatus_kTfLiteApplicationError => Err(TfLiteError {
+            msg: "TfLiteApplicationError".to_string(),
+            code: status,
+        }),
+
+        TfLiteStatus_kTfLiteDelegateDataNotFound => Err(TfLiteError {
+            msg: "TfLiteDelegateDataNotFound".to_string(),
+            code: status,
+        }),
+
+        TfLiteStatus_kTfLiteDelegateDataWriteError => Err(TfLiteError {
+            msg: "TfLiteDelegateDataWriteError".to_string(),
+            code: status,
+        }),
+        TfLiteStatus_kTfLiteDelegateDataReadError => Err(TfLiteError {
+            msg: "TfLiteDelegateDataReadError".to_string(),
+            code: status,
+        }),
+        TfLiteStatus_kTfLiteUnresolvedOps => Err(TfLiteError {
+            msg: "TfLiteUnresolvedOps".to_string(),
+            code: status,
+        }),
+        TfLiteStatus_kTfLiteCancelled => Err(TfLiteError {
+            msg: "TfLiteCancelled".to_string(),
+            code: status,
+        }),
+        TfLiteStatus_kTfLiteOutputShapeNotKnown => Err(TfLiteError {
+            msg: "TfLiteOutputShapeNotKnown".to_string(),
+            code: status,
+        }),
+        _ => Err(TfLiteError {
+            msg: "Unknown TfLite error".to_string(),
+            code: status,
+        }),
     }
 }
 
@@ -41,8 +90,32 @@ pub struct TFLiteLib {
     lib: tensorflowlite_c,
 }
 
+pub static DEFAULT_TFLITEC_PATH: &str = "libtensorflowlite_c.so";
+pub static DEFAULT_TFLITECPP_PATH: &str = "libtensorflow-lite.so";
 impl TFLiteLib {
-    pub fn new<P>(path: P) -> Result<Self, libloading::Error>
+    pub fn new() -> Result<Self, libloading::Error> {
+        // try a bunch of versions...
+        // we don't know which specific version of tflite is installed so we try a bunch
+        // Takes around 25ms to try to open 500 shared library files on the EVK
+        for versions in (1..50).rev() {
+            for patch in (0..10).rev() {
+                if let Ok(tflite_lib) = TFLiteLib::new_with_path(format!(
+                    "{DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}"
+                )) {
+                    debug!("Found TFLiteLib: {DEFAULT_TFLITECPP_PATH}.2.{versions}.{patch}");
+                    return Ok(tflite_lib);
+                }
+            }
+        }
+
+        if let Ok(tflite_lib) = TFLiteLib::new_with_path(DEFAULT_TFLITEC_PATH) {
+            return Ok(tflite_lib);
+        }
+        let tflite_lib = TFLiteLib::new_with_path(DEFAULT_TFLITECPP_PATH)?;
+        Ok(tflite_lib)
+    }
+
+    pub fn new_with_path<P>(path: P) -> Result<Self, libloading::Error>
     where
         P: AsRef<Path>,
     {
@@ -51,22 +124,24 @@ impl TFLiteLib {
         })
     }
 
-    pub fn new_model_from_mem(&self, model: Vec<u8>) -> Result<Model, String> {
+    pub fn new_model_from_mem(&self, model: Vec<u8>) -> Result<Model, TfLiteError> {
         let m = unsafe {
             self.lib
                 .TfLiteModelCreate(model.as_ptr() as *const c_void, model.len())
         };
         Ok(Model {
-            ptr: ptr::NonNull::new(m).ok_or("TfLiteModelCreate returned NULL")?,
+            ptr: ptr::NonNull::new(m).ok_or(TfLiteError::new("TfLiteModelCreate returned NULL"))?,
             model_mem: model,
             lib: &self.lib,
         })
     }
 
-    pub fn new_interpreter_builder(&self) -> Result<InterpreterBuilder, String> {
+    pub fn new_interpreter_builder(&self) -> Result<InterpreterBuilder, TfLiteError> {
         Ok(InterpreterBuilder {
             options: ptr::NonNull::new(unsafe { self.lib.TfLiteInterpreterOptionsCreate() })
-                .ok_or("TfLiteInterpreterOptionsCreate returned NULL")?,
+                .ok_or(TfLiteError::new(
+                    "TfLiteInterpreterOptionsCreate returned NULL",
+                ))?,
             delegates: Vec::new(),
             lib: &self.lib,
         })
@@ -101,21 +176,24 @@ impl<'a> InterpreterBuilder<'a> {
         self.delegates.push(d);
     }
 
-    pub fn build(mut self, model: &Model) -> Result<Interpreter<'a>, String> {
+    pub fn build(mut self, mut model: Model) -> Result<Interpreter<'a>, TfLiteError> {
         let interpreter = unsafe {
             self.lib
                 .TfLiteInterpreterCreate(model.ptr.as_ptr(), self.options.as_ptr())
         };
         let interpreter = Interpreter {
             interpreter: ptr::NonNull::new(interpreter)
-                .ok_or("TfLiteInterpreterCreate returned NULL")?,
+                .ok_or(TfLiteError::new("TfLiteInterpreterCreate returned NULL"))?,
             _delegates: std::mem::replace(&mut self.delegates, Vec::new()),
+            model_mem: std::mem::replace(&mut model.model_mem, Vec::new()),
             lib: self.lib,
         };
+
         tflite_status_to_result(unsafe {
             self.lib
                 .TfLiteInterpreterAllocateTensors(interpreter.interpreter.as_ptr())
         })?;
+
         Ok(interpreter)
     }
 }
@@ -130,16 +208,17 @@ impl<'a> Drop for InterpreterBuilder<'a> {
 pub struct Interpreter<'a> {
     interpreter: ptr::NonNull<TfLiteInterpreter>,
     _delegates: Vec<Delegate>,
+    pub model_mem: Vec<u8>,
     lib: &'a tensorflowlite_c,
 }
 
 impl<'a> Interpreter<'a> {
-    pub fn invoke(&mut self) -> Result<(), String> {
+    pub fn invoke(&mut self) -> Result<(), TfLiteError> {
         let tflite_status = unsafe { self.lib.TfLiteInterpreterInvoke(self.interpreter.as_ptr()) };
         tflite_status_to_result(tflite_status)
     }
 
-    pub fn inputs(&self) -> Result<Vec<Tensor<'a>>, String> {
+    pub fn inputs(&self) -> Result<Vec<Tensor<'a>>, TfLiteError> {
         let len = unsafe {
             self.lib
                 .TfLiteInterpreterGetInputTensorCount(self.interpreter.as_ptr())
@@ -151,7 +230,9 @@ impl<'a> Interpreter<'a> {
                     .TfLiteInterpreterGetInputTensor(self.interpreter.as_ptr(), i as i32)
             };
             if input.is_null() {
-                return Err("TfLiteInterpreterGetInputTensor returned NULL".to_string());
+                return Err(TfLiteError::new(
+                    "TfLiteInterpreterGetInputTensor returned NULL",
+                ));
             }
             inputs.push(Tensor {
                 ptr: input,
@@ -161,7 +242,7 @@ impl<'a> Interpreter<'a> {
         Ok(inputs)
     }
 
-    pub fn inputs_mut(&self) -> Result<Vec<TensorMut<'a>>, String> {
+    pub fn inputs_mut(&self) -> Result<Vec<TensorMut<'a>>, TfLiteError> {
         let len = unsafe {
             self.lib
                 .TfLiteInterpreterGetInputTensorCount(self.interpreter.as_ptr())
@@ -173,15 +254,16 @@ impl<'a> Interpreter<'a> {
                     .TfLiteInterpreterGetInputTensor(self.interpreter.as_ptr(), i as i32)
             };
             inputs.push(TensorMut {
-                ptr: ptr::NonNull::new(input)
-                    .ok_or("TfLiteInterpreterGetInputTensor returned NULL")?,
+                ptr: ptr::NonNull::new(input).ok_or(TfLiteError::new(
+                    "TfLiteInterpreterGetInputTensor returned NULL",
+                ))?,
                 lib: self.lib,
             });
         }
         Ok(inputs)
     }
 
-    pub fn outputs(&self) -> Result<Vec<Tensor>, String> {
+    pub fn outputs(&self) -> Result<Vec<Tensor<'a>>, TfLiteError> {
         let len = unsafe {
             self.lib
                 .TfLiteInterpreterGetOutputTensorCount(self.interpreter.as_ptr())
@@ -193,7 +275,9 @@ impl<'a> Interpreter<'a> {
                     .TfLiteInterpreterGetOutputTensor(self.interpreter.as_ptr(), i as i32)
             };
             if output.is_null() {
-                return Err("TfLiteInterpreterGetOutputTensor returned NULL".to_string());
+                return Err(TfLiteError::new(
+                    "TfLiteInterpreterGetOutputTensor returned NULL",
+                ));
             }
             outputs.push(Tensor {
                 ptr: output,

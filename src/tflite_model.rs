@@ -6,17 +6,15 @@ use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     ffi::c_void,
-    fs::read,
-    os::{
-        fd::{AsRawFd, FromRawFd},
-        unix::io::OwnedFd,
-    },
+    fs::{read, File},
+    io,
+    os::fd::AsRawFd,
+    path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 use tflitec_sys::{
     delegate::Delegate,
-    tensor::{TensorMut, TensorType},
+    tensor::{Tensor, TensorMut, TensorType},
     Interpreter, TFLiteLib,
 };
 use tokio::sync::Mutex;
@@ -24,50 +22,187 @@ use tracing::{info_span, instrument};
 use tracy_client::secondary_frame_mark;
 use zenoh::{
     bytes::{Encoding, ZBytes},
+    handlers::FifoChannelHandler,
+    pubsub::Subscriber,
+    sample::Sample,
     Session,
 };
 
 use crate::{
     args::Args,
-    fusion_model::{apply_sigmoid, preprocess_cube},
+    drain_recv,
+    fusion_model::{apply_sigmoid, preprocess_cube, FusionError},
     image::{Image, ImageManager, Rotation, RGBA},
-    Grid,
+    DrainRecvTimeoutSettings, Grid,
 };
 
 static NPU_PATH: &str = "libvx_delegate.so";
-static TFLITEC_PATH: &str = "libtensorflowlite_c.so";
 
-pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
-    if args.model.is_none() {
+#[instrument(skip_all)]
+fn load_model(
+    model_name: Option<PathBuf>,
+    engine: String,
+    tflite_lib: &TFLiteLib,
+) -> Option<Interpreter<'_>> {
+    // let model_name = args.model.as_ref().unwrap().clone();
+    if model_name.is_none() {
         info!("No radar model was given");
-        return;
+        return None;
     }
-    let model_name = args.model.as_ref().unwrap().clone();
+    let model_name = model_name.unwrap();
     let model_data = match read(&model_name) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open `{:?}` file: {:?}", model_name, e);
-            return;
+            error!("Could not open `{model_name:?}` file: {e:?}");
+            return None;
         }
     };
 
     info!("Model read from file");
 
-    let tflite_lib = match TFLiteLib::new(TFLITEC_PATH) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not open TFLite library: {e}");
-            return;
-        }
-    };
-
     let model = match tflite_lib.new_model_from_mem(model_data) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not create TFLite model from {:?}: {e}", model_name);
-            return;
+            error!("Could not create TFLite model from {model_name:?}: {e}");
+            return None;
         }
     };
+
+    let mut builder = match tflite_lib.new_interpreter_builder() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while building backbone: {e}");
+            return None;
+        }
+    };
+
+    if engine.to_lowercase() == "npu" {
+        info!("Using delegate {NPU_PATH:?}");
+        let delegate = Delegate::load_external(NPU_PATH).unwrap();
+        builder.add_owned_delegate(delegate);
+    }
+
+    let backbone = match builder.build(model) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Error while building backbone: {e}");
+            return None;
+        }
+    };
+    Some(backbone)
+}
+
+#[instrument(skip_all)]
+fn identify_inputs(inputs: &[TensorMut]) -> (usize, Option<usize>) {
+    let mut radar_input_index = 0;
+    let mut camera_input_index = None;
+    for (i, inp) in inputs.iter().enumerate() {
+        debug!("found input: {inp:?}");
+        if inp.name().contains("radar") {
+            radar_input_index = i;
+            debug!("setting radar input index to {i}");
+        }
+        if inp.name().contains("camera") {
+            let _ = camera_input_index.insert(i);
+            debug!("setting camera input index to {i}");
+        }
+    }
+    (radar_input_index, camera_input_index)
+}
+
+#[instrument(skip_all)]
+fn get_input_shape(
+    inputs: &[TensorMut],
+    input_index: Option<usize>,
+) -> Result<Vec<usize>, FusionError> {
+    if let Some(ref index) = input_index {
+        match inputs[*index].shape() {
+            Ok(v) => {
+                debug!("got input tensor shape: {v:?}");
+                Ok(v)
+            }
+            Err(e) => {
+                error!("Could not get input shape: {e}");
+                Err(e.into())
+            }
+        }
+    } else {
+        Ok(vec![1, 1, 1, 1])
+    }
+}
+
+#[instrument(skip_all)]
+fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image), FusionError> {
+    let img_mgr = match ImageManager::new() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open G2D: {e:?}");
+            return Err(e.to_string().into());
+        }
+    };
+    info!("Opened G2D with version {}", img_mgr.version());
+
+    let dest = match Image::new(
+        camera_input_shape[2] as u32,
+        camera_input_shape[1] as u32,
+        RGBA,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not alloc CMA heap: {e:?}");
+            return Err(e.to_string().into());
+        }
+    };
+    Ok((img_mgr, dest))
+}
+
+#[instrument(skip_all)]
+pub async fn run_tflite_fusion_model(
+    session: Session,
+    args: Args,
+    grid: Arc<Mutex<Option<Grid>>>,
+) -> Result<(), FusionError> {
+    if args.model.is_none() {
+        info!("No radar model was given");
+        return Err("No radar model was given".into());
+    }
+
+    let tflite_lib = match TFLiteLib::new() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not open TFLite library: {e}");
+            return Err(e.into());
+        }
+    };
+
+    let mut backbone = load_model(args.model.clone(), args.engine.clone(), &tflite_lib).unwrap();
+    info!("TFLite context for backbone initialized");
+    let mut decoder = None;
+    if args.model_decoder.is_some() {
+        decoder = load_model(args.model_decoder.clone(), "cpu".to_string(), &tflite_lib);
+        info!("TFLite context for decoder initialized");
+    }
+    let input_match = get_input_match(&backbone, &decoder)?;
+    let inputs = match backbone.inputs_mut() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not get backbone inputs: {e}");
+            return Err(e.into());
+        }
+    };
+
+    let (radar_input_index, camera_input_index) = identify_inputs(&inputs);
+
+    let radar_input_shape: Vec<_> = get_input_shape(&inputs, Some(radar_input_index))?;
+
+    let camera_input_shape = get_input_shape(&inputs, camera_input_index)?;
+    drop(inputs);
+
+    // warmup the model. Tflite models load on first run, instead of on load.
+    if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
+        error!("Failed to run model: {e}");
+        return Err(e);
+    }
 
     let sub_radarcube = session
         .declare_subscriber(&args.radarcube_topic)
@@ -80,173 +215,24 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
         .await
         .unwrap();
 
-    let mut builder = match tflite_lib.new_interpreter_builder() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Error while building backbone: {}", e);
-            return;
-        }
-    };
-
-    if args.engine.to_lowercase() == "npu" {
-        info!("Using delegate {:?}", NPU_PATH);
-        let delegate = Delegate::load_external(NPU_PATH).unwrap();
-        builder.add_owned_delegate(delegate);
-    }
-    let mut backbone = match builder.build(&model) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Error while building backbone: {}", e);
-            return;
-        }
-    };
-
-    info!("TFLite context for backbone initialized");
-
-    let mut decoder = None;
-    if let Some(ref path) = args.model_decoder {
-        let model_name = path.clone();
-        let model_data = match read(&model_name) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not open `{:?}` file: {:?}", model_name, e);
-                return;
-            }
-        };
-        let model = match tflite_lib.new_model_from_mem(model_data) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not create TFLite model from {:?}: {e}", model_name);
-                return;
-            }
-        };
-        let builder = match tflite_lib.new_interpreter_builder() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while building decoder: {}", e);
-                return;
-            }
-        };
-        let decoder_ctx = match builder.build(&model) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while building decoder: {}", e);
-                return;
-            }
-        };
-        info!("TFLite context for decoder initialized");
-        let _ = decoder.insert(decoder_ctx);
-    }
-
-    let input_match = match get_input_match(&backbone, &decoder) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not match backbone outputs to decoder inputs: {}", e);
-            return;
-        }
-    };
-
-    let mut radar_input_index = 0;
-    let mut camera_input_index = None;
-
-    let inputs = match backbone.inputs_mut() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not get backbone inputs: {}", e);
-            return;
-        }
-    };
-    for (i, inp) in inputs.iter().enumerate() {
-        debug!("found input: {:?}", inp);
-        if inp.name().contains("radar") {
-            radar_input_index = i;
-            debug!("setting radar input index to {}", i);
-        }
-        if inp.name().contains("camera") {
-            let _ = camera_input_index.insert(i);
-            debug!("setting camera input index to {}", i);
-        }
-    }
-    let radar_input_shape: Vec<_> = match inputs[radar_input_index].shape() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not get input shape: {}", e);
-            return;
-        }
-    };
-    debug!("got input tensor shape: {:?}", radar_input_shape);
-
-    let camera_input_shape = if let Some(ref camera_input_index) = camera_input_index {
-        match inputs[*camera_input_index].shape() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Could not get input shape: {}", e);
-                return;
-            }
-        }
-    } else {
-        vec![1, 1, 1, 1]
-    };
-    drop(inputs);
-    // warmup the model. Tflite models load on first run, instead of on load.
-    if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
-        error!("Failed to run model: {}", e);
-        return;
-    }
-
-    let sub_camera = if camera_input_index.is_some() {
+    let mut sub_camera = None;
+    if camera_input_index.is_some() {
         let s = session
             .declare_subscriber(&args.camera_topic)
             .await
             .unwrap();
         info!("Declared subscriber on {:?}", &args.camera_topic);
-        Some(s)
-    } else {
-        None
-    };
+        let _ = sub_camera.insert(s);
+    }
 
-    let img_mgr = match ImageManager::new() {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not open G2D: {:?}", e);
-            return;
-        }
-    };
+    let (img_mgr, mut dest) = initialize_g2d(&camera_input_shape)?;
 
-    let mut dest = match Image::new(
-        camera_input_shape[2] as u32,
-        camera_input_shape[1] as u32,
-        RGBA,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Could not alloc CMA heap: {:?}", e);
-            return;
-        }
-    };
-
-    let timeout = Duration::from_millis(2000);
+    let mut timeout_radarcube = DrainRecvTimeoutSettings::default();
+    let mut timeout_camera = DrainRecvTimeoutSettings::default();
     loop {
-        let sample = if let Some(v) = sub_radarcube.drain().last() {
-            v
-        } else {
-            match sub_radarcube.recv_timeout(timeout) {
-                Ok(v) => match v {
-                    Some(v) => v,
-                    None => {
-                        warn!("timeout on radar cube");
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    error!(
-                        "error receiving radar cube on {}: {:?}",
-                        sub_radarcube.key_expr(),
-                        e
-                    );
-                    continue;
-                }
-            }
+        let sample = match drain_recv(&sub_radarcube, &mut timeout_radarcube).await {
+            Some(v) => v,
+            None => continue,
         };
 
         let radarcube = info_span!("cube_deserialize")
@@ -258,110 +244,28 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
             .collect::<Vec<_>>();
         let cube = preprocess_cube(&radarcube.cube, &cube_shape, &radar_input_shape);
 
-        let mut backbone_inputs = match backbone.inputs_mut() {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Error while getting inputs of backbone: {:?}", e);
-                return;
-            }
-        };
+        let mut backbone_inputs = backbone.inputs_mut()?;
 
-        info_span!("cube_load").in_scope(|| {
-            let radar_input_tensor = &mut backbone_inputs[radar_input_index];
-            let input_tensor_map = match radar_input_tensor.maprw() {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Could not map radar input: {:?}", e);
-                    return;
-                }
-            };
-            input_tensor_map.copy_from_slice(&cube);
-            let _ = input_tensor_map;
-        });
+        load_cube(&mut backbone_inputs, radar_input_index, &cube);
 
         if camera_input_index.is_some() {
             let camera_input_tensor = &mut backbone_inputs[camera_input_index.unwrap()];
-
             let sub_camera = sub_camera.as_ref().unwrap();
-            let sample = if let Some(v) = sub_camera.drain().last() {
-                v
-            } else {
-                match sub_camera.recv_timeout(timeout) {
-                    Ok(v) => match v {
-                        Some(v) => v,
-                        None => {
-                            warn!("timeout on camera frame");
-                            continue;
-                        }
-                    },
-                    Err(e) => {
-                        error!(
-                            "error receiving camera frame on {}: {:?}",
-                            sub_camera.key_expr(),
-                            e
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let mut cam_buffer: DmaBuf = match cdr::deserialize(&sample.payload().to_bytes()) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("Failed to deserialize message: {:?}", e);
-                    continue;
-                }
-            };
-
-            let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                        "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                        cam_buffer.pid, e
-                    );
-                    continue;
-                }
-            };
-            let fd = match get_file_from_pidfd(
-                pidfd.as_raw_fd(),
-                cam_buffer.fd,
-                GetFdFlags::empty(),
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    error!(
-                            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-                            e
-                        );
-                    continue;
-                }
-            };
-
-            cam_buffer.fd = fd.as_raw_fd();
-            trace!("Updated dma fd to {}", cam_buffer.fd);
-
-            match load_frame_dmabuf(
+            load_camera_frame(
                 camera_input_tensor,
+                sub_camera,
+                &mut timeout_camera,
                 &img_mgr,
                 &mut dest,
-                &cam_buffer,
-                Preprocessing::UnsignedNorm,
-            ) {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("Error loading camera frame into input: {:?}", e);
-                    continue;
-                }
-            }
-            trace!("finished load_frame_dmabuf");
+            )
+            .await;
         }
 
         drop(backbone_inputs);
 
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
-            error!("Failed to run model: {}", e);
-            return;
+            error!("Failed to run model: {e}");
+            return Err(e);
         }
 
         let output_ctx = match decoder {
@@ -369,27 +273,11 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
             None => &backbone,
         };
 
-        let mut output_shape: Vec<usize> = vec![0, 0, 0, 0];
+        let outputs = output_ctx.outputs()?;
+
+        let (mask, output_shape) = get_model_output(&outputs, args.logits);
+
         let (mask, buf, enc) = info_span!("publish_output").in_scope(|| {
-            let outputs = output_ctx.outputs().unwrap();
-
-            let mut mask = if !outputs.is_empty() {
-                let tensor = &outputs[0];
-                output_shape = tensor.shape().unwrap();
-                let data = tensor.mapro().unwrap();
-                let len = data.len();
-                let mut buffer = vec![0.0f32; len];
-                buffer.copy_from_slice(data);
-                buffer
-            } else {
-                error!("Did not find model output");
-                Vec::new()
-            };
-
-            if args.logits {
-                apply_sigmoid(&mut mask);
-            }
-
             let msg = Mask {
                 height: output_shape[1] as u32,
                 width: output_shape[2] as u32,
@@ -404,6 +292,7 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
                         ]
                     })
                     .collect(),
+                boxed: false,
             };
 
             let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
@@ -414,15 +303,8 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
 
         publ_mask.put(buf).encoding(enc).await.unwrap();
 
-        let mut occupied_ = mask.into_iter();
-        let mut occupied = Vec::new();
-        for i in 0..output_shape[1] {
-            occupied.push(Vec::new());
-            for _ in 0..output_shape[2] {
-                let item = occupied_.next().unwrap();
-                occupied[i].push(item)
-            }
-        }
+        let occupied = build_occupancy_grid(&mask, &output_shape);
+
         let timestamp = radarcube.header.stamp.nanosec as u64
             + radarcube.header.stamp.sec as u64 * 1_000_000_000;
         let mut guard = grid.lock().await;
@@ -432,10 +314,89 @@ pub async fn run_tflite_fusion_model(session: Session, args: Args, grid: Arc<Mut
     }
 }
 
+#[instrument(skip_all)]
+fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: &[f32]) {
+    let radar_input_tensor = &mut backbone_inputs[radar_input_index];
+    let input_tensor_map = match radar_input_tensor.maprw() {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Could not map radar input: {e:?}");
+            return;
+        }
+    };
+    input_tensor_map.copy_from_slice(cube);
+}
+
+#[instrument(skip_all)]
+fn build_occupancy_grid(mask: &[f32], output_shape: &[usize]) -> Vec<Vec<f32>> {
+    let mut occupied_ = mask.iter();
+    let mut occupied = Vec::new();
+    for i in 0..output_shape[1] {
+        occupied.push(Vec::new());
+        for _ in 0..output_shape[2] {
+            let item = occupied_.next().unwrap();
+            occupied[i].push(*item)
+        }
+    }
+    occupied
+}
+
+#[instrument(skip_all)]
+fn get_model_output(outputs: &[Tensor], logits: bool) -> (Vec<f32>, Vec<usize>) {
+    let mut output_shape: Vec<usize> = vec![0, 0, 0, 0];
+    let mut mask = if !outputs.is_empty() {
+        let tensor = &outputs[0];
+        output_shape = tensor.shape().unwrap();
+        let data = tensor.mapro().unwrap();
+        let len = data.len();
+        let mut buffer = vec![0.0f32; len];
+        buffer.copy_from_slice(data);
+        buffer
+    } else {
+        error!("Did not find model output");
+        Vec::new()
+    };
+
+    if logits {
+        apply_sigmoid(&mut mask);
+    }
+
+    (mask, output_shape)
+}
+
+#[instrument(skip_all)]
+fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
+    let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+                "Error getting PID {:?}, please check if the camera process is running: {:?}",
+                cam_buffer.pid, e
+            );
+            return Err(e);
+        }
+    };
+
+    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), cam_buffer.fd, GetFdFlags::empty()) {
+        Ok(v) => v,
+        Err(e) => {
+            error!(
+            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
+            );
+            return Err(e);
+        }
+    };
+
+    cam_buffer.fd = fd.as_raw_fd();
+    debug!("Updated dma fd to {}", cam_buffer.fd);
+    Ok(fd)
+}
+
+#[instrument(skip_all)]
 fn get_input_match(
     backbone: &Interpreter,
     decoder: &Option<Interpreter>,
-) -> Result<Vec<(usize, usize)>, String> {
+) -> Result<Vec<(usize, usize)>, FusionError> {
     if decoder.is_none() {
         return Ok(Vec::new());
     }
@@ -443,7 +404,8 @@ fn get_input_match(
     let backbone_outputs = backbone.outputs()?;
     let decoder_inputs = decoder.inputs_mut()?;
     if backbone_outputs.len() != decoder_inputs.len() {
-        return Err("backbone output count and decoder input count are not equal".to_string());
+        error!("backbone output count and decoder input count are not equal");
+        return Err("backbone output count and decoder input count are not equal".into());
     }
     let mut matching = Vec::new();
     for (bb_out, outp) in backbone_outputs.iter().enumerate() {
@@ -458,10 +420,11 @@ fn get_input_match(
             }
         }
         if !found {
+            error!("could not find matching decoder input for backbone output with shape {bb_out}");
             return Err(format!(
-                "could not find matching decoder input for backbone output with shape {}",
-                bb_out
-            ));
+                "could not find matching decoder input for backbone output with shape {bb_out}"
+            )
+            .into());
         }
     }
 
@@ -473,7 +436,7 @@ fn run_model(
     backbone: &mut Interpreter,
     decoder: &mut Option<Interpreter>,
     input_match: &[(usize, usize)],
-) -> Result<(), String> {
+) -> Result<(), FusionError> {
     backbone.invoke()?;
     if decoder.is_none() {
         return Ok(());
@@ -487,14 +450,14 @@ fn run_model(
             Ok(v) => v,
             Err(e) => {
                 error!("Could not map output tensor from backbone");
-                return Err(e);
+                return Err(e.into());
             }
         };
         let input_map = match input.maprw::<u8>() {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not map input tensor from decoder");
-                return Err(e);
+                return Err(e.into());
             }
         };
         // TODO: what happens if the types are different?
@@ -506,7 +469,37 @@ fn run_model(
             );
         }
     }
-    decoder.invoke()
+    Ok(decoder.invoke()?)
+}
+
+#[instrument(skip_all)]
+async fn load_camera_frame(
+    camera_input_tensor: &mut TensorMut<'_>,
+    sub_camera: &Subscriber<FifoChannelHandler<Sample>>,
+    timeout_camera: &mut DrainRecvTimeoutSettings,
+    img_mgr: &ImageManager,
+    dest: &mut Image,
+) {
+    let sample = match drain_recv(sub_camera, timeout_camera).await {
+        Some(v) => v,
+        None => return,
+    };
+
+    let cam_buffer = info_span!("camera_deserialize")
+        .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
+
+    match load_frame_dmabuf(
+        camera_input_tensor,
+        img_mgr,
+        dest,
+        &cam_buffer,
+        Preprocessing::UnsignedNorm,
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            error!("Error loading camera frame into input: {e:?}");
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -527,110 +520,176 @@ fn load_frame_dmabuf(
     dest: &mut Image,
     dma_buf: &DmaBuf,
     preprocess: Preprocessing,
-) -> Result<(), String> {
+) -> Result<(), FusionError> {
     if dest.height() as usize != tensor.shape()?[1] {
         return Err(
-            "The height of the destination buffer is not equal to the height of the tensor"
-                .to_owned(),
+            "The height of the destination buffer is not equal to the height of the tensor".into(),
         );
     }
     if dest.width() as usize != tensor.shape()?[2] {
         return Err(
-            "The width of the destination buffer is not equal to the width of the tensor"
-                .to_owned(),
+            "The width of the destination buffer is not equal to the width of the tensor".into(),
         );
     }
     if dest.format() != RGBA {
-        return Err("The format of destination buffer is not RGBA".to_owned());
+        return Err("The format of destination buffer is not RGBA".into());
     }
     const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
 
-    let input = Image::new_preallocated(
-        unsafe { OwnedFd::from_raw_fd(dma_buf.fd) },
-        dma_buf.width,
-        dma_buf.height,
-        dma_buf.fourcc.into(),
-    );
+    let input = dma_buf.try_into()?;
     match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {
-            error!(
-                "Could not g2d convert from {:?} to {:?}: {:?}",
-                input, dest, e
-            )
+            error!("Could not g2d convert from {input:?} to {dest:?}: {e:?}")
         }
     }
     trace!("Dest size: {}", dest.size());
     let tensor_vol = tensor.volume()?;
     trace!("Tensor volume: {}", tensor_vol);
-
-    let tensor_channels = { *tensor.shape()?.last().unwrap_or(&3) };
+    let tensor_channels = *tensor.shape()?.last().unwrap_or(&3);
     match tensor_channels {
         3 | 4 => {}
         _ => {
             return Err(format!(
                 "Input tensor has an invalid number of channels for images: {tensor_channels}"
-            ))
+            )
+            .into())
         }
-    };
+    }
+    load_input(
+        dest,
+        DATA_CHANNELS,
+        tensor,
+        tensor_vol,
+        tensor_channels,
+        preprocess,
+    )?;
+    Ok(())
+}
 
+#[instrument(skip_all)]
+fn load_input(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut TensorMut,
+    tensor_vol: usize,
+    tensor_channels: usize,
+    preprocess: Preprocessing,
+) -> Result<(), FusionError> {
     match tensor.tensor_type() {
-        TensorType::Int8 => {
-            let tensor_mapped = tensor.maprw().unwrap();
-
-            let mut dest_mapped = dest.mmap();
-            let data = dest_mapped.as_slice_mut();
-            for i in 0..tensor_vol / tensor_channels {
-                for j in 0..tensor_channels {
-                    tensor_mapped[i * tensor_channels + j] =
-                        (data[i * DATA_CHANNELS + j] as i16 - 128) as i8;
-                }
-            }
+        TensorType::UInt8 => {
+            load_input_u8(dest, data_channels, tensor, tensor_vol, tensor_channels)?
         }
-        TensorType::Float32 => {
-            let tensor_mapped = tensor.maprw().unwrap();
-            let mut dest_mapped = dest.mmap();
-            let data = dest_mapped.as_slice_mut();
+        TensorType::Int8 => {
+            load_input_i8(dest, data_channels, tensor, tensor_vol, tensor_channels)?
+        }
+        TensorType::Float32 => load_input_f32(
+            dest,
+            data_channels,
+            tensor,
+            tensor_vol,
+            tensor_channels,
+            preprocess,
+        )?,
+        TensorType::UnknownType => todo!(),
+        TensorType::NoType => todo!(),
+        TensorType::Int32 => todo!(),
+        TensorType::Int64 => todo!(),
+        TensorType::String => todo!(),
+        TensorType::Bool => todo!(),
+        TensorType::Int16 => todo!(),
+        TensorType::Complex64 => todo!(),
+        TensorType::Float16 => todo!(),
+        TensorType::Float64 => todo!(),
+        TensorType::Complex128 => todo!(),
+        TensorType::UInt64 => todo!(),
+        TensorType::Resource => todo!(),
+        TensorType::Variant => todo!(),
+        TensorType::UInt32 => todo!(),
+        TensorType::UInt16 => todo!(),
+        TensorType::Int4 => todo!(),
+        TensorType::BFloat16 => todo!(),
+    };
+    Ok(())
+}
+
+#[instrument(skip_all)]
+fn load_input_u8(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut TensorMut,
+    tensor_vol: usize,
+    tensor_channels: usize,
+) -> Result<(), FusionError> {
+    let tensor_mapped = tensor.maprw()?;
+    let mut dest_mapped = dest.mmap();
+    let data = dest_mapped.as_slice_mut();
+    if tensor_channels == data_channels {
+        tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
+        return Ok(());
+    }
+    for i in 0..tensor_vol / tensor_channels {
+        for j in 0..tensor_channels {
+            tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j];
+        }
+    }
+    Ok(())
+}
+
+#[instrument(skip_all)]
+fn load_input_i8(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut TensorMut,
+    tensor_vol: usize,
+    tensor_channels: usize,
+) -> Result<(), FusionError> {
+    let tensor_mapped = tensor.maprw()?;
+
+    let mut dest_mapped = dest.mmap();
+    let data = dest_mapped.as_slice_mut();
+    for i in 0..tensor_vol / tensor_channels {
+        for j in 0..tensor_channels {
+            tensor_mapped[i * tensor_channels + j] =
+                (data[i * data_channels + j] as i16 - 128) as i8;
+        }
+    }
+    Ok(())
+}
+
+#[instrument(skip_all)]
+fn load_input_f32(
+    dest: &mut Image,
+    data_channels: usize,
+    tensor: &mut TensorMut,
+    tensor_vol: usize,
+    tensor_channels: usize,
+    preprocess: Preprocessing,
+) -> Result<(), FusionError> {
+    let tensor_mapped = tensor.maprw()?;
+    let mut dest_mapped = dest.mmap();
+    let data = dest_mapped.as_slice_mut();
+    for i in 0..tensor_vol / tensor_channels {
+        for j in 0..tensor_channels {
             match preprocess {
                 Preprocessing::Raw => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                data[i * DATA_CHANNELS + j] as f32;
-                        }
-                    }
+                    tensor_mapped[i * tensor_channels + j] = data[i * data_channels + j] as f32;
                 }
                 Preprocessing::UnsignedNorm => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                data[i * DATA_CHANNELS + j] as f32 / 255.0;
-                        }
-                    }
+                    tensor_mapped[i * tensor_channels + j] =
+                        data[i * data_channels + j] as f32 / 255.0;
                 }
                 Preprocessing::SignedNorm => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                data[i * DATA_CHANNELS + j] as f32 / 127.5 - 1.0;
-                        }
-                    }
+                    tensor_mapped[i * tensor_channels + j] =
+                        data[i * data_channels + j] as f32 / 127.5 - 1.0;
                 }
                 Preprocessing::ImageNet => {
-                    for i in 0..tensor_vol / tensor_channels {
-                        for j in 0..tensor_channels {
-                            tensor_mapped[i * tensor_channels + j] =
-                                (data[i * DATA_CHANNELS + j] as f32 - RGB_MEANS_IMAGENET[j])
-                                    / RGB_STDS_IMAGENET[j];
-                        }
-                    }
+                    tensor_mapped[i * tensor_channels + j] = (data[i * data_channels + j] as f32
+                        - RGB_MEANS_IMAGENET[j])
+                        / RGB_STDS_IMAGENET[j];
                 }
             }
         }
-        t => {
-            return Err(format!("Input tensor unsupported type: {:?}", t));
-        }
-    };
-
+    }
     Ok(())
 }

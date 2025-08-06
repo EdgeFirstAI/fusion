@@ -245,9 +245,9 @@ mod tests {
             column.copy_from(&dist);
         }
         let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Mahalanobis);
-        println!("Dist(false, maha): {}", dist);
+        println!("Dist(false, maha): {dist}");
 
         let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Gaussian);
-        println!("Dist(false, gaussian): {}", dist);
+        println!("Dist(false, gaussian): {dist}");
     }
 }
