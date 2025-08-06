@@ -1,6 +1,6 @@
 [package]
-name = "maivin-fusion"
-description = "Maivin Fusion"
+name = "edgefirst-fusion"
+description = "EdgeFirst Fusion"
 repository = "https://bitbucket.org/au-zone/maivin-fusion"
 license = "CLOSED"
 version = "0.0.0"
