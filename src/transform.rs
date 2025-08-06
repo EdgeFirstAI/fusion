@@ -8,8 +8,6 @@ use nalgebra::{
     geometry::{Isometry3, Translation3, UnitQuaternion},
     ArrayStorage, Matrix2x3, Matrix3, Matrix3x4, Matrix4xX,
 };
-
-#[cfg(feature = "profiling")]
 use tracing::instrument;
 
 use crate::ParsedPoint;
