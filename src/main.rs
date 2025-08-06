@@ -191,7 +191,7 @@ fn model_info_callback(info: Arc<Mutex<Option<CameraInfo>>>) -> impl FnMut(zenoh
         let new_info: CameraInfo = match cdr::deserialize(&s.payload().to_bytes()) {
             Ok(v) => v,
             Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
+                error!("Failed to deserialize message: {e:?}");
                 return;
             }
         };
@@ -209,7 +209,7 @@ fn tf_static_callback(
         let new_transform: TransformStamped = match cdr::deserialize(&s.payload().to_bytes()) {
             Ok(v) => v,
             Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
+                error!("Failed to deserialize message: {e:?}");
                 return;
             }
         };

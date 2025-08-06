@@ -47,7 +47,7 @@ fn load_model(model_name: Option<PathBuf>, engine: String) -> Option<Context> {
     let model_data = match read(&model_name) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open `{:?}` file: {:?}", model_name, e);
+            error!("Could not open `{model_name:?}` file: {e:?}");
             return None;
         }
     };
@@ -67,9 +67,9 @@ fn load_model(model_name: Option<PathBuf>, engine: String) -> Option<Context> {
     info!("NNContext for backbone initialized");
 
     match backbone.load_model(model_data) {
-        Ok(_) => info!("Loaded backbone model {:?}", model_name),
+        Ok(_) => info!("Loaded backbone model {model_name:?}"),
         Err(e) => {
-            error!("Could not load model file {:?}: {:?}", model_name, e);
+            error!("Could not load model file {model_name:?}: {e:?}");
             return None;
         }
     }
@@ -81,13 +81,13 @@ fn identify_inputs(input_names: &[&str]) -> (usize, Option<usize>) {
     let mut radar_input_index = 0;
     let mut camera_input_index = None;
     for (i, name) in input_names.iter().enumerate() {
-        debug!("Input #{} has name: {}", i, name);
+        debug!("Input #{i} has name: {name}");
         if name.contains("radar") {
             radar_input_index = i;
-            debug!("setting radar input index to {}", i);
+            debug!("setting radar input index to {i}");
         } else if name.contains("camera") {
             let _ = camera_input_index.insert(i);
-            debug!("setting camera input index to {}", i);
+            debug!("setting camera input index to {i}");
         }
     }
     (radar_input_index, camera_input_index)
@@ -109,15 +109,10 @@ fn get_camera_input(
                 camera_input_tensor = Some(tensor)
             }
             Err(e) => {
-                error!(
-                    "Could not get input {} from model: {:?}",
-                    camera_input_index, e
+                error!("Could not get input {camera_input_index} from model: {e:?}");
+                return Err(
+                    format!("Could not get input {camera_input_index} from model: {e:?}").into(),
                 );
-                return Err(format!(
-                    "Could not get input {} from model: {:?}",
-                    camera_input_index, e
-                )
-                .into());
             }
         }
     }
@@ -137,7 +132,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open G2D: {:?}", e);
+            error!("Could not open G2D: {e:?}");
             return Err(e.to_string().into());
         }
     };
@@ -150,7 +145,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
     ) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not alloc CMA heap: {:?}", e);
+            error!("Could not alloc CMA heap: {e:?}");
             return Err(e.to_string().into());
         }
     };
@@ -185,7 +180,7 @@ pub async fn run_rtm_fusion_model(
         match backbone.tensor_index(input_tensor_index[radar_input_index] as usize) {
             Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
             Err(e) => {
-                error!("Could not get input 0 from model: {:?}", e);
+                error!("Could not get input 0 from model: {e:?}");
                 return Err(e.into());
             }
         };
@@ -259,7 +254,7 @@ pub async fn run_rtm_fusion_model(
         }
 
         if let Err(e) = run_model(&backbone, &mut decoder, &input_match) {
-            error!("Failed to run model: {}", e);
+            error!("Failed to run model: {e}");
             return Err(e.into());
         }
 
@@ -315,7 +310,7 @@ fn load_cube(
         match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
             Ok(v) => v,
             Err(e) => {
-                error!("Could not get input 0 from model: {:?}", e);
+                error!("Could not get input 0 from model: {e:?}");
                 return;
             }
         };
@@ -387,7 +382,7 @@ async fn load_camera_frame(
     }) {
         Ok(_) => {}
         Err(e) => {
-            error!("Error loading camera frame into input: {:?}", e);
+            error!("Error loading camera frame into input: {e:?}");
         }
     }
 }
@@ -409,8 +404,7 @@ fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
         Ok(v) => v,
         Err(e) => {
             error!(
-            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-            e
+            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
             );
             return Err(e);
         }
@@ -455,13 +449,9 @@ fn get_input_match(
             }
         }
         if !found {
-            error!(
-                "could not find matching decoder input for backbone output with shape {}",
-                bb_out
-            );
+            error!("could not find matching decoder input for backbone output with shape {bb_out}");
             return Err(format!(
-                "could not find matching decoder input for backbone output with shape {}",
-                bb_out
+                "could not find matching decoder input for backbone output with shape {bb_out}"
             ));
         }
     }
@@ -560,10 +550,7 @@ fn load_frame_dmabuf(
     match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {
-            error!(
-                "Could not g2d convert from {:?} to {:?}: {:?}",
-                input, dest, e
-            )
+            error!("Could not g2d convert from {input:?} to {dest:?}: {e:?}")
         }
     }
     trace!("Dest size: {}", dest.size());

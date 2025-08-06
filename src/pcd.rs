@@ -37,53 +37,53 @@ fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             point_field::INT8 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT8 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
                 i8::from_be_bytes(bytes) as f32
             }
             point_field::UINT8 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT8 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
                 u8::from_be_bytes(bytes) as f32
             }
             point_field::INT16 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT16 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
                 i16::from_be_bytes(bytes) as f32
             }
             point_field::UINT16 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT16 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
                 u16::from_be_bytes(bytes) as f32
             }
             point_field::INT32 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT32 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
                 i32::from_be_bytes(bytes) as f32
             }
             point_field::UINT32 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT32 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
                 u32::from_be_bytes(bytes) as f32
             }
             point_field::FLOAT32 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT32 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
                 f32::from_be_bytes(bytes)
             }
             point_field::FLOAT64 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 8 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 8 element: {e:?}"));
                 f64::from_be_bytes(bytes) as f32
             }
             d => {
-                error!("Unknown datatype in PointField: {}", d);
+                error!("Unknown datatype in PointField: {d}");
                 continue;
             }
         };
@@ -114,53 +114,53 @@ fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
             point_field::INT8 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT8 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
                 i8::from_le_bytes(bytes) as f32
             }
             point_field::UINT8 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT8 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
                 u8::from_le_bytes(bytes) as f32
             }
             point_field::INT16 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT16 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
                 i16::from_le_bytes(bytes) as f32
             }
             point_field::UINT16 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT16 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
                 u16::from_le_bytes(bytes) as f32
             }
             point_field::INT32 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT32 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
                 i32::from_le_bytes(bytes) as f32
             }
             point_field::UINT32 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT32 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
                 u32::from_le_bytes(bytes) as f32
             }
             point_field::FLOAT32 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT32 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
                 f32::from_le_bytes(bytes)
             }
             point_field::FLOAT64 => {
                 let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
                     .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 8 element: {:?}", e));
+                    .unwrap_or_else(|e| panic!("Expected slice with 8 element: {e:?}"));
                 f64::from_le_bytes(bytes) as f32
             }
             d => {
-                error!("Unknown datatype in PointField: {}", d);
+                error!("Unknown datatype in PointField: {d}");
                 continue;
             }
         };
@@ -271,7 +271,7 @@ fn serialize_field_f32(field: &PointField, val: &f32, point_offset: usize, buf: 
             buf[start..end].copy_from_slice(&d);
         }
         d => {
-            error!("Unknown datatype in PointField: {}", d);
+            error!("Unknown datatype in PointField: {d}");
         }
     }
 }
@@ -313,7 +313,7 @@ fn serialize_field_u8(field: &PointField, val: &u8, point_offset: usize, buf: &m
             buf[start..end].copy_from_slice(&d);
         }
         d => {
-            error!("Unknown datatype in PointField: {}", d);
+            error!("Unknown datatype in PointField: {d}");
         }
     }
 }
@@ -355,7 +355,7 @@ fn serialize_field_u32(field: &PointField, val: &u32, point_offset: usize, buf: 
             buf[start..end].copy_from_slice(&d);
         }
         d => {
-            error!("Unknown datatype in PointField: {}", d);
+            error!("Unknown datatype in PointField: {d}");
         }
     }
 }

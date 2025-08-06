@@ -118,10 +118,7 @@ impl ImageManager {
     ) -> Result<G2DBuffer, Box<dyn Error>> {
         let g2d_buf = unsafe { self.lib.g2d_alloc(width * height * channels, 0) };
         if g2d_buf.is_null() {
-            return Err(Box::new(io::Error::new(
-                io::ErrorKind::Other,
-                "g2d_alloc failed",
-            )));
+            return Err(Box::new(io::Error::other("g2d_alloc failed")));
         }
         debug!("G2D Buffer alloc'd");
         Ok(G2DBuffer {

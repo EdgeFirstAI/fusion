@@ -40,7 +40,7 @@ pub async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<M
         {
             Ok(v) => v,
             Err(e) => {
-                error!("Failed to deserialize message: {:?}", e);
+                error!("Failed to deserialize message: {e:?}");
                 continue;
             }
         };

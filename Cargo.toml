@@ -34,23 +34,23 @@ profiling = [
 [dependencies]
 async-pidfd = "0.1.5"
 cdr = "0.2.4"
-clap = { version = "4.5.38", features = ["derive", "env"] }
+clap = { version = "4.5.43", features = ["derive", "env"] }
 deepviewrt = "0.7.3"
 dma-buf = "0.4.0"
-dma-heap = "0.4.0"
+dma-heap = "0.4.1"
 edgefirst-schemas = "1.3.1"
 g2d-sys = { version = "1.0.0", path = "g2d-sys" }
 itertools = "0.14.0"
 lapjv = "0.2.1"
-libc = "0.2.172"
+libc = "0.2.174"
 log = { version = "0.4.27", features = ["release_max_level_info"] }
-nalgebra = "0.33.2"
+nalgebra = "0.34.0"
 ndarray = { version = "0.16.1", features = ["rayon"] }
 pidfd_getfd = "0.2.2"
-serde_json = "1.0.140"
+serde_json = "1.0.142"
 tflitec-sys = { path = "./tflitec-sys" }
 thiserror = "2.0.12"
-tokio = { version = "1.45.0", features = [
+tokio = { version = "1.47.1", features = [
     "rt-multi-thread",
     "time",
     "io-std",
@@ -66,13 +66,13 @@ tracing-tracy = { version = "0.11.4", default-features = false, features = [
     "ondemand",
     "fibers",
 ] }
-tracy-client = { version = "0.18.0", default-features = false, features = [
+tracy-client = { version = "0.18.2", default-features = false, features = [
     "manual-lifetime",
     "broadcast",
     "ondemand",
     "fibers",
 ] }
-uuid = { version = "1.16.0", features = ["v4"] }
+uuid = { version = "1.17.0", features = ["v4"] }
 videostream = "0.9.1"
-zenoh = "1.4.0"
+zenoh = "1.5.0"
 zstd = { version = "0.13.3", features = ["experimental"] }

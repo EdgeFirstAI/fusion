@@ -44,18 +44,18 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
     let model_name = args.model.as_ref().unwrap().clone();
     match model_name.extension() {
         Some(v) if v.eq_ignore_ascii_case("tflite") => {
-            info!("Using TFLite model type for {:?}", model_name);
+            info!("Using TFLite model type for {model_name:?}");
             let _ = run_tflite_fusion_model(session, args, grid).await;
         }
         Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            info!("Using RTM model type for {:?}", model_name);
+            info!("Using RTM model type for {model_name:?}");
             let _ = run_rtm_fusion_model(session, args, grid).await;
         }
         Some(_) => {
-            error!("Unknown model type extension for {:?}", model_name);
+            error!("Unknown model type extension for {model_name:?}");
         }
         None => {
-            error!("No extension for {:?}", model_name);
+            error!("No extension for {model_name:?}");
         }
     }
 }

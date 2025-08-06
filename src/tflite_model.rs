@@ -53,7 +53,7 @@ fn load_model(
     let model_data = match read(&model_name) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open `{:?}` file: {:?}", model_name, e);
+            error!("Could not open `{model_name:?}` file: {e:?}");
             return None;
         }
     };
@@ -63,7 +63,7 @@ fn load_model(
     let model = match tflite_lib.new_model_from_mem(model_data) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not create TFLite model from {:?}: {e}", model_name);
+            error!("Could not create TFLite model from {model_name:?}: {e}");
             return None;
         }
     };
@@ -71,13 +71,13 @@ fn load_model(
     let mut builder = match tflite_lib.new_interpreter_builder() {
         Ok(v) => v,
         Err(e) => {
-            error!("Error while building backbone: {}", e);
+            error!("Error while building backbone: {e}");
             return None;
         }
     };
 
     if engine.to_lowercase() == "npu" {
-        info!("Using delegate {:?}", NPU_PATH);
+        info!("Using delegate {NPU_PATH:?}");
         let delegate = Delegate::load_external(NPU_PATH).unwrap();
         builder.add_owned_delegate(delegate);
     }
@@ -85,7 +85,7 @@ fn load_model(
     let backbone = match builder.build(model) {
         Ok(v) => v,
         Err(e) => {
-            error!("Error while building backbone: {}", e);
+            error!("Error while building backbone: {e}");
             return None;
         }
     };
@@ -97,14 +97,14 @@ fn identify_inputs(inputs: &[TensorMut]) -> (usize, Option<usize>) {
     let mut radar_input_index = 0;
     let mut camera_input_index = None;
     for (i, inp) in inputs.iter().enumerate() {
-        debug!("found input: {:?}", inp);
+        debug!("found input: {inp:?}");
         if inp.name().contains("radar") {
             radar_input_index = i;
-            debug!("setting radar input index to {}", i);
+            debug!("setting radar input index to {i}");
         }
         if inp.name().contains("camera") {
             let _ = camera_input_index.insert(i);
-            debug!("setting camera input index to {}", i);
+            debug!("setting camera input index to {i}");
         }
     }
     (radar_input_index, camera_input_index)
@@ -118,11 +118,11 @@ fn get_input_shape(
     if let Some(ref index) = input_index {
         match inputs[*index].shape() {
             Ok(v) => {
-                debug!("got input tensor shape: {:?}", v);
+                debug!("got input tensor shape: {v:?}");
                 Ok(v)
             }
             Err(e) => {
-                error!("Could not get input shape: {}", e);
+                error!("Could not get input shape: {e}");
                 Err(e.into())
             }
         }
@@ -136,7 +136,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
     let img_mgr = match ImageManager::new() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not open G2D: {:?}", e);
+            error!("Could not open G2D: {e:?}");
             return Err(e.to_string().into());
         }
     };
@@ -149,7 +149,7 @@ fn initialize_g2d(camera_input_shape: &[usize]) -> Result<(ImageManager, Image),
     ) {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not alloc CMA heap: {:?}", e);
+            error!("Could not alloc CMA heap: {e:?}");
             return Err(e.to_string().into());
         }
     };
@@ -186,7 +186,7 @@ pub async fn run_tflite_fusion_model(
     let inputs = match backbone.inputs_mut() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not get backbone inputs: {}", e);
+            error!("Could not get backbone inputs: {e}");
             return Err(e.into());
         }
     };
@@ -200,7 +200,7 @@ pub async fn run_tflite_fusion_model(
 
     // warmup the model. Tflite models load on first run, instead of on load.
     if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
-        error!("Failed to run model: {}", e);
+        error!("Failed to run model: {e}");
         return Err(e);
     }
 
@@ -264,7 +264,7 @@ pub async fn run_tflite_fusion_model(
         drop(backbone_inputs);
 
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
-            error!("Failed to run model: {}", e);
+            error!("Failed to run model: {e}");
             return Err(e);
         }
 
@@ -320,7 +320,7 @@ fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: 
     let input_tensor_map = match radar_input_tensor.maprw() {
         Ok(v) => v,
         Err(e) => {
-            error!("Could not map radar input: {:?}", e);
+            error!("Could not map radar input: {e:?}");
             return;
         }
     };
@@ -381,8 +381,7 @@ fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
         Ok(v) => v,
         Err(e) => {
             error!(
-            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {:?}",
-            e
+            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
             );
             return Err(e);
         }
@@ -421,13 +420,9 @@ fn get_input_match(
             }
         }
         if !found {
-            error!(
-                "could not find matching decoder input for backbone output with shape {}",
-                bb_out
-            );
+            error!("could not find matching decoder input for backbone output with shape {bb_out}");
             return Err(format!(
-                "could not find matching decoder input for backbone output with shape {}",
-                bb_out
+                "could not find matching decoder input for backbone output with shape {bb_out}"
             )
             .into());
         }
@@ -502,7 +497,7 @@ async fn load_camera_frame(
     ) {
         Ok(_) => {}
         Err(e) => {
-            error!("Error loading camera frame into input: {:?}", e);
+            error!("Error loading camera frame into input: {e:?}");
         }
     }
 }
@@ -545,10 +540,7 @@ fn load_frame_dmabuf(
     match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {
-            error!(
-                "Could not g2d convert from {:?} to {:?}: {:?}",
-                input, dest, e
-            )
+            error!("Could not g2d convert from {input:?} to {dest:?}: {e:?}")
         }
     }
     trace!("Dest size: {}", dest.size());

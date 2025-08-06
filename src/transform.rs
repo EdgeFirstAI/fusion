@@ -9,7 +9,6 @@ use nalgebra::{
     ArrayStorage, Matrix2x3, Matrix3, Matrix3x4, Matrix4xX,
 };
 
-use tracing::instrument;
 #[cfg(feature = "profiling")]
 use tracing::instrument;
 
@@ -143,6 +142,6 @@ mod projection_test {
             },
         };
         let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, (1.0, 1.0));
-        println!("Projected values: {:?}", proj);
+        println!("Projected values: {proj:?}");
     }
 }
