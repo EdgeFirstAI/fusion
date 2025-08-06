@@ -17,10 +17,6 @@ inherits = "release"
 strip = false
 debug = true
 
-[[bin]]
-name = "maivin-fusion"
-path = "src/main.rs"
-
 [features]
 default = ["tracy"]
 tracy = ["tracing-tracy/enable", "tracy-client/enable"]
