@@ -20,7 +20,7 @@ use std::{
     time::Duration,
 };
 use tokio::{join, sync::Mutex};
-use tracing::{info_span, instrument, level_filters::LevelFilter};
+use tracing::{instrument, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracker::{ByteTrack, ByteTrackSettings, TrackerBox};
 use tracy_client::frame_mark;
@@ -300,7 +300,7 @@ pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHa
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(fusion(data, zenoh, &args));
+                .block_on(fusion_loop(data, zenoh, &args));
         })
         .unwrap()
 }
@@ -341,27 +341,106 @@ fn setup_bins(bins: &mut Vec<Vec<Bin>>, args: &Args) {
     }
 }
 
-async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
+#[instrument(skip_all)]
+async fn load_data(
+    msg: &Sample,
+    data: &Mutexes,
+) -> Result<(PointCloud2, Vec<ParsedPoint>, Transform, CameraInfo, Mask), String> {
+    let (mut pcd, points) = {
+        let pcd = cdr::deserialize(&msg.payload().to_bytes()).unwrap();
+        let points = parse_pcd(&pcd);
+        (pcd, points)
+    };
+
+    let transform = data
+        .tf_static
+        .lock()
+        .await
+        .get(&(BASE_LINK_FRAME_ID.to_owned(), pcd.header.frame_id.clone()))
+        .map_or_else(
+            || {
+                warn!(
+                    "Did not find transform from base_link to {}",
+                    pcd.header.frame_id
+                );
+                Transform {
+                    translation: Vector3 {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                    },
+                    rotation: Quaternion {
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                        w: 1.0,
+                    },
+                }
+            },
+            |v| v.clone(),
+        );
+    pcd.header.frame_id = BASE_LINK_FRAME_ID.to_string(); // frame_id is base link because the tf transform was applied
+
+    let cam_info = match data.info.lock().await {
+        v if v.is_some() => v.as_ref().unwrap().clone(),
+        _ => return Err("No Camera Info".to_string()),
+    };
+
+    let mask = match data.mask.lock().await {
+        v if v.is_some() => v.as_ref().unwrap().clone(),
+        _ => return Err("No Mask".to_string()),
+    };
+
+    Ok((pcd, points, transform, cam_info, mask))
+}
+
+#[instrument(skip_all)]
+async fn fusion(
+    points: &mut Vec<ParsedPoint>,
+    transform: Transform,
+    cam_info: &CameraInfo,
+    mask: &Mask,
+    track: bool,
+    tracker: &mut ByteTrack,
+    grid: &Arc<Mutex<Option<Grid>>>,
+    args: &Args,
+    session: &Session,
+) -> (Vec<u8>, Vec<u8>, bool, HashMap<u32, Vec<usize>>) {
+    let cam_mtx = cam_info.k.map(|v| v as f32);
+    let proj = transform_and_project_points(
+        points,
+        &[transform],
+        &cam_mtx,
+        (cam_info.width as f32, cam_info.height as f32),
+    );
+
+    let (has_cluster_ids, ids) = get_cluster_ids(points);
+    let vision_class = get_vision_class(points, &proj, mask, has_cluster_ids, &ids);
+
+    let fusion_predictions = get_fusion_predictions(track, tracker, grid, args, session).await;
+    let fusion_class = get_fusion_class(points, &fusion_predictions, has_cluster_ids, &ids);
+
+    (vision_class, fusion_class, has_cluster_ids, ids)
+}
+
+async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     if zenoh.pcd_sub.is_none() {
         return;
     }
+
+    let mut bins = Vec::new();
+    let mut frame_index = 0;
+    let mut timeout = DrainRecvTimeoutSettings::default();
+
     let mut tracker = ByteTrack::new_with_settings(ByteTrackSettings {
         track_high_conf: 0.5,
         track_extra_lifespan: args.track_extra_lifespan,
         track_iou: args.track_iou,
         track_update: args.track_update,
     });
-    let mut point_tracker = ByteTrack::new_with_settings(ByteTrackSettings {
-        track_high_conf: 0.5,
-        track_extra_lifespan: 0.5,
-        track_iou: 0.01,
-        track_update: 0.5,
-    });
-    let mut bins = Vec::new();
-    let mut frame_index = 0;
+
     setup_bins(&mut bins, args);
 
-    let mut timeout = DrainRecvTimeoutSettings::default();
     loop {
         let msg = match drain_recv(zenoh.pcd_sub.as_ref().unwrap(), &mut timeout).await {
             Some(v) => v,
@@ -370,98 +449,89 @@ async fn fusion(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             }
         };
 
-        let mut pcd: PointCloud2 = info_span!("deserialize")
-            .in_scope(|| cdr::deserialize(&msg.payload().to_bytes()).unwrap());
-
-        let mut points = parse_pcd(&pcd);
-        let transform = data
-            .tf_static
-            .lock()
-            .await
-            .get(&(BASE_LINK_FRAME_ID.to_owned(), pcd.header.frame_id.clone()))
-            .map_or_else(
-                || {
-                    warn!(
-                        "Did not find transform from base_link to {}",
-                        pcd.header.frame_id
-                    );
-                    Transform {
-                        translation: Vector3 {
-                            x: 0.0,
-                            y: 0.0,
-                            z: 0.0,
-                        },
-                        rotation: Quaternion {
-                            x: 0.0,
-                            y: 0.0,
-                            z: 0.0,
-                            w: 1.0,
-                        },
-                    }
-                },
-                |v| v.clone(),
-            );
-        let cam_info = match data.info.lock().await {
-            v if v.is_some() => v.as_ref().unwrap().clone(),
-            _ => continue,
+        let (mut pcd, mut points, transform, cam_info, mask) = match load_data(&msg, &data).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("{e}");
+                continue;
+            }
         };
-        let cam_mtx = cam_info.k.map(|v| v as f32);
-        let proj = transform_and_project_points(
+
+        let (vision_class, fusion_class, has_cluster_ids, ids) = fusion(
             &mut points,
-            &[transform],
-            &cam_mtx,
-            (cam_info.width as f32, cam_info.height as f32),
-        );
-        pcd.header.frame_id = BASE_LINK_FRAME_ID.to_string(); // frame_id is base link because the tf transform was applied
-
-        let mask = match data.mask.lock().await {
-            v if v.is_some() => v.as_ref().unwrap().clone(),
-            _ => continue,
-        };
-
-        let (has_cluster_ids, ids) = get_cluster_ids(&points);
-        let vision_class = get_vision_class(&points, &proj, &mask, has_cluster_ids, &ids);
-
-        let fusion_predictions =
-            get_fusion_predictions(args.track, &mut tracker, &data.grid, args, &zenoh.session)
-                .await;
-        let fusion_class = get_fusion_class(&points, &fusion_predictions, has_cluster_ids, &ids);
-
-        let pcd_header = pcd.header.clone();
-
-        let points_data = (
-            points.as_slice(),
-            vision_class.as_slice(),
-            fusion_class.as_slice(),
-        );
-        let cluster_id_data = (has_cluster_ids, &ids);
-
-        let publ_bbox = publ_bbox3d(
-            zenoh.bbox_publ.as_ref(),
-            pcd_header.clone(),
-            points_data,
-            cluster_id_data,
-        );
-
-        let publ_pcd = publ_pcd(zenoh.pcd_publ.as_ref(), &mut pcd, points_data);
-
-        let publ_grid = publ_grid(
-            zenoh.grid_publ.as_ref(),
-            pcd_header.clone(),
-            points_data,
-            &mut point_tracker,
-            (&mut bins, frame_index),
+            transform,
+            &cam_info,
+            &mask,
+            args.track,
+            &mut tracker,
+            &data.grid,
             args,
-            cluster_id_data,
-        );
+            &zenoh.session,
+        )
+        .await;
 
-        join!(publ_bbox, publ_pcd, publ_grid);
+        publish(
+            &zenoh,
+            args,
+            &mut pcd,
+            &points,
+            &vision_class,
+            &fusion_class,
+            has_cluster_ids,
+            &ids,
+            &mut tracker,
+            &mut bins,
+            frame_index,
+        )
+        .await;
 
         clear_bins(&mut bins, frame_index, args);
         frame_index += 1;
 
         args.tracy.then(frame_mark);
     }
+}
+
+#[instrument(skip_all)]
+async fn publish(
+    zenoh: &ZenohCtx,
+    args: &Args,
+    pcd: &mut PointCloud2,
+    points: &[ParsedPoint],
+    vision_class: &[u8],
+    fusion_class: &[u8],
+    has_cluster_ids: bool,
+    ids: &HashMap<u32, Vec<usize>>,
+    point_tracker: &mut ByteTrack,
+    bins: &mut [Vec<Bin>],
+    frame_index: u128,
+) {
+    let pcd_header = pcd.header.clone();
+
+    let publ_bbox = publish_bbox3d(
+        zenoh.bbox_publ.as_ref(),
+        pcd_header.clone(),
+        (points, vision_class, fusion_class),
+        (has_cluster_ids, ids),
+    );
+
+    let publ_pcd = publish_pcd(
+        zenoh.pcd_publ.as_ref(),
+        pcd,
+        (points, vision_class, fusion_class),
+    );
+
+    let publ_grid = publish_grid(
+        zenoh.grid_publ.as_ref(),
+        pcd_header.clone(),
+        (points, vision_class, fusion_class),
+        point_tracker,
+        (bins, frame_index),
+        args,
+        (has_cluster_ids, ids),
+    );
+
+    join!(publ_bbox, publ_pcd, publ_grid);
 }
 
 fn get_vision_class(
@@ -505,7 +575,8 @@ async fn get_fusion_predictions(
     }
 }
 
-async fn publ_bbox3d(
+#[instrument(skip_all)]
+async fn publish_bbox3d(
     bbox_publ: Option<&Publisher<'_>>,
     header: Header,
     points_data: (&[ParsedPoint], &[u8], &[u8]),
@@ -531,7 +602,8 @@ async fn publ_bbox3d(
     }
 }
 
-async fn publ_pcd(
+#[instrument(skip_all)]
+async fn publish_pcd(
     publ: Option<&Publisher<'_>>,
     pcd: &mut PointCloud2,
     points_data: (&[ParsedPoint], &[u8], &[u8]),
@@ -564,8 +636,7 @@ async fn publ_pcd(
     pcd.row_step = data.len() as u32;
     pcd.data = data;
     pcd.is_bigendian = cfg!(target_endian = "big");
-    let buf = info_span!("cdr::serialize pcd")
-        .in_scope(|| cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap());
+    let buf = cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap();
     let buf_pcd = ZBytes::from(buf);
     let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
     match publ.put(buf_pcd).encoding(enc_pcd).await {
@@ -574,7 +645,8 @@ async fn publ_pcd(
     }
 }
 
-async fn publ_grid(
+#[instrument(skip_all)]
+async fn publish_grid(
     grid_publ: Option<&Publisher<'_>>,
     header: Header,
     points_data: (&[ParsedPoint], &[u8], &[u8]),
@@ -619,7 +691,6 @@ async fn publ_grid(
 // Gets 3D bounding boxes from the PCD points. Any clusters that have class > 0
 // will get a 3D bounding box generated. It is assumed that all points in the
 // same cluster ID will have the same class.
-#[instrument(skip_all)]
 fn get_3d_bbox(
     header: Header,
     points: &[ParsedPoint],
@@ -755,7 +826,6 @@ fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedP
 // For each predicted grid box, find the nearest cluster in the PCD. If the
 // nearest cluster is within 2m, set the class of all points in the cluster to
 // the class of the grid box
-#[instrument(skip_all)]
 fn grid_nearest_cluster(
     fusion_predictions: &[Box2D],
     points: &[ParsedPoint],
@@ -895,7 +965,6 @@ fn late_fusion_clustered(
 /// Checks if there are any cluster IDs in the PCD. Each cluster IDs and a
 /// vector of the indicies of all points with that cluster ID are placed into a
 /// HashMap. Noise points are not included in the HashMap.
-#[instrument(skip_all)]
 fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
     let mut has_cluster_id = false;
     let mut cluster_ids = HashMap::new();
@@ -915,7 +984,6 @@ fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
     (has_cluster_id, cluster_ids)
 }
 
-#[instrument(skip_all)]
 async fn grid_radar_tracked(
     grid: &Arc<Mutex<Option<Grid>>>,
     grid_tracker: &mut ByteTrack,
@@ -1215,7 +1283,6 @@ fn centroids_add_tracks(
 }
 /// Returns the centroid of clusters that have non-zero class_id. All points in
 /// a class should have the same class_id
-#[instrument(skip_all)]
 fn get_occupied_cluster(
     header: Header,
     points: &[ParsedPoint],
@@ -1453,7 +1520,6 @@ fn find_marked_bins(
 }
 
 /// Do a grid and highlight the grid based on point classes
-#[instrument(skip_all)]
 fn get_occupied_no_cluster(
     header: Header,
     points: &[ParsedPoint],
