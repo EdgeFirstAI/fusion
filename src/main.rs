@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use args::{Args, PCDSource};
 use cdr::{CdrLe, Infinite};
 use clap::Parser;

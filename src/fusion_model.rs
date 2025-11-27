@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use log::{error, info};
 use ndarray::{
     parallel::prelude::{IntoParallelRefIterator, ParallelIterator},

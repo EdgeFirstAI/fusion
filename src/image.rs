@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;

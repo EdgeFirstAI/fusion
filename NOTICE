@@ -1,0 +1,40 @@
+Maivin Fusion
+Copyright 2025 Au-Zone Technologies Inc.
+
+This product includes software developed at Au-Zone Technologies Inc.
+(https://www.au-zone.com/)
+
+This software contains the following first-level dependencies:
+
+- async-pidfd 0.1.5
+- cdr 0.2.4
+- clap 4.5.48 (derive, env features)
+- deepviewrt 0.7.3
+- dma-buf 0.4.0
+- dma-heap 0.4.1
+- edgefirst-schemas 1.3.1
+- g2d-sys 1.0.0 (local path dependency)
+- itertools 0.14.0
+- lapjv 0.3.0
+- libc 0.2.176
+- log 0.4.28 (release_max_level_info feature)
+- nalgebra 0.34.1
+- ndarray 0.16.1 (rayon feature)
+- pidfd_getfd 0.2.2
+- serde_json 1.0.145
+- tflitec-sys (local path dependency)
+- thiserror 2.0.17
+- tokio 1.47.1 (rt-multi-thread, time, io-std, tracing features)
+- tracing 0.1.41
+- tracing-journald 0.3.1
+- tracing-log 0.2.0
+- tracing-subscriber 0.3.20
+- tracing-tracy 0.11.4 (manual-lifetime, broadcast, ondemand, fibers features)
+- tracy-client 0.18.2 (manual-lifetime, broadcast, ondemand, fibers features)
+- uuid 1.18.1 (v4 feature)
+- videostream 0.9.1
+- zenoh 1.5.1
+- zstd 0.13.3 (experimental feature)
+
+For complete dependency information and transitive dependencies,
+see the SBOM file: sbom.json

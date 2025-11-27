@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 // From https://github.com/smilerobotics/tf_rosrust/blob/main/tf_rosrust/src/transforms.rs
 // licensed under MIT
 // Modified by Au-Zone Technologies 2025

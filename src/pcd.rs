@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use edgefirst_schemas::sensor_msgs::{point_field, PointCloud2, PointField};
 use log::error;
 use std::collections::HashMap;

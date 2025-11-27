@@ -1,0 +1,165 @@
+# GitHub Actions workflow for publishing releases
+#
+# This workflow orchestrates release publishing when a version tag is pushed:
+# - Calls test, build, and sbom workflows
+# - Creates GitHub Release with binaries, documentation, and SBOM
+#
+# Release Process:
+# 1. Update version in Cargo.toml
+# 2. Update CHANGELOG.md with version entry
+# 3. Create and push tag: git tag v1.0.0 && git push --tags
+#
+# Action Versions (verified November 2025):
+# - actions/checkout@v4 (latest)
+# - actions/download-artifact@v4 (latest)
+# - softprops/action-gh-release@v2 (latest)
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  prepare-release:
+    name: Prepare Release Information
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          
+          # Extract changelog section for this version
+          # Format: ## [X.Y.Z] - YYYY-MM-DD
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG=$(awk -v ver="$VERSION" '
+              /^## \['"$VERSION"'\]/ { found=1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md)
+          fi
+          
+          if [ -z "$CHANGELOG" ]; then
+            echo "WARNING: No changelog entry found for version $VERSION"
+            CHANGELOG="See commit history for details."
+          fi
+          
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+  build-artifacts:
+    name: Build Release Artifacts
+    needs: prepare-release
+    uses: ./.github/workflows/build.yml
+
+  build-sbom:
+    name: Generate SBOM
+    needs: prepare-release
+    uses: ./.github/workflows/sbom.yml
+
+  run-tests:
+    name: Run Tests
+    needs: prepare-release
+    uses: ./.github/workflows/test.yml
+
+  create-github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-22.04
+    needs:
+      - prepare-release
+      - build-artifacts
+      - build-sbom
+      - run-tests
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Organize release assets
+        run: |
+          mkdir -p release-assets
+          
+          # Copy x86_64 binary
+          if [ -f artifacts/packages-x86_64/edgefirst-camera-x86_64 ]; then
+            cp artifacts/packages-x86_64/edgefirst-camera-x86_64 \
+               release-assets/edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-x86_64
+          fi
+          
+          # Copy ARM64 binary
+          if [ -f artifacts/packages-aarch64/edgefirst-camera-aarch64 ]; then
+            cp artifacts/packages-aarch64/edgefirst-camera-aarch64 \
+               release-assets/edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-aarch64
+          fi
+          
+          # Copy SBOM
+          if [ -f artifacts/sbom/sbom.json ]; then
+            cp artifacts/sbom/sbom.json \
+               release-assets/edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-sbom.json
+          fi
+          
+          echo "Release assets prepared:"
+          ls -lh release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: EdgeFirst Camera v${{ needs.prepare-release.outputs.version }}
+          body: |
+            # EdgeFirst Camera v${{ needs.prepare-release.outputs.version }}
+            
+            ## Downloads
+            
+            - **Linux x86_64**: `edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-x86_64`
+            - **Linux ARM64**: `edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-aarch64`
+            - **SBOM**: `edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-sbom.json`
+            
+            ## Installation
+            
+            ```bash
+            # Download binary (replace URL with your platform)
+            wget https://github.com/EdgeFirstAI/camera/releases/download/v${{ needs.prepare-release.outputs.version }}/edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-aarch64
+            
+            # Make executable
+            chmod +x edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-aarch64
+            
+            # Run
+            ./edgefirst-camera-v${{ needs.prepare-release.outputs.version }}-linux-aarch64 --jpeg --h264
+            ```
+            
+            ## What's Changed
+            
+            ${{ needs.prepare-release.outputs.changelog }}
+            
+            ---
+            
+            **Full Documentation**: https://github.com/EdgeFirstAI/camera#readme
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: ${{ contains(needs.prepare-release.outputs.version, '-') }}
+          fail_on_unmatched_files: true

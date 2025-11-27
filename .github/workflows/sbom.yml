@@ -1,0 +1,92 @@
+# GitHub Actions workflow for SBOM generation and license compliance
+#
+# This workflow generates a Software Bill of Materials (SBOM) in CycloneDX format
+# and validates license compliance against Au-Zone policy.
+#
+# Requires:
+# - .github/scripts/generate_sbom.sh
+# - .github/scripts/check_license_policy.py
+# - .github/scripts/validate_notice.py
+#
+# Action Versions (verified November 2025):
+# - actions/checkout@v4 (latest)
+# - actions/setup-python@v5 (latest)
+# - actions/upload-artifact@v4 (latest)
+
+name: SBOM
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [published]
+  workflow_call:  # Allow other workflows to call this
+
+jobs:
+  generate-sbom:
+    name: Generate SBOM & Check License Compliance
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo tools
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.7
+          cargo install cargo-license --version 0.7.0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install scancode-toolkit
+        run: |
+          python3 -m venv venv
+          venv/bin/pip install --upgrade pip
+          venv/bin/pip install scancode-toolkit cyclonedx-bom
+
+      - name: Install CycloneDX CLI
+        run: |
+          mkdir -p ~/.local/bin
+          wget -q -O ~/.local/bin/cyclonedx \
+            https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.27.1/cyclonedx-linux-x64
+          chmod +x ~/.local/bin/cyclonedx
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Generate Complete SBOM
+        run: bash .github/scripts/generate_sbom.sh
+
+      - name: Validate SBOM Format
+        run: cyclonedx validate --input-file sbom.json
+
+      - name: Check License Policy
+        run: python3 .github/scripts/check_license_policy.py sbom.json
+
+      - name: Validate NOTICE File
+        run: python3 .github/scripts/validate_notice.py NOTICE sbom.json
+
+      - name: Upload SBOM Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+          retention-days: 90
+
+      - name: Fail on License Violations
+        if: failure()
+        run: |
+          echo "❌ SBOM generation or license policy check failed!"
+          echo "Review the output above for details."
+          exit 1

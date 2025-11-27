@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use nalgebra::{
     allocator::Allocator, convert, dimension::U4, DVector, DefaultAllocator, Dyn, OMatrix,
     RealField, SVector, U1, U8,

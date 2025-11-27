@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::kalman::ConstantVelocityXYAHModel2;
 use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
