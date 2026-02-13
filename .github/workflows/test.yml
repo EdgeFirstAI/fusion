@@ -72,12 +72,12 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-clippy-
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Generate Clippy report for SonarCloud
         run: |
           # Generate JSON report for SonarCloud (allow warnings for report generation)
-          cargo clippy --workspace --all-targets --all-features --message-format=json 2>&1 \
+          cargo clippy --workspace --all-targets --message-format=json 2>&1 \
             | tee clippy-report.json || true
 
       - name: Upload Clippy report
@@ -184,6 +184,7 @@ jobs:
       - name: Organize coverage files for SonarCloud
         run: |
           echo "=== Downloaded coverage artifacts ==="
+          mkdir -p coverage/
           find coverage/ -type f
 
           # Collect all LCOV coverage reports

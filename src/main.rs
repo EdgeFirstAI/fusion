@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use args::{Args, PCDSource};
-use cdr::{CdrLe, Infinite};
 use clap::Parser;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{Detect, DetectBox2D, DetectTrack, Mask},
+    edgefirst_msgs::{Box as DetectBox, Detect, Mask, Track},
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
+    serde_cdr,
     std_msgs::Header,
 };
 use fusion_model::spawn_fusion_model_thread;
@@ -137,7 +137,7 @@ async fn main() {
 
     let tf_session = session.clone();
     let tf_msg = build_tf_msg();
-    let tf_msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&tf_msg, Infinite).unwrap());
+    let tf_msg = ZBytes::from(serde_cdr::serialize(&tf_msg).unwrap());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
     std::mem::drop(tf_task);
@@ -192,7 +192,7 @@ async fn main() {
 
 fn model_info_callback(info: Arc<Mutex<Option<CameraInfo>>>) -> impl FnMut(zenoh::sample::Sample) {
     move |s: Sample| {
-        let new_info: CameraInfo = match cdr::deserialize(&s.payload().to_bytes()) {
+        let new_info: CameraInfo = match serde_cdr::deserialize(&s.payload().to_bytes()) {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to deserialize message: {e:?}");
@@ -210,7 +210,8 @@ fn tf_static_callback(
     transform: Arc<Mutex<HashMap<(String, String), Transform>>>,
 ) -> impl FnMut(zenoh::sample::Sample) {
     move |s: Sample| {
-        let new_transform: TransformStamped = match cdr::deserialize(&s.payload().to_bytes()) {
+        let new_transform: TransformStamped = match serde_cdr::deserialize(&s.payload().to_bytes())
+        {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to deserialize message: {e:?}");
@@ -351,7 +352,7 @@ async fn load_data(
     data: &Mutexes,
 ) -> Result<(PointCloud2, Vec<ParsedPoint>, Transform, CameraInfo, Mask), String> {
     let (mut pcd, points) = {
-        let pcd = cdr::deserialize(&msg.payload().to_bytes()).unwrap();
+        let pcd = serde_cdr::deserialize(&msg.payload().to_bytes()).unwrap();
         let points = parse_pcd(&pcd);
         (pcd, points)
     };
@@ -381,7 +382,7 @@ async fn load_data(
                     },
                 }
             },
-            |v| v.clone(),
+            |v| *v,
         );
     pcd.header.frame_id = BASE_LINK_FRAME_ID.to_string(); // frame_id is base link because the tf transform was applied
 
@@ -642,7 +643,7 @@ async fn publish_pcd(
     pcd.row_step = data.len() as u32;
     pcd.data = data;
     pcd.is_bigendian = cfg!(target_endian = "big");
-    let buf = cdr::serialize::<_, _, CdrLe>(&pcd, Infinite).unwrap();
+    let buf = serde_cdr::serialize(&pcd).unwrap();
     let buf_pcd = ZBytes::from(buf);
     let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
     match publ.put(buf_pcd).encoding(enc_pcd).await {
@@ -734,7 +735,7 @@ fn get_3d_bbox(
 
         // Add a 3D box using the max and min x,y,z values
         // TODO: Add 3D tracking to improve smoothness
-        bbox_3d.push(DetectBox2D {
+        bbox_3d.push(DetectBox {
             center_x: -(y_max + y_min) / 2.0, // we use an optical frame, so positive X is right
             center_y: -(z_max + z_min) / 2.0, // we use an optical frame, so positive Y is down
             width: (y_max - y_min),
@@ -743,7 +744,7 @@ fn get_3d_bbox(
             label: class.to_string(),
             score: 1.0,
             speed: 0.0,
-            track: DetectTrack {
+            track: Track {
                 id: "".to_string(),
                 lifetime: 0,
                 created: header.stamp.clone(),
@@ -760,7 +761,7 @@ fn get_3d_bbox(
             frame_id: format!("{BASE_LINK_FRAME_ID}_optical"),
         },
     };
-    let msg = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&new_msg, Infinite).unwrap());
+    let msg = ZBytes::from(serde_cdr::serialize(&new_msg).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
     (msg, enc)
 }
@@ -1093,7 +1094,7 @@ async fn grid_radar_update_tracker(
             boxed: false,
         };
 
-        let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+        let buf = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
         session
@@ -1356,7 +1357,7 @@ fn get_occupied_cluster(
     centroid_pcd.row_step = data.len() as u32;
     centroid_pcd.data = data;
 
-    let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&centroid_pcd, Infinite).unwrap());
+    let buf = ZBytes::from(serde_cdr::serialize(&centroid_pcd).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
 
     (buf, enc)
@@ -1576,7 +1577,7 @@ fn get_occupied_no_cluster(
     grid_pcd.row_step = data.len() as u32;
     grid_pcd.data = data;
 
-    let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&grid_pcd, Infinite).unwrap());
+    let buf = ZBytes::from(serde_cdr::serialize(&grid_pcd).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
 
     (buf, enc)

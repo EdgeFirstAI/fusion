@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use edgefirst_schemas::edgefirst_msgs::Mask;
+use edgefirst_schemas::{edgefirst_msgs::Mask, serde_cdr};
 use itertools::Itertools;
 use log::error;
 use tokio::sync::Mutex;
@@ -39,7 +39,7 @@ pub async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<M
         };
 
         let mut new_mask: Mask = match info_span!("mask_deserialize")
-            .in_scope(|| cdr::deserialize::<Mask>(&sample.payload().to_bytes()))
+            .in_scope(|| serde_cdr::deserialize::<Mask>(&sample.payload().to_bytes()))
         {
             Ok(v) => v,
             Err(e) => {

@@ -2,14 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use async_pidfd::PidFd;
-use cdr::{CdrLe, Infinite};
 use deepviewrt::{
     context::Context,
     engine::Engine,
     model,
     tensor::{Tensor, TensorType},
 };
-use edgefirst_schemas::edgefirst_msgs::{DmaBuf, Mask, RadarCube};
+use edgefirst_schemas::{
+    edgefirst_msgs::{DmaBuffer, Mask, RadarCube},
+    serde_cdr,
+};
 use libc::memcpy;
 use log::{debug, error, info, trace, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
@@ -232,8 +234,9 @@ pub async fn run_rtm_fusion_model(
             None => continue,
         };
 
-        let radarcube = info_span!("cube_deserialize")
-            .in_scope(|| cdr::deserialize::<RadarCube>(&sample.payload().to_bytes()).unwrap());
+        let radarcube = info_span!("cube_deserialize").in_scope(|| {
+            serde_cdr::deserialize::<RadarCube>(&sample.payload().to_bytes()).unwrap()
+        });
         let cube_shape = radarcube
             .shape
             .iter()
@@ -286,7 +289,7 @@ pub async fn run_rtm_fusion_model(
                 mask,
                 boxed: false,
             };
-            let buf = ZBytes::from(cdr::serialize::<_, _, CdrLe>(&msg, Infinite).unwrap());
+            let buf = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
             let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
             (buf, enc)
@@ -372,7 +375,7 @@ async fn load_camera_frame(
     };
 
     let cam_buffer = info_span!("camera_deserialize")
-        .in_scope(|| cdr::deserialize::<DmaBuf>(&sample.payload().to_bytes()).unwrap());
+        .in_scope(|| serde_cdr::deserialize::<DmaBuffer>(&sample.payload().to_bytes()).unwrap());
 
     match info_span!("camera_load").in_scope(|| {
         load_frame_dmabuf(
@@ -391,7 +394,7 @@ async fn load_camera_frame(
 }
 
 #[instrument(skip_all)]
-fn _process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
+fn _process_dmabuffer(cam_buffer: &mut DmaBuffer) -> Result<File, io::Error> {
     let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
         Ok(v) => v,
         Err(e) => {
@@ -531,7 +534,7 @@ fn load_frame_dmabuf(
     tensor: &mut Tensor,
     img_mgr: &ImageManager,
     dest: &mut Image,
-    dma_buf: &DmaBuf,
+    dma_buf: &DmaBuffer,
     preprocess: Preprocessing,
 ) -> Result<(), FusionError> {
     if dest.height() as i32 != tensor.shape()[1] {

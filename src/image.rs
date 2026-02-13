@@ -5,7 +5,7 @@ use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
-use edgefirst_schemas::edgefirst_msgs::DmaBuf as DmaBufMsg;
+use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
 use four_char_code::{four_char_code, FourCharCode};
 use g2d_sys::{
     g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270,

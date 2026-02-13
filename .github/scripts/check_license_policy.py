@@ -34,7 +34,7 @@ from typing import Set, List, Dict, Tuple
 LICENSE_OVERRIDES = {
     "sublime_fuzzy@0.7.0": "Apache-2.0",  # Confirmed from upstream repo
     "dma-buf@0.4.0": "MIT",  # Confirmed from https://github.com/mripard/dma-buf
-    "dma-heap@0.4.1": "MIT"  # Confirmed from https://github.com/mripard/dma-heap
+    "dma-heap@0.4.1": "MIT",  # Confirmed from https://github.com/mripard/dma-heap
 }
 
 # Proprietary licenses requiring conditional approval
