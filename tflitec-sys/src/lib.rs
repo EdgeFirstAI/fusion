@@ -1,3 +1,6 @@
+// Copyright 2025 Au-Zone Technologies Inc.
+// SPDX-License-Identifier: Apache-2.0
+
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -124,7 +127,7 @@ impl TFLiteLib {
         })
     }
 
-    pub fn new_model_from_mem(&self, model: Vec<u8>) -> Result<Model, TfLiteError> {
+    pub fn new_model_from_mem(&self, model: Vec<u8>) -> Result<Model<'_>, TfLiteError> {
         let m = unsafe {
             self.lib
                 .TfLiteModelCreate(model.as_ptr() as *const c_void, model.len())
@@ -136,7 +139,7 @@ impl TFLiteLib {
         })
     }
 
-    pub fn new_interpreter_builder(&self) -> Result<InterpreterBuilder, TfLiteError> {
+    pub fn new_interpreter_builder(&self) -> Result<InterpreterBuilder<'_>, TfLiteError> {
         Ok(InterpreterBuilder {
             options: ptr::NonNull::new(unsafe { self.lib.TfLiteInterpreterOptionsCreate() })
                 .ok_or(TfLiteError::new(

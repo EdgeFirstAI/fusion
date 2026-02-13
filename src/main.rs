@@ -42,6 +42,7 @@ mod image;
 mod kalman;
 mod mask;
 mod pcd;
+#[cfg(feature = "deepviewrt")]
 mod rtm_model;
 mod tflite_model;
 mod tracker;
@@ -398,8 +399,9 @@ async fn load_data(
 }
 
 #[instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn fusion(
-    points: &mut Vec<ParsedPoint>,
+    points: &mut [ParsedPoint],
     transform: Transform,
     cam_info: &CameraInfo,
     mask: &Mask,
@@ -496,6 +498,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
 }
 
 #[instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn publish(
     zenoh: &ZenohCtx,
     args: &Args,

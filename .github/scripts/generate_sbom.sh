@@ -26,15 +26,15 @@ set -e  # Exit on error
 # PROJECT CONFIGURATION - CUSTOMIZE THESE
 # ===========================================================================
 
-PROJECT_NAME="edgefirst-camera"
+PROJECT_NAME="edgefirst-fusion"
 PROJECT_TYPE="application"  # Options: library, application, framework
 VERSION_FILE="Cargo.toml"  # Single source of truth for version
 
 # Source directories to scan (space-separated)
-SOURCE_DIRS="src g2d-sys/src tests benches"
+SOURCE_DIRS="src tflitec-sys/src"
 
 # Package manifest files (for dependency parsing)
-MANIFEST_FILES="Cargo.toml Cargo.lock g2d-sys/Cargo.toml"
+MANIFEST_FILES="Cargo.toml Cargo.lock tflitec-sys/Cargo.toml"
 
 # ===========================================================================
 # SBOM GENERATION

@@ -391,7 +391,7 @@ async fn load_camera_frame(
 }
 
 #[instrument(skip_all)]
-fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
+fn _process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
     let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
         Ok(v) => v,
         Err(e) => {

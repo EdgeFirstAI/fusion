@@ -727,6 +727,7 @@ dependencies = [
  "dma-buf",
  "dma-heap",
  "edgefirst-schemas",
+ "four-char-code",
  "g2d-sys",
  "itertools 0.14.0",
  "lapjv",
@@ -746,7 +747,6 @@ dependencies = [
  "tracing-tracy",
  "tracy-client",
  "uuid",
- "videostream",
  "zenoh",
  "zstd",
 ]
@@ -857,6 +857,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "four-char-code"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42da99970737c0150e3c5cd1cdc510735a2511739f5c3aa3c6bfc9f31441488d"
+
+[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -957,10 +963,13 @@ dependencies = [
 
 [[package]]
 name = "g2d-sys"
-version = "1.0.1"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e36940773868c0e387a2c0f21d24bd7ae940531dc84bc96f34f471583e94e129"
 dependencies = [
- "dma-buf",
+ "four-char-code",
  "libloading",
+ "log",
  "nix",
 ]
 
@@ -3448,21 +3457,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
-name = "unix-ts"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e88bab2be9575823c160e1ca9869179a5b9381e23e1013fdbe4c75fd8705e1a"
-dependencies = [
- "unix-ts-macros",
-]
-
-[[package]]
-name = "unix-ts-macros"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cf5fd32fe602f27c0db508ffab4a845120fdb7474ea78c01e5c483ac1b09951"
-
-[[package]]
 name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3567,23 +3561,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "videostream"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce641d83fcf7a5e270cb9c947d6f6b86d7ac5785aaded96230c5cdc2ac2cc12d"
-dependencies = [
- "dma-buf",
- "unix-ts",
- "videostream-sys",
-]
-
-[[package]]
-name = "videostream-sys"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea1a71c0a002ed764634fb12a596e6c85c52acc5cae08cb15083f70798ad9dcb"
 
 [[package]]
 name = "walkdir"

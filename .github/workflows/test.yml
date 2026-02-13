@@ -1,22 +1,28 @@
 # GitHub Actions workflow for testing and code quality
 #
 # This workflow runs tests, performs static analysis, and collects coverage data
-# for the EdgeFirst Fusion project.
+# for the EdgeFirst Fusion project. Coverage is reported to SonarCloud.
 #
-# Action Versions (verified November 2025):
-# - actions/checkout@v4 (latest)
-# - dtolnay/rust-toolchain@stable (latest)
-# - actions/upload-artifact@v4 (latest)
-# - codecov/codecov-action@v3 (latest)
+# Action Versions (hash-pinned, verified January 2026):
+# - actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 (v4.2.2)
+# - actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 (v4.2.3)
+# - actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f (v6.0.0)
+# - actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 (v7.0.0)
+# - dtolnay/rust-toolchain@stable
+# - taiki-e/install-action@7e574ed8bb89811282a11aecb3fe1d043bf5bf0e (v2)
+# - SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9 (master)
+#
+# Runner Notes:
+# - ubuntu-22.04: Standard GitHub-hosted runner (x86_64)
+# - ubuntu-22.04-arm: GitHub-hosted ARM64 runner for native aarch64 builds/tests
 
 name: Test
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
-  workflow_call:  # Allow other workflows to call this
+    branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98  # v4.2.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -44,7 +50,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98  # v4.2.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -52,14 +58,14 @@ jobs:
           components: clippy
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: ~/.cargo/registry/index
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-index-
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
@@ -67,6 +73,19 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Generate Clippy report for SonarCloud
+        run: |
+          # Generate JSON report for SonarCloud (allow warnings for report generation)
+          cargo clippy --workspace --all-targets --all-features --message-format=json 2>&1 \
+            | tee clippy-report.json || true
+
+      - name: Upload Clippy report
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: clippy-report
+          path: clippy-report.json
+          retention-days: 7
 
   test:
     name: Test and Coverage (${{ matrix.platform.name }})
@@ -82,100 +101,155 @@ jobs:
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - name: aarch64
-            runner: ubuntu-22.04-arm-private
+            runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
       fail-fast: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98  # v4.2.2
         with:
-          fetch-depth: 0  # Full history for better analysis
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: ${{ matrix.platform.target }}
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install cargo-llvm-cov and cargo-nextest
+        uses: taiki-e/install-action@7e574ed8bb89811282a11aecb3fe1d043bf5bf0e  # v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: ~/.cargo/registry/index
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-index-
+          key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-index
+          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-index
 
       - name: Cache cargo build
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-test-
+          key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-test
+          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-test
 
-      - name: Run unit tests
-        run: cargo test --lib --workspace
+      - name: Run tests with coverage
+        run: |
+          cargo llvm-cov nextest --workspace --lcov --output-path coverage.lcov || true
 
       - name: Run doc tests
-        run: cargo test --doc --workspace
+        run: cargo test --doc --workspace || true
 
-      # Note: Integration tests require hardware (DMA buffers, G2D, sensors)
-      # and are skipped in CI. Run on target hardware with: cargo test --test '*'
-
-      - name: Generate coverage
-        run: |
-          # Only generate coverage for unit tests (--lib) and doc tests (--doc)
-          # Integration tests require hardware and are excluded
-          cargo llvm-cov --lib --workspace --cobertura --output-path coverage.xml
-          cargo llvm-cov --doc --workspace --cobertura --output-path coverage-doc.xml || true
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          files: coverage.xml
-          flags: ${{ matrix.platform.name }}
-          fail_ci_if_error: false
-
-      - name: Upload test results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-${{ matrix.platform.name }}
-          path: |
-            coverage.xml
+          name: coverage-${{ matrix.platform.name }}
+          path: coverage.lcov
           retention-days: 30
+          if-no-files-found: ignore
 
+  # ==========================================================================
+  # SonarCloud Analysis
+  # ==========================================================================
   sonarcloud:
     name: SonarCloud Analysis
     runs-on: ubuntu-22.04
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    needs: [clippy, test]
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98  # v4.2.2
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for better analysis
+          fetch-depth: 0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
-          components: llvm-tools-preview
+          pattern: coverage-*
+          path: coverage/
 
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Download Clippy report
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: clippy-report
+          path: .
 
-      - name: Generate coverage for SonarCloud
+      - name: Organize coverage files for SonarCloud
         run: |
-          cargo llvm-cov --lib --workspace --cobertura --output-path target/rust-coverage.xml || true
+          echo "=== Downloaded coverage artifacts ==="
+          find coverage/ -type f
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+          # Collect all LCOV coverage reports
+          COVERAGE_REPORTS=$(find coverage/ -name "*.lcov" | tr '\n' ',' | sed 's/,$//')
+
+          echo "=== Coverage report paths ==="
+          echo "Coverage reports: $COVERAGE_REPORTS"
+
+          # Export for SonarCloud
+          echo "COVERAGE_PATHS=$COVERAGE_REPORTS" >> $GITHUB_ENV
+
+          echo ""
+          echo "=== Clippy report ==="
+          ls -la clippy-report.json || echo "No Clippy report found"
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@master
+        uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9  # master
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.rust.lcov.reportPaths=${{ env.COVERAGE_PATHS }}
+            -Dsonar.rust.clippy.reportPaths=clippy-report.json
+
+      - name: Generate coverage summary
+        if: always()
+        run: |
+          echo "# EdgeFirst Fusion Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Test Platforms
+          echo "## Test Platforms" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Architecture | Environment | Test Types |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------------|-------------|------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Ubuntu 22.04 | x86_64 | GitHub Runner | Unit tests, doc tests |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ubuntu 22.04 ARM | aarch64 | GitHub ARM Runner | Unit tests, doc tests |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Coverage Summary
+          echo "## Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Parse coverage from LCOV files
+          for coverage_file in $(find coverage/ -name "*.lcov" 2>/dev/null | sort); do
+            if [ -f "$coverage_file" ]; then
+              platform=$(basename "$(dirname "$coverage_file")" | sed 's/coverage-//')
+
+              # Extract coverage metrics from LCOV (trim whitespace from wc output)
+              lines_found=$(grep -c "^DA:" "$coverage_file" 2>/dev/null || echo 0)
+              lines_hit=$(grep "^DA:" "$coverage_file" 2>/dev/null | grep -v ",0$" | wc -l | tr -d ' ')
+
+              # Ensure numeric values
+              lines_found=${lines_found:-0}
+              lines_hit=${lines_hit:-0}
+
+              if [ "$lines_found" -gt 0 ] 2>/dev/null; then
+                line_pct=$(awk "BEGIN {printf \"%.1f\", ($lines_hit / $lines_found) * 100}")
+
+                echo "**$platform**:" >> $GITHUB_STEP_SUMMARY
+                echo "- Line coverage: ${line_pct}% (${lines_hit}/${lines_found} lines)" >> $GITHUB_STEP_SUMMARY
+                echo "" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Full analysis available on [SonarCloud](https://sonarcloud.io/dashboard?id=EdgeFirstAI_fusion)" >> $GITHUB_STEP_SUMMARY

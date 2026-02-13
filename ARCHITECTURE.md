@@ -1,85 +1,376 @@
-# Architecture
+# EdgeFirst Fusion - Architecture
 
-## Overview
+**Technical architecture documentation for developers**
 
-Maivin Fusion is a ROS 2 node that performs multi-modal sensor fusion for the EdgeFirst Maivin platform. It combines data from multiple sensors (camera, LiDAR, etc.) to provide enhanced perception capabilities.
+This document describes the internal architecture of EdgeFirst Fusion, focusing on thread models, data flow patterns, and system design decisions. For user-facing documentation, see [README.md](README.md).
 
-## System Architecture
+---
 
-### ROS 2 Node
+## Table of Contents
 
-The fusion node operates as a ROS 2 component with the following responsibilities:
+1. [System Overview](#system-overview)
+2. [Thread Architecture](#thread-architecture)
+3. [Data Flow](#data-flow)
+4. [Message Formats](#message-formats)
+5. [Hardware Integration](#hardware-integration)
+6. [Instrumentation and Profiling](#instrumentation-and-profiling)
+7. [References](#references)
 
-- Subscribe to sensor data topics (camera, LiDAR, IMU, etc.)
-- Perform sensor calibration and synchronization
-- Execute fusion algorithms
-- Publish fused perception results
+---
 
-### Key Components
+## System Overview
 
-1. **Sensor Input Processing**
-   - Image processing for camera data
-   - Point cloud processing for LiDAR data
-   - Timestamp synchronization
+EdgeFirst Fusion is a multi-threaded, asynchronous application built on the Tokio async runtime. It implements a **subscribe-process-publish** pattern where sensor data arrives via Zenoh subscriptions, is processed through fusion and tracking pipelines, and results are published back to Zenoh topics.
 
-2. **Fusion Models**
-   - TFLite model execution
-   - RTM (Runtime) model support
-   - Custom fusion algorithms
+### Architecture Diagram
 
-3. **Object Tracking**
-   - Kalman filtering for state estimation
-   - Multi-object tracking
-   - Track association
+```mermaid
+graph TB
+    subgraph "Zenoh Subscriptions"
+        RadarSub["rt/radar/clusters<br/>PointCloud2"]
+        LidarSub["rt/lidar/clusters<br/>PointCloud2"]
+        CameraSub["rt/camera/dma<br/>DmaBuffer"]
+        MaskSub["rt/model/mask<br/>Mask"]
+        InfoSub["rt/camera/info<br/>CameraInfo"]
+        TFSub["rt/tf_static<br/>TransformStamped"]
+        CubeSub["rt/radar/cube<br/>RadarCube"]
+    end
 
-4. **Output Generation**
-   - Fused perception results
-   - Tracking data
-   - Performance metrics
+    subgraph "Main Thread (Tokio Async Runtime)"
+        Init["Initialization<br/>Zenoh session, subscribers,<br/>shared state"]
+    end
 
-## Communication
+    subgraph "Fusion Threads"
+        RadarThread["Radar Fusion Thread<br/>1. Receive PCD<br/>2. Load transforms + mask<br/>3. Project points → mask<br/>4. Classify + track<br/>5. Publish results"]
+        LidarThread["LiDAR Fusion Thread<br/>(same pipeline as radar)"]
+    end
 
-### Zenoh Integration
+    subgraph "Model Thread"
+        ModelThread["Fusion Model Thread<br/>1. Receive camera DMA<br/>2. Receive radar cube<br/>3. Run ML inference<br/>4. Publish grid predictions"]
+    end
 
-The fusion node uses Zenoh for distributed communication, enabling:
+    subgraph "Background Tasks"
+        MaskTask["Mask Handler<br/>Subscribes to mask topic<br/>Updates shared state"]
+        TFTask["TF Static Publisher<br/>1 Hz broadcast"]
+    end
 
-- Low-latency data distribution
-- Zero-copy shared memory transfers
-- Efficient network utilization
+    subgraph "Zenoh Publications"
+        RadarOut["rt/fusion/radar<br/>PointCloud2"]
+        LidarOut["rt/fusion/lidar<br/>PointCloud2"]
+        GridOut["rt/fusion/occupancy<br/>PointCloud2"]
+        BBoxOut["rt/fusion/boxes3d<br/>Detect"]
+        ModelOut["rt/fusion/model_output<br/>Mask"]
+    end
 
-### Data Flow
+    RadarSub --> RadarThread
+    LidarSub --> LidarThread
+    CameraSub --> ModelThread
+    CubeSub --> ModelThread
+    MaskSub --> MaskTask
+    InfoSub --> Init
+    TFSub --> Init
+
+    RadarThread --> RadarOut
+    RadarThread --> GridOut
+    RadarThread --> BBoxOut
+    LidarThread --> LidarOut
+    LidarThread --> GridOut
+    LidarThread --> BBoxOut
+    ModelThread --> ModelOut
+
+    MaskTask -.->|"shared state"| RadarThread
+    MaskTask -.->|"shared state"| LidarThread
+    Init -.->|"shared state"| RadarThread
+    Init -.->|"shared state"| LidarThread
+    ModelThread -.->|"grid predictions"| RadarThread
+    ModelThread -.->|"grid predictions"| LidarThread
+```
+
+### Key Architectural Properties
+
+- **Shared State via Mutex**: Camera info, segmentation masks, transforms, and model predictions are shared between threads using `tokio::sync::Mutex`
+- **Dedicated Fusion Threads**: Radar and LiDAR processing each run in their own thread with a dedicated single-threaded Tokio runtime
+- **Independent Model Thread**: ML inference runs independently, publishing predictions consumed by fusion threads
+- **Drain-on-Receive**: Fusion threads drain old messages and process only the latest, preventing queue buildup
+- **Configurable Pipeline**: Sensor sources, output topics, and processing stages are all configurable via CLI
+
+---
+
+## Thread Architecture
+
+### Main Thread (Tokio Multi-Threaded Runtime)
+
+**Responsibilities:**
+
+- Initialize Zenoh session and declare all subscribers/publishers
+- Set up shared state (camera info, transforms, mask)
+- Spawn dedicated processing threads
+- Launch background tasks (TF static publisher, mask handler)
+
+**Execution Model:**
+
+The main thread runs within `#[tokio::main]` and coordinates startup:
+
+1. Parse CLI arguments
+2. Initialize tracing (stdout, journald, Tracy)
+3. Open Zenoh session
+4. Set up shared state with `Arc<Mutex<_>>`
+5. Spawn mask handler thread
+6. Spawn fusion model thread
+7. Spawn radar and LiDAR fusion threads
+8. Wait for fusion threads to complete
+
+---
+
+### Fusion Threads (Radar / LiDAR)
+
+Each fusion thread runs a continuous processing loop:
+
+```mermaid
+graph TD
+    Receive["1. Receive PCD<br/>(drain to latest)"] --> Load["2. Load Shared Data<br/>Transform, CameraInfo, Mask"]
+    Load --> Project["3. Project Points<br/>3D → 2D using calibration"]
+    Project --> Classify["4. Late Fusion<br/>Classify points via mask"]
+    Classify --> ModelFuse["5. Model Fusion<br/>Apply grid predictions"]
+    ModelFuse --> Track["6. Track Objects<br/>(optional ByteTrack)"]
+    Track --> Publish["7. Publish Results<br/>PCD, Grid, BBox3D"]
+    Publish --> Receive
+```
+
+**Processing Pipeline Details:**
+
+1. **Receive**: Drain Zenoh subscription queue, process only the latest message. Includes exponential backoff timeout (2s → 1h) when no data arrives.
+2. **Load**: Acquire locks on shared camera info, transforms, and segmentation mask. Skip frame if any required data is unavailable.
+3. **Project**: Apply TF transform (sensor frame → base_link), then project 3D points to 2D camera coordinates using the camera intrinsic matrix.
+4. **Late Fusion (Vision)**: For each projected point, sample the segmentation mask to assign a class label. Supports both clustered (per-cluster majority vote) and non-clustered (per-point) modes.
+5. **Model Fusion**: Apply ML model grid predictions to classify points based on spatial proximity to predicted occupancy cells.
+6. **Track**: ByteTrack tracker associates detections across frames using IoU matching and Kalman filtering. Maintains object persistence for configurable duration after disappearing.
+7. **Publish**: Serialize enriched point cloud, occupancy grid, and 3D bounding boxes as ROS2 CDR messages and publish to Zenoh.
+
+**Thread Count:** 1 per enabled sensor source (radar, LiDAR)
+
+---
+
+### Fusion Model Thread
+
+**Responsibilities:**
+
+- Subscribe to camera DMA buffers and radar cubes
+- Pre-process inputs (image scaling via G2D, radar cube formatting)
+- Run ML inference (TFLite or DeepView RT)
+- Publish grid predictions to shared state
+
+**Supported Engines:**
+
+- **DeepView RT (.rtm)**: Au-Zone's inference runtime with NPU acceleration
+- **TFLite (.tflite)**: TensorFlow Lite with optional delegate (NPU, GPU)
+
+**Processing Pipeline:**
 
 ```
-Sensors → Fusion Node → Perception Results
-   ↓           ↓              ↓
-Camera    Processing    Tracking Data
-LiDAR     + Fusion      + Metrics
-IMU       + Tracking
+[Receive]     Camera DMA + Radar Cube
+   ↓
+[Preprocess]  G2D image resize + format conversion
+   ↓          Radar cube normalization
+[Inference]   TFLite or DeepView RT model execution
+   ↓
+[Postprocess] Sigmoid activation (optional)
+   ↓          Grid extraction
+[Publish]     Update shared grid state + publish mask
 ```
 
-## Performance
+**Thread Count:** 1 (when `--model` is specified)
 
-### Tracy Profiling
+---
 
-The fusion node includes Tracy profiling support for:
+### Mask Handler Thread
 
-- Real-time performance monitoring
-- Bottleneck identification
-- Algorithm optimization
+**Responsibilities:**
 
-### Hardware Acceleration
+- Subscribe to segmentation mask topic
+- Deserialize and store latest mask in shared state
+- Compute argmax across mask channels
 
-- GPU acceleration for image processing (G2D)
-- DMA buffers for zero-copy transfers
-- Optimized for ARM platforms
+**Thread Count:** 1
 
-## Configuration
+---
 
-Configuration is managed through command-line arguments and environment variables. See `args.rs` for available options.
+### TF Static Publisher (Background Task)
 
-## Future Enhancements
+Publishes a static transform from `base_link` to `base_link_optical` at 1 Hz for ROS2 compatibility. Runs as a detached Tokio task on the main runtime's thread pool.
 
-- Additional sensor modalities
-- Improved fusion algorithms
-- Enhanced tracking capabilities
-- Multi-camera support
+---
+
+## Data Flow
+
+### Shared State Communication
+
+Threads communicate through shared state protected by `tokio::sync::Mutex`:
+
+| State | Writer | Readers | Purpose |
+|-------|--------|---------|---------|
+| `CameraInfo` | Main thread (subscriber callback) | Fusion threads | Camera calibration matrix |
+| `Mask` | Mask handler thread | Fusion threads | Segmentation mask for late fusion |
+| `Transform` | Main thread (subscriber callback) | Fusion threads | Sensor-to-base_link transforms |
+| `Grid` | Model thread | Fusion threads | ML model occupancy predictions |
+
+### Drain-Receive Pattern
+
+Fusion threads use a drain-receive pattern to ensure they always process the most recent data:
+
+1. **Drain**: Call `sub.drain().last()` to discard queued messages and get the newest
+2. **Timeout**: If no messages queued, block with exponential backoff timeout
+3. **Backpressure**: Old messages are implicitly dropped, preventing processing lag
+
+---
+
+## Message Formats
+
+All messages use **ROS2 CDR (Common Data Representation)** serialization.
+
+### Input Messages
+
+| Topic | Type | Description |
+|-------|------|-------------|
+| `rt/radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud with optional cluster_id |
+| `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
+| `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame as DMA buffer |
+| `rt/radar/cube` | Raw bytes (zstd compressed) | Radar cube for ML model input |
+| `rt/model/mask` | `edgefirst_msgs/Mask` | Vision model segmentation mask |
+| `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
+| `rt/tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |
+
+### Output Messages
+
+| Topic | Type | Description |
+|-------|------|-------------|
+| `rt/fusion/radar` | `sensor_msgs/PointCloud2` | Radar PCD with vision_class + fusion_class fields |
+| `rt/fusion/occupancy` | `sensor_msgs/PointCloud2` | Occupancy grid as point cloud |
+| `rt/fusion/boxes3d` | `edgefirst_msgs/Detect` | 3D bounding boxes from clustered points |
+| `rt/fusion/model_output` | `edgefirst_msgs/Mask` | Raw ML model grid output |
+
+### Enriched Point Cloud Fields
+
+The fusion output adds classification fields to input point clouds:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `x`, `y`, `z` | FLOAT32 | 3D coordinates (base_link frame) |
+| `cluster_id` | UINT32 | Cluster identifier (from input) |
+| `vision_class` | UINT8 | Class from camera mask projection |
+| `fusion_class` | UINT8 | Class from ML model grid prediction |
+
+---
+
+## Hardware Integration
+
+### NXP G2D - Image Format Conversion
+
+Used by the fusion model thread to resize and convert camera frames for ML model input:
+
+- **Format Conversion**: YUYV → RGB/NV12 for model input
+- **Scaling**: Camera resolution → model input resolution
+- **Rotation**: Configurable rotation support
+- **Access**: Via `g2d-sys` crate FFI bindings to `/dev/galcore`
+
+See `src/image.rs` for G2D integration.
+
+### TFLite Runtime
+
+Loaded dynamically via `tflitec-sys` FFI bindings:
+
+- Searches for `libtensorflow-lite.so.2.X.Y` (versions 1-49, patches 0-9)
+- Falls back to `libtensorflowlite_c.so`
+- Supports external delegates (NPU acceleration) via `tflite_plugin_create_delegate`
+
+See `tflitec-sys/` for FFI bindings and `src/tflite_model.rs` for model loading.
+
+### DeepView RT Runtime
+
+Au-Zone's inference runtime (`deepviewrt` crate), **feature-gated** behind `--features deepviewrt`:
+
+- Native NPU acceleration on NXP i.MX8M Plus
+- Loads `.rtm` model files
+- DMA buffer input for zero-copy inference
+- Requires `libdeepview-rt.so` installed on the target system
+
+Build with DeepView RT support: `cargo build --release --features deepviewrt`
+
+See `src/rtm_model.rs` for model loading.
+
+### DMA Buffer Handling
+
+Camera frames are received as DMA buffer file descriptors:
+
+1. Extract file descriptor from Zenoh message using `pidfd_getfd`
+2. Memory-map the DMA buffer with `mmap(MAP_SHARED)`
+3. Pass to G2D for hardware-accelerated format conversion
+4. Use converted buffer as ML model input
+
+See `src/image.rs` for DMA buffer lifecycle management.
+
+---
+
+## Instrumentation and Profiling
+
+### Tracing Architecture
+
+The application uses `tracing-subscriber` with multiple layers:
+
+1. **stdout_log** - Console output with pretty formatting (filtered by `RUST_LOG`)
+2. **journald** - systemd journal integration (filtered by `RUST_LOG`)
+3. **tracy** - Tracy profiler integration (optional, `--tracy` flag)
+
+### Tracy Integration
+
+Key instrumented functions use `#[instrument]` attributes:
+
+- `load_data` - Shared state acquisition timing
+- `fusion` - Core fusion pipeline timing
+- `publish` - Zenoh publishing timing
+- `publish_bbox3d`, `publish_pcd`, `publish_grid` - Individual output timing
+
+Frame marks track the fusion loop iteration rate.
+
+### Instrumentation Points
+
+**Fusion Thread:**
+- PCD receive and deserialization
+- Transform lookup and projection
+- Late fusion classification
+- Model prediction application
+- Tracking update
+- Result serialization and publishing
+
+**Model Thread:**
+- Camera DMA buffer reception
+- Image preprocessing (G2D)
+- Model inference timing
+- Grid extraction and publishing
+
+---
+
+## References
+
+**Rust Crates:**
+
+- [tokio](https://tokio.rs/) - Async runtime
+- [zenoh](https://zenoh.io/) - Pub/sub middleware
+- [nalgebra](https://nalgebra.org/) - Linear algebra for transforms
+- [ndarray](https://docs.rs/ndarray/) - N-dimensional arrays for model I/O
+- [deepviewrt](https://crates.io/crates/deepviewrt) - DeepView RT inference runtime
+
+**Hardware Documentation:**
+
+- [NXP i.MX8M Plus Reference Manual](https://www.nxp.com/docs/en/reference-manual/IMX8MPRM.pdf)
+
+**ROS2 Standards:**
+
+- [ROS2 CDR Serialization](https://design.ros2.org/articles/generated_interfaces_cpp.html)
+- [sensor_msgs/PointCloud2](https://docs.ros2.org/latest/api/sensor_msgs/msg/PointCloud2.html)
+- [sensor_msgs/CameraInfo](https://docs.ros2.org/latest/api/sensor_msgs/msg/CameraInfo.html)
+
+**Algorithms:**
+
+- [ByteTrack: Multi-Object Tracking by Associating Every Detection Box](https://arxiv.org/abs/2110.06864)
+- [Kalman Filter](https://en.wikipedia.org/wiki/Kalman_filter) - State estimation for object tracking

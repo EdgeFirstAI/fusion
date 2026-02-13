@@ -251,8 +251,8 @@ pub async fn run_tflite_fusion_model(
 
         load_cube(&mut backbone_inputs, radar_input_index, &cube);
 
-        if camera_input_index.is_some() {
-            let camera_input_tensor = &mut backbone_inputs[camera_input_index.unwrap()];
+        if let Some(camera_input_index) = camera_input_index {
+            let camera_input_tensor = &mut backbone_inputs[camera_input_index];
             let sub_camera = sub_camera.as_ref().unwrap();
             load_camera_frame(
                 camera_input_tensor,
@@ -368,7 +368,7 @@ fn get_model_output(outputs: &[Tensor], logits: bool) -> (Vec<f32>, Vec<usize>) 
 }
 
 #[instrument(skip_all)]
-fn process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
+fn _process_dmabuffer(cam_buffer: &mut DmaBuf) -> Result<File, io::Error> {
     let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
         Ok(v) => v,
         Err(e) => {
