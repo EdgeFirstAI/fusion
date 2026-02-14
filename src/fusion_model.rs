@@ -123,7 +123,12 @@ fn normalize_cube(cube: &[i16]) -> Vec<f32> {
 
 pub(crate) fn apply_sigmoid(mask: &mut [f32]) {
     for v in mask.iter_mut() {
-        *v = v.exp() / (1.0 + v.exp())
+        *v = if *v >= 0.0 {
+            1.0 / (1.0 + (-*v).exp())
+        } else {
+            let ev = v.exp();
+            ev / (1.0 + ev)
+        };
     }
 }
 
@@ -170,103 +175,4 @@ mod swap_axes_test {
         cube.par_mapv_inplace(|v| (v.abs() + 1.0).log(E) * v.signum());
         println!("{}", cube1 == cube);
     }
-    // #[test]
-    // fn test_range_crop() {
-    //     let mut cube = Array::from_shape_vec(
-    //         [2, 200, 4, 256 / 2, 2],
-    //         (0..(2 * 200 * 4 * 256)).map(|v| v as f32).collect(),
-    //     )
-    //     .unwrap();
-    //     let input_size = [1, 128, 128, 16];
-    //     let cube = preprocess_cube(&mut cube, &input_size);
-    //     assert_eq!(
-    //         cube.dim(),
-    //         [128, 128, 16].into(),
-    //         "Dims was not (1, 128, 128, 16)"
-    //     );
-    //     println!("{}", cube.flatten());
-    //     // assert_eq!(
-    //     //     cube.flatten()[1],
-    //     //     0.7615942,
-    //     //     "Second value was not 0.7615942"
-    //     // );
-    //     println!("len={}", cube.flatten().as_slice().unwrap().len())
-    // }
-    // #[test]
-    // fn test_basic() {
-    //     let data = include_str!("testdata/before_radar.txt");
-
-    //     let flat_cube: Vec<f32> = data.lines().map(|s|
-    // s.parse().unwrap()).collect();     let mut cube =
-    // Array::from_shape_vec(         [2, 200, 4, 256 / 2, 2],
-    //         (0..(2 * 200 * 4 * 256)).map(|v| flat_cube[v]).collect(),
-    //     )
-    //     .unwrap();
-    //     let input_size = [1, 200, 128, 16];
-    //     let start = Instant::now();
-    //     let cube = preprocess_cube(&mut cube, &input_size);
-    //     println!("Preprocessing Cube takes {:?}", start.elapsed());
-    //     assert_eq!(
-    //         cube.dim(),
-    //         [200, 128, 16].into(),
-    //         "Dims was not (200, 128, 16)"
-    //     );
-    //     println!("{}", cube.flatten());
-    //     // assert_eq!(
-    //     //     cube.flatten()[1],
-    //     //     0.7615942,
-    //     //     "Second value was not 0.7615942"
-    //     // );
-    //     println!("len={}", cube.flatten().as_slice().unwrap().len())
-    // }
-
-    // #[test]
-    // fn test_data() {
-    //     println!(
-    //         "{}",
-    //         env!("CARGO_MANIFEST_DIR").to_owned() +
-    // "/src/testdata/before_radar.txt"     );
-    //     let file =
-    //         File::open(env!("CARGO_MANIFEST_DIR").to_owned() +
-    // "/src/testdata/before_radar.txt")             .unwrap();
-    //     let reader = BufReader::new(file);
-    //     let flat_cube: Vec<f32> = reader
-    //         .lines()
-    //         .map(|s| s.unwrap().parse().unwrap())
-    //         .collect();
-    //     let mut cube = Array::from_shape_vec([2, 200, 4, 256 / 2, 2],
-    // flat_cube).unwrap();     let input_size = [1, 200, 128, 16];
-    //     let cube = preprocess_cube(&mut cube, &input_size);
-    //     assert_eq!(
-    //         cube.dim(),
-    //         [200, 128, 16].into(),
-    //         "Dims was not (200, 128, 16)"
-    //     );
-
-    //     let file =
-    //         File::open(env!("CARGO_MANIFEST_DIR").to_owned() +
-    // "/src/testdata/after_radar.txt")             .unwrap();
-    //     let reader = BufReader::new(file);
-    //     let flat_output: Vec<f32> = reader
-    //         .lines()
-    //         .map(|s| s.unwrap().parse().unwrap())
-    //         .collect();
-    //     let flat_out: Vec<f32> = flat_output.to_vec();
-
-    //     let flat = cube.flatten();
-    //     let flat_cube: Vec<f32> = flat.as_slice().unwrap().to_vec();
-    //     assert!(
-    //         vec_compare(&flat_cube, &flat_out),
-    //         "Output not equal:\nRust: {:?}\nNump: {:?}",
-    //         flat_cube,
-    //         flat_out
-    //     );
-    // }
-
-    // fn vec_compare(va: &[f32], vb: &[f32]) -> bool {
-    //     (va.len() == vb.len()) &&  // zip stops at the shortest
-    //  va.iter()
-    //    .zip(vb)
-    //    .all(|(a,b)| *a-*b < 0.0001)
-    // }
 }
