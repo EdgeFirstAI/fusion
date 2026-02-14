@@ -87,7 +87,8 @@ impl ImageManager {
 
         self.g2d.blit(&src, &dst)?;
         self.g2d.finish()?;
-        // FIXME: A cache invalidation is required here, currently missing!
+        // TODO(hardware): G2D output buffer may require cache invalidation
+        // on i.MX8M Plus when DMA coherency is not guaranteed.
 
         Ok(())
     }
@@ -111,6 +112,9 @@ impl fmt::Debug for Image {
     }
 }
 
+/// Returns the average bytes per row for the given format, used to calculate
+/// total image buffer size. Note: for planar formats like NV12, this is NOT
+/// the actual row stride but rather total_size/height.
 const fn format_row_stride(format: FourCC, width: u32) -> usize {
     match format {
         RGB3 => 3 * width as usize,
@@ -177,19 +181,20 @@ impl Image {
 
     pub fn mmap(&mut self) -> MappedImage {
         let image_size = image_size(self.width, self.height, self.format);
-        unsafe {
-            let mmap = mmap(
+        let ptr = unsafe {
+            mmap(
                 null_mut(),
                 image_size,
                 PROT_READ | PROT_WRITE,
                 MAP_SHARED,
                 self.raw_fd(),
                 0,
-            ) as *mut u8;
-            MappedImage {
-                mmap,
-                len: image_size,
-            }
+            )
+        };
+        assert!(ptr != libc::MAP_FAILED, "mmap failed");
+        MappedImage {
+            mmap: ptr as *mut u8,
+            len: image_size,
         }
     }
 }
@@ -272,7 +277,7 @@ impl MappedImage {
 }
 impl Drop for MappedImage {
     fn drop(&mut self) {
-        if unsafe { munmap(self.mmap.cast::<c_void>(), self.len) } > 0 {
+        if unsafe { munmap(self.mmap.cast::<c_void>(), self.len) } != 0 {
             warn!("unmap failed!");
         }
     }
