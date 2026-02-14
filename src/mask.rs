@@ -105,7 +105,7 @@ fn flood_fill(
         min_x = min_x.min(ind % width);
         max_y = max_y.max(ind / width);
         min_y = min_y.min(ind / width);
-        let mut valid = get_valid_neighbours(mask, visited, ind, offsets);
+        let mut valid = get_valid_neighbours(mask, visited, ind, offsets, width);
         for ind in &valid {
             visited[*ind] = true;
         }
@@ -114,8 +114,8 @@ fn flood_fill(
     Box2D {
         center_x: (max_x + min_x) as f32 / 2.0 / width as f32,
         center_y: (max_y + min_y) as f32 / 2.0 / (mask.len() / width) as f32,
-        width: (max_x - min_x) as f32 / 2.0 / width as f32,
-        height: (max_y - min_y) as f32 / 2.0 / (mask.len() / width) as f32,
+        width: (max_x - min_x) as f32 / width as f32,
+        height: (max_y - min_y) as f32 / (mask.len() / width) as f32,
         label: mask[ind],
     }
 }
@@ -125,11 +125,13 @@ fn get_valid_neighbours(
     visited: &mut [bool],
     ind: usize,
     offsets: &[isize],
+    width: usize,
 ) -> Vec<usize> {
     let r = mask[ind];
     if r == 0 {
         return Vec::new();
     }
+    let col = ind % width;
     offsets
         .iter()
         .filter_map(|x| {
@@ -138,6 +140,13 @@ fn get_valid_neighbours(
                 return None;
             }
             let new_ind = new_ind as usize;
+            // Check horizontal neighbors don't wrap rows
+            if *x == -1 && col == 0 {
+                return None;
+            }
+            if *x == 1 && col == width - 1 {
+                return None;
+            }
             if visited[new_ind] {
                 return None;
             }
