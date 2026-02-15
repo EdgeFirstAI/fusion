@@ -12,9 +12,8 @@
 # 4. Create and push tag: git tag v1.0.0 && git push --tags
 #    (release.yml waits for build.yml and sbom.yml to complete)
 #
-# Action Versions (hash-pinned, verified January 2026):
+# Action Versions (hash-pinned):
 # - actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 (v4.2.2)
-# - dawidd6/action-download-artifact@94af7e40e9ff5e89bd7f0eb44fda45adf3b99441 (v6)
 # - softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b (v2.5.0)
 
 name: Release
@@ -122,24 +121,40 @@ jobs:
       - wait-for-ci
     permissions:
       contents: write
+      actions: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98  # v4.2.2
 
-      - name: Download build artifacts from commit
-        uses: dawidd6/action-download-artifact@94af7e40e9ff5e89bd7f0eb44fda45adf3b99441  # v6
-        with:
-          workflow: build.yml
-          commit: ${{ github.sha }}
-          path: artifacts
+      - name: Download build and SBOM artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p artifacts
 
-      - name: Download SBOM artifact from commit
-        uses: dawidd6/action-download-artifact@94af7e40e9ff5e89bd7f0eb44fda45adf3b99441  # v6
-        with:
-          workflow: sbom.yml
-          commit: ${{ github.sha }}
-          path: artifacts
+          # Find and download build artifacts
+          BUILD_RUN=$(gh api "repos/${{ github.repository }}/actions/workflows/build.yml/runs" \
+            --jq "[.workflow_runs[] | select(.head_sha == \"${{ github.sha }}\" and .conclusion == \"success\")] | first | .id")
+          if [ -z "$BUILD_RUN" ] || [ "$BUILD_RUN" = "null" ]; then
+            echo "::error::No successful build.yml run found for commit ${{ github.sha }}"
+            exit 1
+          fi
+          echo "Downloading build artifacts from run $BUILD_RUN..."
+          gh run download "$BUILD_RUN" -D artifacts
+
+          # Find and download SBOM artifact
+          SBOM_RUN=$(gh api "repos/${{ github.repository }}/actions/workflows/sbom.yml/runs" \
+            --jq "[.workflow_runs[] | select(.head_sha == \"${{ github.sha }}\" and .conclusion == \"success\")] | first | .id")
+          if [ -z "$SBOM_RUN" ] || [ "$SBOM_RUN" = "null" ]; then
+            echo "::error::No successful sbom.yml run found for commit ${{ github.sha }}"
+            exit 1
+          fi
+          echo "Downloading SBOM artifacts from run $SBOM_RUN..."
+          gh run download "$SBOM_RUN" -D artifacts
+
+          echo "Downloaded artifacts:"
+          find artifacts -type f
 
       - name: Organize release assets
         env:
