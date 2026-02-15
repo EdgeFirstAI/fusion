@@ -16,7 +16,7 @@ use log::{error, trace, warn};
 use mask::{mask_handler, mask_instance, Box2D};
 use pcd::{insert_field, parse_pcd, serialize_pcd, ParsedPoint};
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::HashMap,
     hash::Hash,
     sync::Arc,
     thread::{self, JoinHandle},
@@ -53,6 +53,8 @@ const BASE_LINK_FRAME_ID: &str = "base_link";
 type Grid = (Vec<Vec<f32>>, u64);
 const FUSION_CLASS: &str = "fusion_class";
 const VISION_CLASS: &str = "vision_class";
+const MAX_CLASSIFICATION_DISTANCE: f32 = 2.0;
+const UNINITIALIZED_COORD: f32 = 99999.0;
 
 #[tokio::main]
 async fn main() {
@@ -133,14 +135,17 @@ async fn main() {
     let (radar_sub, radar_publ, lidar_sub, lidar_publ, grid_publ, bbox_publ) =
         declare_sub_pub(&session, &args).await;
     // wait 2s for the tf_static to get transforms
-    thread::sleep(Duration::from_secs(2));
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let tf_session = session.clone();
     let tf_msg = build_tf_msg();
     let tf_msg = ZBytes::from(serde_cdr::serialize(&tf_msg).unwrap());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
-    let tf_task = tokio::spawn(async move { tf_static(tf_session, tf_msg, tf_enc).await });
-    std::mem::drop(tf_task);
+    tokio::spawn(async move {
+        if let Err(e) = tf_static(tf_session, tf_msg, tf_enc).await {
+            log::error!("TF static publisher failed: {e}");
+        }
+    });
 
     let mut zenoh_radar = ZenohCtx {
         session: session.clone(),
@@ -352,7 +357,10 @@ async fn load_data(
     data: &Mutexes,
 ) -> Result<(PointCloud2, Vec<ParsedPoint>, Transform, CameraInfo, Mask), String> {
     let (mut pcd, points) = {
-        let pcd = serde_cdr::deserialize(&msg.payload().to_bytes()).unwrap();
+        let pcd: PointCloud2 = match serde_cdr::deserialize(&msg.payload().to_bytes()) {
+            Ok(v) => v,
+            Err(e) => return Err(format!("Failed to deserialize PCD: {e:?}")),
+        };
         let points = parse_pcd(&pcd);
         (pcd, points)
     };
@@ -621,7 +629,7 @@ async fn publish_pcd(
     let (points, vision_class, fusion_class) = points_data;
     let publ = publ.unwrap();
     pcd.fields = Vec::new();
-    for (char, datatype) in [
+    for (field_name, datatype) in [
         ("x", point_field::FLOAT32),
         ("y", point_field::FLOAT32),
         ("z", point_field::FLOAT32),
@@ -632,7 +640,7 @@ async fn publish_pcd(
         insert_field(
             pcd,
             PointField {
-                name: char.to_string(),
+                name: field_name.to_string(),
                 offset: 0, // offset is calculated by the insert field function
                 datatype,
                 count: 1,
@@ -717,12 +725,12 @@ fn get_3d_bbox(
         }
 
         // get the max and min x,y,z values of the cluster
-        let (mut x_max, mut y_max, mut z_max) = (-99999f32, -99999f32, -99999f32);
-        let (mut x_min, mut y_min, mut z_min) = (99999f32, 99999f32, 99999f32);
+        let (mut x_max, mut y_max, mut z_max) = (-UNINITIALIZED_COORD, -UNINITIALIZED_COORD, -UNINITIALIZED_COORD);
+        let (mut x_min, mut y_min, mut z_min) = (UNINITIALIZED_COORD, UNINITIALIZED_COORD, UNINITIALIZED_COORD);
 
         for ind in inds.iter() {
             let p = &points[*ind];
-            assert_eq!(class, classes[*ind]);
+            debug_assert_eq!(class, classes[*ind]);
             x_max = x_max.max(p.x);
             x_min = x_min.min(p.x);
 
@@ -796,6 +804,8 @@ fn build_tf_msg() -> TransformStamped {
                 y: 0.0,
                 z: 0.0,
             },
+            // Un-normalized quaternion; will be normalized by UnitQuaternion::new_normalize
+            // in transform.rs when applied
             rotation: Quaternion {
                 x: -1.0,
                 y: 1.0,
@@ -812,9 +822,9 @@ fn build_tf_msg() -> TransformStamped {
 // grid box
 fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedPoint]) -> Vec<u8> {
     let mut class = vec![0; points.len()];
-    let mut min_dist2 = 9999999.9;
-    let mut min_point_ind = 0;
     for b in fusion_predictions {
+        let mut min_dist2 = f32::MAX;
+        let mut min_point_ind = 0;
         for (ind, p) in points.iter().enumerate() {
             let dist2 = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
             if dist2 < min_dist2 {
@@ -822,7 +832,7 @@ fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedP
                 min_point_ind = ind;
             }
         }
-        if min_dist2 < 2.0 * 2.0 {
+        if min_dist2 < MAX_CLASSIFICATION_DISTANCE * MAX_CLASSIFICATION_DISTANCE {
             class[min_point_ind] = b.label;
         }
     }
@@ -839,9 +849,9 @@ fn grid_nearest_cluster(
     clusters: &HashMap<u32, Vec<usize>>,
 ) -> Vec<u8> {
     let mut class = vec![0; points.len()];
-    let mut min_dist2 = 9999999.9;
-    let mut min_point_ind = 0;
     for b in fusion_predictions {
+        let mut min_dist2 = f32::MAX;
+        let mut min_point_ind = 0;
         for (ind, p) in points.iter().enumerate() {
             if p.id.is_none_or(|id| id == 0) {
                 continue;
@@ -853,7 +863,7 @@ fn grid_nearest_cluster(
                 min_point_ind = ind;
             }
         }
-        if min_dist2 > 2.0 * 2.0 {
+        if min_dist2 > MAX_CLASSIFICATION_DISTANCE * MAX_CLASSIFICATION_DISTANCE {
             continue;
         }
         let cluster_id = points[min_point_ind].id.unwrap();
@@ -898,7 +908,7 @@ fn late_fusion_no_cluster(projection: &[[f32; 2]], mask: &Mask, point_radius: f3
             continue;
         }
         // first do the center of the point, then 8 points around circumference
-        // negative -45 represetns the center
+        // negative -45 represents the center
         for angle in (0..360).step_by(45) {
             let new_x = *x + (point_radius * (angle as f32).to_radians().sin());
             let new_y = *y + (point_radius * (angle as f32).to_radians().cos());
@@ -970,11 +980,11 @@ fn late_fusion_clustered(
 }
 
 /// Checks if there are any cluster IDs in the PCD. Each cluster IDs and a
-/// vector of the indicies of all points with that cluster ID are placed into a
+/// vector of the indices of all points with that cluster ID are placed into a
 /// HashMap. Noise points are not included in the HashMap.
 fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
     let mut has_cluster_id = false;
-    let mut cluster_ids = HashMap::new();
+    let mut cluster_ids: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, point) in points.iter().enumerate() {
         if let Some(id) = point.id {
             has_cluster_id = true;
@@ -982,10 +992,7 @@ fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
                 // we ignore noise points
                 continue;
             }
-            if let Entry::Vacant(v) = cluster_ids.entry(id) {
-                v.insert(Vec::new());
-            }
-            cluster_ids.get_mut(&id).unwrap().push(i);
+            cluster_ids.entry(id).or_default().push(i);
         }
     }
     (has_cluster_id, cluster_ids)
@@ -1155,7 +1162,7 @@ fn grid_to_xy(i: f32, j: f32, width: usize, args: &Args) -> (f32, f32) {
     }
 }
 
-fn centriods_get_class(
+fn centroids_get_class(
     cluster_ids: &HashMap<u32, Vec<usize>>,
     points: &[ParsedPoint],
     vision_class: &[u8],
@@ -1163,8 +1170,8 @@ fn centriods_get_class(
 ) -> (Vec<ParsedPoint>, Vec<u8>, Vec<u8>) {
     let capacity = cluster_ids.len();
     let mut centroid_points = Vec::with_capacity(capacity);
-    let mut centriod_vision_class = Vec::with_capacity(capacity);
-    let mut centriod_fusion_class = Vec::with_capacity(capacity);
+    let mut centroid_vision_class = Vec::with_capacity(capacity);
+    let mut centroid_fusion_class = Vec::with_capacity(capacity);
     for id in cluster_ids {
         // sanity check, should not have cluster_ids with no points
         if id.1.is_empty() {
@@ -1189,20 +1196,20 @@ fn centriods_get_class(
         };
 
         centroid_points.push(p);
-        centriod_vision_class.push(vision_class);
-        centriod_fusion_class.push(fusion_class);
+        centroid_vision_class.push(vision_class);
+        centroid_fusion_class.push(fusion_class);
     }
     (
         centroid_points,
-        centriod_vision_class,
-        centriod_fusion_class,
+        centroid_vision_class,
+        centroid_fusion_class,
     )
 }
 
-fn centriods_update_tracker_classes(
+fn centroids_update_tracker_classes(
     centroid_points: &[ParsedPoint],
-    centriod_vision_class: &mut [u8],
-    centriod_fusion_class: &mut [u8],
+    centroid_vision_class: &mut [u8],
+    centroid_fusion_class: &mut [u8],
     point_tracker: &mut ByteTrack,
     timestamp: u64,
 ) {
@@ -1214,13 +1221,13 @@ fn centriods_update_tracker_classes(
             xmax: p.x + 0.5,
             ymin: p.y - 0.5,
             ymax: p.y + 0.5,
-            score: if centriod_vision_class[ind] > 0 || centriod_fusion_class[ind] > 0 {
+            score: if centroid_vision_class[ind] > 0 || centroid_fusion_class[ind] > 0 {
                 1.0
             } else {
                 0.3
             },
-            vision_class: centriod_vision_class[ind],
-            fusion_class: centriod_fusion_class[ind],
+            vision_class: centroid_vision_class[ind],
+            fusion_class: centroid_fusion_class[ind],
         })
         .collect();
     let track_info = point_tracker.update(&mut boxes, timestamp);
@@ -1239,18 +1246,18 @@ fn centriods_update_tracker_classes(
             continue;
         }
         if boxes[i].vision_class == 0 {
-            centriod_vision_class[i] = point_tracker.uuid_map_vision_class[&uuid];
+            centroid_vision_class[i] = point_tracker.uuid_map_vision_class[&uuid];
         }
         if boxes[i].fusion_class == 0 {
-            centriod_fusion_class[i] = point_tracker.uuid_map_fusion_class[&uuid];
+            centroid_fusion_class[i] = point_tracker.uuid_map_fusion_class[&uuid];
         }
     }
 }
 
 fn centroids_add_tracks(
     centroid_points: &mut Vec<ParsedPoint>,
-    centriod_vision_class: &mut Vec<u8>,
-    centriod_fusion_class: &mut Vec<u8>,
+    centroid_vision_class: &mut Vec<u8>,
+    centroid_fusion_class: &mut Vec<u8>,
     point_tracker: &mut ByteTrack,
     timestamp: u64,
 ) {
@@ -1258,7 +1265,6 @@ fn centroids_add_tracks(
         if i.last_updated == timestamp {
             continue;
         }
-        // println!("Found tracklet that was not updated this frame");
         if i.last_updated_high_conf + ((point_tracker.settings.track_extra_lifespan * 1e9) as u64)
             < timestamp
         {
@@ -1283,8 +1289,8 @@ fn centroids_add_tracks(
         p.x = (predicted.xmin + predicted.xmax) / 2.0;
         p.y = (predicted.ymin + predicted.ymax) / 2.0;
         centroid_points.push(p);
-        centriod_vision_class.push(point_tracker.uuid_map_vision_class[&i.id]);
-        centriod_fusion_class.push(point_tracker.uuid_map_fusion_class[&i.id]);
+        centroid_vision_class.push(point_tracker.uuid_map_vision_class[&i.id]);
+        centroid_fusion_class.push(point_tracker.uuid_map_fusion_class[&i.id]);
         trace!("added extra point");
     }
 }
@@ -1298,22 +1304,22 @@ fn get_occupied_cluster(
     cluster_ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
-    let (mut centroid_points, mut centriod_vision_class, mut centriod_fusion_class) =
-        centriods_get_class(cluster_ids, points, vision_class, fusion_class);
+    let (mut centroid_points, mut centroid_vision_class, mut centroid_fusion_class) =
+        centroids_get_class(cluster_ids, points, vision_class, fusion_class);
     // want to track points that have class != 0
     let timestamp = header.stamp.to_nanos();
-    centriods_update_tracker_classes(
+    centroids_update_tracker_classes(
         &centroid_points,
-        &mut centriod_vision_class,
-        &mut centriod_fusion_class,
+        &mut centroid_vision_class,
+        &mut centroid_fusion_class,
         point_tracker,
         timestamp,
     );
 
     centroids_add_tracks(
         &mut centroid_points,
-        &mut centriod_vision_class,
-        &mut centriod_fusion_class,
+        &mut centroid_vision_class,
+        &mut centroid_fusion_class,
         point_tracker,
         timestamp,
     );
@@ -1329,7 +1335,7 @@ fn get_occupied_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for (char, datatype) in [
+    for (field_name, datatype) in [
         ("x", point_field::FLOAT32),
         ("y", point_field::FLOAT32),
         ("z", point_field::FLOAT32),
@@ -1340,7 +1346,7 @@ fn get_occupied_cluster(
         insert_field(
             &mut centroid_pcd,
             PointField {
-                name: char.to_string(),
+                name: field_name.to_string(),
                 offset: 0, // offset is calculated by the insert field function
                 datatype,
                 count: 1,
@@ -1351,8 +1357,8 @@ fn get_occupied_cluster(
     let data = serialize_pcd(
         &centroid_points,
         &centroid_pcd.fields,
-        &centriod_vision_class,
-        &centriod_fusion_class,
+        &centroid_vision_class,
+        &centroid_fusion_class,
     );
     centroid_pcd.row_step = data.len() as u32;
     centroid_pcd.data = data;
@@ -1408,13 +1414,13 @@ fn mark_grid_one_column(
                 // don't check more ranges
                 break;
             }
-            if sum0 + sum1 >= args.threshold {
+            if j >= 1 && sum0 + sum1 >= args.threshold {
                 mark_grid(&mut bins[i][j - 1], frame_index);
                 angle_found_occupied[i] = true;
                 // don't check more ranges
                 break;
             }
-            if sum0 + sum1 + sum2 >= args.threshold {
+            if j >= 2 && sum0 + sum1 + sum2 >= args.threshold {
                 mark_grid(&mut bins[i][j - 2], frame_index);
                 angle_found_occupied[i] = true;
                 // don't check more ranges
@@ -1462,13 +1468,13 @@ fn mark_cell_three_column(
         // don't check more ranges
         return true;
     }
-    if sum0 + sum1 >= args.threshold {
+    if j >= 1 && sum0 + sum1 >= args.threshold {
         mark_grid(&mut bins[i][j - 1], frame_index);
         set_bins_occupied(i, bins);
         // don't check more ranges
         return true;
     }
-    if sum0 + sum1 + sum2 >= args.threshold {
+    if j >= 2 && sum0 + sum1 + sum2 >= args.threshold {
         mark_grid(&mut bins[i][j - 2], frame_index);
         set_bins_occupied(i, bins);
         // don't check more ranges
@@ -1554,7 +1560,7 @@ fn get_occupied_no_cluster(
         data: Vec::new(),
         row_step: 0,
     };
-    for (char, datatype) in [
+    for (field_name, datatype) in [
         ("x", point_field::FLOAT32),
         ("y", point_field::FLOAT32),
         ("z", point_field::FLOAT32),
@@ -1565,7 +1571,7 @@ fn get_occupied_no_cluster(
         insert_field(
             &mut grid_pcd,
             PointField {
-                name: char.to_string(),
+                name: field_name.to_string(),
                 offset: 0, // offset is calculated by the insert field function
                 datatype,
                 count: 1,
@@ -1601,7 +1607,7 @@ fn clear_bins(bins: &mut Vec<Vec<Bin>>, curr: u128, args: &Args) {
             j.vision_classes.clear();
             j.fusion_classes.clear();
             if j.last_masked + args.bin_delay < curr {
-                j.first_marked = 0;
+                j.first_marked = u128::MAX;
             }
         }
     }
@@ -1653,7 +1659,6 @@ fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (ParsedPoin
     let range = args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0];
     grid_point.x = angle.to_radians().cos() * range;
     grid_point.y = angle.to_radians().sin() * range;
-    grid_point.x = 0.0;
     (grid_point, vision_class, fusion_class)
 }
 
