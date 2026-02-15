@@ -725,8 +725,16 @@ fn get_3d_bbox(
         }
 
         // get the max and min x,y,z values of the cluster
-        let (mut x_max, mut y_max, mut z_max) = (-UNINITIALIZED_COORD, -UNINITIALIZED_COORD, -UNINITIALIZED_COORD);
-        let (mut x_min, mut y_min, mut z_min) = (UNINITIALIZED_COORD, UNINITIALIZED_COORD, UNINITIALIZED_COORD);
+        let (mut x_max, mut y_max, mut z_max) = (
+            -UNINITIALIZED_COORD,
+            -UNINITIALIZED_COORD,
+            -UNINITIALIZED_COORD,
+        );
+        let (mut x_min, mut y_min, mut z_min) = (
+            UNINITIALIZED_COORD,
+            UNINITIALIZED_COORD,
+            UNINITIALIZED_COORD,
+        );
 
         for ind in inds.iter() {
             let p = &points[*ind];

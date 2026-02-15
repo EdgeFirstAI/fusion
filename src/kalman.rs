@@ -218,8 +218,14 @@ mod tests {
         t.update(&[0.4, 0.5, 1.0, 0.5]);
 
         // Verify filter converges toward the input values
-        assert!((t.mean[0] - 0.4_f32).abs() < 0.2, "x should converge toward 0.4");
-        assert!((t.mean[1] - 0.5_f32).abs() < 0.1, "y should converge toward 0.5");
+        assert!(
+            (t.mean[0] - 0.4_f32).abs() < 0.2,
+            "x should converge toward 0.4"
+        );
+        assert!(
+            (t.mean[1] - 0.5_f32).abs() < 0.1,
+            "y should converge toward 0.5"
+        );
     }
 
     #[test]
