@@ -6,8 +6,6 @@ use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
 
-type BoolDefaultTrue = bool;
-
 #[derive(Debug, Clone, ValueEnum, Copy, Eq, PartialEq)]
 pub enum PCDSource {
     Disabled,
@@ -89,7 +87,7 @@ pub struct Args {
 
     /// apply sigmoid the model output
     #[arg(long, env, default_value = "true")]
-    pub logits: BoolDefaultTrue,
+    pub logits: bool,
 
     /// enable tracking to reduce flickering in model output
     #[arg(long, env, action)]

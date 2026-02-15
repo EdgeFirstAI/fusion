@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use nalgebra::{
-    allocator::Allocator, convert, dimension::U4, DVector, DefaultAllocator, Dyn, OMatrix,
-    RealField, SVector, U1, U8,
+    allocator::Allocator, convert, dimension::U4, DefaultAllocator, OMatrix, RealField, SVector,
+    U1, U8,
 };
+#[cfg(test)]
+use nalgebra::{DVector, Dyn};
 
 #[derive(Debug, Clone)]
 pub struct ConstantVelocityXYAHModel2<R>
@@ -22,6 +24,7 @@ where
     pub covariance: OMatrix<R, U8, U8>,
 }
 
+#[cfg(test)]
 #[allow(dead_code)]
 pub enum GatingDistanceMetric {
     Gaussian,
@@ -141,8 +144,6 @@ where
             .transpose();
 
         let innovation = (measurement - projected_mean).scale(self.update_factor);
-        // println!("kalman_gain={}", kalman_gain);
-        // println!("innovation={}", innovation);
         let diff = innovation.transpose() * kalman_gain.transpose();
         self.mean += diff.transpose();
         self.covariance -= kalman_gain * projected_cov * kalman_gain.transpose();
@@ -151,7 +152,7 @@ where
         // kalman_gain.transpose();
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn gating_distance(
         &self,
         measurements: &OMatrix<R, Dyn, U4>,
@@ -215,6 +216,10 @@ mod tests {
         t.predict();
         println!("6. t.mean={}", t.mean);
         t.update(&[0.4, 0.5, 1.0, 0.5]);
+
+        // Verify filter converges toward the input values
+        assert!((t.mean[0] - 0.4_f32).abs() < 0.2, "x should converge toward 0.4");
+        assert!((t.mean[1] - 0.5_f32).abs() < 0.1, "y should converge toward 0.5");
     }
 
     #[test]
@@ -252,5 +257,8 @@ mod tests {
 
         let dist = t.gating_distance(&measurements, false, GatingDistanceMetric::Gaussian);
         println!("Dist(false, gaussian): {dist}");
+
+        // Verify Mahalanobis distance is positive
+        assert!(dist[0] > 0.0, "Mahalanobis distance should be positive");
     }
 }

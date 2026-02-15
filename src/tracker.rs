@@ -102,8 +102,8 @@ fn xyah_to_vaalbox(xyah: &[f32], vaal_box: &mut TrackerBox) {
     vaal_box.ymax = y_ + h_ / 2.0;
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TrackInfo {
     pub uuid: Uuid,
     pub count: i32,
@@ -165,7 +165,6 @@ fn box_cost(
 }
 
 impl ByteTrack {
-    #[allow(dead_code)]
     pub fn new() -> ByteTrack {
         ByteTrack {
             tracklets: vec![],
@@ -421,12 +420,18 @@ impl ByteTrack {
         matched_info
     }
 
-    pub fn get_tracklets(&self) -> &Vec<Tracklet> {
+    pub fn get_tracklets(&self) -> &[Tracklet] {
         &self.tracklets
     }
 
     pub fn get_tracklet_from_uuid(&self, uuid: &Uuid) -> Option<&Tracklet> {
         self.tracklets.iter().find(|t| t.id == *uuid)
+    }
+}
+
+impl Default for ByteTrack {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
