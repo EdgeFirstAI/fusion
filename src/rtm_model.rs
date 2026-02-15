@@ -1,7 +1,6 @@
 // Copyright 2025 Au-Zone Technologies Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use async_pidfd::PidFd;
 use deepviewrt::{
     context::Context,
     engine::Engine,
@@ -12,17 +11,8 @@ use edgefirst_schemas::{
     edgefirst_msgs::{DmaBuffer, Mask, RadarCube},
     serde_cdr,
 };
-use libc::memcpy;
-use log::{debug, error, info, trace, warn};
-use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
-use std::{
-    ffi::c_void,
-    fs::{read, File},
-    io,
-    os::fd::AsRawFd,
-    path::PathBuf,
-    sync::Arc,
-};
+use log::{debug, error, info, trace};
+use std::{fs::read, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::{
@@ -394,34 +384,6 @@ async fn load_camera_frame(
 }
 
 #[instrument(skip_all)]
-fn _process_dmabuffer(cam_buffer: &mut DmaBuffer) -> Result<File, io::Error> {
-    let pidfd: PidFd = match PidFd::from_pid(cam_buffer.pid as i32) {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-                "Error getting PID {:?}, please check if the camera process is running: {:?}",
-                cam_buffer.pid, e
-            );
-            return Err(e);
-        }
-    };
-
-    let fd = match get_file_from_pidfd(pidfd.as_raw_fd(), cam_buffer.fd, GetFdFlags::empty()) {
-        Ok(v) => v,
-        Err(e) => {
-            error!(
-            "Error getting Camera DMA file descriptor, please check if current process is running with same permissions as camera: {e:?}"
-            );
-            return Err(e);
-        }
-    };
-
-    cam_buffer.fd = fd.as_raw_fd();
-    debug!("Updated dma fd to {}", cam_buffer.fd);
-    Ok(fd)
-}
-
-#[instrument(skip_all)]
 fn get_input_match(
     backbone: &Context,
     decoder: &Option<Context>,
@@ -507,13 +469,14 @@ fn run_model(
             }
         };
 
-        unsafe {
-            memcpy(
-                input_map.as_mut_ptr() as *mut c_void,
-                output_map.as_ptr() as *const c_void,
-                tensor_size,
-            );
-        }
+        assert!(
+            output_map.len() >= tensor_size && input_map.len() >= tensor_size,
+            "Tensor buffer size mismatch: output={}, input={}, needed={}",
+            output_map.len(),
+            input_map.len(),
+            tensor_size
+        );
+        input_map[..tensor_size].copy_from_slice(&output_map[..tensor_size]);
     }
     decoder.run()
 }

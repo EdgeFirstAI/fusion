@@ -42,7 +42,7 @@ fn main() {
 }
 
 fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
-    let tflite = match TFLiteLib::new("libtensorflowlite_c.so") {
+    let tflite = match TFLiteLib::new_with_path("libtensorflowlite_c.so") {
         Ok(v) => v,
         Err(e) => {
             return Err(format!("Could not open libtensorflowlite_c.so: {:?}", e));
@@ -58,7 +58,7 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
         builder.add_owned_delegate(delegate);
     }
 
-    let mut interpreter = builder.build(&model).unwrap();
+    let mut interpreter = builder.build(model).unwrap();
     info!(
         "interpreter with {} inputs, {} outputs",
         interpreter.inputs_mut()?.len(),
