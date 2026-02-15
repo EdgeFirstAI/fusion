@@ -235,7 +235,7 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 | `rt/radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud with optional cluster_id |
 | `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
 | `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame as DMA buffer |
-| `rt/radar/cube` | Raw bytes (zstd compressed) | Radar cube for ML model input |
+| `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
 | `rt/model/mask` | `edgefirst_msgs/Mask` | Vision model segmentation mask |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
 | `rt/tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |
@@ -308,6 +308,18 @@ Camera frames are received as DMA buffer file descriptors:
 4. Use converted buffer as ML model input
 
 See `src/image.rs` for DMA buffer lifecycle management.
+
+---
+
+## Occupancy Grid Generation
+
+Fusion generates occupancy grids from radar or LiDAR point clouds. Two modes are supported depending on whether the input PCD contains a `cluster_id` field:
+
+**Clustered Mode** (PCD has `cluster_id`): Each cluster's centroid and bounding box are used to place occupied cells in the grid. Points are grouped by cluster ID, and the grid is populated directly from cluster geometry.
+
+**Non-Clustered Mode** (PCD lacks `cluster_id`): Points are binned into a polar grid defined by `--range-bin-limit`, `--range-bin-width`, `--angle-bin-limit`, and `--angle-bin-width`. A temporal persistence filter (`--threshold`, `--bin-delay`) requires bins to be occupied for multiple frames before they are emitted, reducing noise.
+
+The occupancy grid is published as a `sensor_msgs/PointCloud2` message on the `--grid-topic`.
 
 ---
 
