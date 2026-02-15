@@ -14,7 +14,6 @@
 #
 # Action Versions (hash-pinned, verified January 2026):
 # - actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98 (v4.2.2)
-# - lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028571aeeb3e3f191b (v1.3.1)
 # - dawidd6/action-download-artifact@94af7e40e9ff5e89bd7f0eb44fda45adf3b99441 (v6)
 # - softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b (v2.5.0)
 
@@ -80,29 +79,40 @@ jobs:
     needs: prepare-release
     runs-on: ubuntu-22.04
     steps:
-      - name: Wait for Build workflow (x86_64)
-        uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028571aeeb3e3f191b  # v1.3.1
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Build (x86_64)'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 10
+      - name: Wait for required checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CHECKS=("Build (x86_64)" "Build (aarch64)" "Generate SBOM & Check License Compliance")
+          TIMEOUT=1800  # 30 minutes
+          INTERVAL=15
+          ELAPSED=0
 
-      - name: Wait for Build workflow (aarch64)
-        uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028571aeeb3e3f191b  # v1.3.1
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Build (aarch64)'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 10
+          for CHECK in "${CHECKS[@]}"; do
+            echo "Waiting for '$CHECK'..."
+            while true; do
+              RESULT=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/check-runs" \
+                --jq ".check_runs[] | select(.name == \"$CHECK\") | .conclusion" 2>/dev/null | head -1)
 
-      - name: Wait for SBOM workflow
-        uses: lewagon/wait-on-check-action@ccfb013c15c8afb7bf2b7c028571aeeb3e3f191b  # v1.3.1
-        with:
-          ref: ${{ github.sha }}
-          check-name: 'Generate SBOM & Check License Compliance'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          wait-interval: 10
+              if [ "$RESULT" = "success" ]; then
+                echo "'$CHECK' succeeded."
+                break
+              elif [ "$RESULT" = "failure" ] || [ "$RESULT" = "cancelled" ] || [ "$RESULT" = "timed_out" ]; then
+                echo "::error::'$CHECK' finished with: $RESULT"
+                exit 1
+              fi
+
+              if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+                echo "::error::Timed out waiting for '$CHECK' after ${TIMEOUT}s"
+                exit 1
+              fi
+
+              echo "  Status: ${RESULT:-pending}... (${ELAPSED}s elapsed)"
+              sleep "$INTERVAL"
+              ELAPSED=$((ELAPSED + INTERVAL))
+            done
+          done
+          echo "All required checks passed."
 
   create-github-release:
     name: Create GitHub Release
