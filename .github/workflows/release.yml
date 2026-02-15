@@ -137,23 +137,17 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          # Copy x86_64 binary
-          if [ -f artifacts/packages-x86_64/edgefirst-fusion-x86_64 ]; then
-            cp artifacts/packages-x86_64/edgefirst-fusion-x86_64 \
-               release-assets/edgefirst-fusion-linux-x86_64
-          fi
+          # Copy x86_64 binary (required)
+          cp artifacts/packages-x86_64/edgefirst-fusion-x86_64 \
+             release-assets/edgefirst-fusion-linux-x86_64
 
-          # Copy ARM64 binary
-          if [ -f artifacts/packages-aarch64/edgefirst-fusion-aarch64 ]; then
-            cp artifacts/packages-aarch64/edgefirst-fusion-aarch64 \
-               release-assets/edgefirst-fusion-linux-aarch64
-          fi
+          # Copy ARM64 binary (required)
+          cp artifacts/packages-aarch64/edgefirst-fusion-aarch64 \
+             release-assets/edgefirst-fusion-linux-aarch64
 
-          # Copy SBOM
-          if [ -f artifacts/sbom/sbom.json ]; then
-            cp artifacts/sbom/sbom.json \
-               "release-assets/edgefirst-fusion-v${VERSION}-sbom.json"
-          fi
+          # Copy SBOM (required)
+          cp artifacts/sbom/sbom.json \
+             "release-assets/edgefirst-fusion-v${VERSION}-sbom.json"
 
           echo "Release assets prepared:"
           ls -lh release-assets/
@@ -192,4 +186,4 @@ jobs:
             release-assets/*
           draft: false
           prerelease: ${{ contains(needs.prepare-release.outputs.version, '-') }}
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
