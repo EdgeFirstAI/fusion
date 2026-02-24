@@ -1,0 +1,183 @@
+# EdgeFirst Sensor Fusion Service
+#
+# Default configuration for the fusion service. This file is loaded as a
+# systemd EnvironmentFile and all values below represent the built-in defaults.
+# Refer to `fusion --help` for detailed argument descriptions.
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+# Log level filter. Sub-targets include zenoh and edgefirst_fusion.
+# Refer to the RUST_LOG / tracing-subscriber documentation for syntax.
+RUST_LOG = "info"
+
+# ---------------------------------------------------------------------------
+# Sensor Input Topics
+# ---------------------------------------------------------------------------
+
+# Radar point cloud input topic. Typically rt/radar/clusters for clustered
+# targets with better stability, or rt/radar/targets for raw detections.
+# Set to "" to disable radar fusion.
+RADAR_PCD_TOPIC = "rt/radar/clusters"
+
+# LiDAR point cloud input topic. Typically rt/lidar/clusters for clustered
+# points, or rt/lidar/points for raw unclustered points.
+# Set to "" to disable LiDAR fusion.
+LIDAR_PCD_TOPIC = "rt/lidar/clusters"
+
+# Segmentation mask input topic. Used to classify projected sensor points.
+MASK_TOPIC = "rt/model/mask"
+
+# Camera intrinsics topic. The camera matrix is used to project 3D sensor
+# points onto the 2D segmentation mask.
+INFO_TOPIC = "rt/camera/info"
+
+# 2D detection boxes input topic for instance-level identification. When
+# available, each detection box assigns an instance_id to sensor points that
+# project inside it. Set to "" to disable (segmentation-only mode).
+BOXES2D_TOPIC = "rt/model/boxes2d"
+
+# ---------------------------------------------------------------------------
+# Fusion Output Topics
+# ---------------------------------------------------------------------------
+
+# Radar fusion output topic. Publishes radar points annotated with vision_class,
+# fusion_class, and instance_id. Set to "" to disable.
+RADAR_OUTPUT_TOPIC = "rt/fusion/radar"
+
+# LiDAR fusion output topic. Publishes LiDAR points annotated with vision_class,
+# fusion_class, and instance_id. Enabling this has a performance cost due to the
+# large number of LiDAR points and will approximately halve the output rate of
+# any LiDAR-based outputs. Set to "" to disable.
+LIDAR_OUTPUT_TOPIC = ""
+
+# 3D bounding box output topic.
+BBOX3D_TOPIC = "rt/fusion/boxes3d"
+
+# Sensor source for 3D bounding box generation: radar, lidar, or disabled.
+BBOX3D_SRC = "lidar"
+
+# Occupancy grid output topic.
+GRID_TOPIC = "rt/fusion/occupancy"
+
+# Sensor source for occupancy grid generation: radar, lidar, or disabled.
+GRID_SRC = "radar"
+
+# ---------------------------------------------------------------------------
+# Vision & Instance Detection
+# ---------------------------------------------------------------------------
+
+# Maximum age in seconds for mask and boxes2d data relative to the current
+# point cloud frame. A warning is logged when stale data is used for fusion.
+# Set to 0 to disable the staleness check.
+MAX_MASK_AGE = "0.5"
+
+# ---------------------------------------------------------------------------
+# Radar Fusion Model
+# ---------------------------------------------------------------------------
+
+# Path to the radar-camera fusion model (TFLite). This model performs BEV
+# occupancy prediction from radar cube and camera inputs. Set to "" to disable
+# the radar fusion model pipeline.
+#
+# When set, the model subscribes to CAMERA_TOPIC and RADARCUBE_TOPIC and
+# publishes predictions to MODEL_OUTPUT_TOPIC.
+MODEL = ""
+
+# Path to an optional second-stage decoder model for two-stage fusion models.
+# Set to "" to disable.
+MODEL_DECODER = ""
+
+# Camera DMA buffer input topic for the radar fusion model.
+CAMERA_TOPIC = "rt/camera/dma"
+
+# Radar cube input topic for the radar fusion model.
+RADARCUBE_TOPIC = "rt/radar/cube"
+
+# Radar fusion model prediction output topic.
+MODEL_OUTPUT_TOPIC = "rt/fusion/model_output"
+
+# Interpret the radar fusion model output as polar coordinates.
+MODEL_POLAR = "false"
+
+# Confidence threshold for the radar fusion model output topic.
+MODEL_THRESHOLD = "0.5"
+
+# Real-world size (length width) in meters of each 1x1 model output grid cell.
+# If MODEL_POLAR is true, the width value is in degrees.
+MODEL_GRID_SIZE = "1 1"
+
+# Apply sigmoid (logistic) function to raw model outputs.
+LOGITS = "true"
+
+# Inference engine: npu, cpu, or gpu.
+ENGINE = "npu"
+
+# ---------------------------------------------------------------------------
+# Tracking (ByteTrack)
+# ---------------------------------------------------------------------------
+
+# Enable the ByteTrack multi-object tracker. Reduces flickering in radar
+# fusion model output and provides persistent track IDs for 3D bounding boxes.
+TRACK = "false"
+
+# Seconds a tracked object may be missing before its track is removed.
+TRACK_EXTRA_LIFESPAN = "0.5"
+
+# IoU threshold for associating detections to existing tracks. Higher values
+# require closer overlap with the predicted track location.
+TRACK_IOU = "0.1"
+
+# Kalman filter update factor (0.0 to 1.0). Higher values reduce smoothing
+# but respond more rapidly to position changes.
+TRACK_UPDATE = "0.4"
+
+# ---------------------------------------------------------------------------
+# Binning Configuration
+# ---------------------------------------------------------------------------
+# Range and angle bins are used to interpret the radar fusion model output.
+# They are also used for the occupancy grid when the input point cloud does
+# not contain a cluster_id field (unclustered mode).
+
+# Range limits (min max) in meters.
+RANGE_BIN_LIMIT = "0 16"
+
+# Size of each range bin in meters.
+RANGE_BIN_WIDTH = "1.0"
+
+# Angle limits (min max) in degrees. 0 degrees is the forward direction.
+ANGLE_BIN_LIMIT = "-55 55"
+
+# Size of each angle bin in degrees.
+ANGLE_BIN_WIDTH = "6.875"
+
+# Minimum number of detections in a bin before it is considered a valid target
+# rather than noise. Only used in unclustered mode.
+THRESHOLD = "1"
+
+# Number of consecutive frames a bin must be valid before it is drawn, and
+# the number of consecutive invalid frames before it is removed. Only used
+# in unclustered mode.
+BIN_DELAY = "3"
+
+# ---------------------------------------------------------------------------
+# Zenoh Network
+# ---------------------------------------------------------------------------
+
+# Zenoh session mode: peer or client.
+MODE = "peer"
+
+# Connect to specific Zenoh endpoints. Space-separated list of endpoints
+# (e.g. "tcp/192.168.1.1:7447"). Set to "" for multicast-only discovery.
+CONNECT = ""
+
+# Listen on specific Zenoh endpoints. Set to "" for default behavior.
+LISTEN = ""
+
+# Disable multicast scouting entirely. Useful when connecting to a Zenoh
+# router via CONNECT instead of local discovery.
+NO_MULTICAST_SCOUTING = "false"
+
+# Enable Tracy profiler broadcast for performance analysis.
+TRACY = "false"
