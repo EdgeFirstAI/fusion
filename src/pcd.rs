@@ -228,9 +228,7 @@ pub fn serialize_pcd(
                 }
                 VISION_CLASS => serialize_field_u8(f, &vision_class[i], point_offset, &mut buf),
                 FUSION_CLASS => serialize_field_u8(f, &fusion_class[i], point_offset, &mut buf),
-                INSTANCE_ID => {
-                    serialize_field_u32(f, &instance_id[i], point_offset, &mut buf)
-                }
+                INSTANCE_ID => serialize_field_u32(f, &instance_id[i], point_offset, &mut buf),
                 _ => {}
             }
         }
@@ -461,12 +459,12 @@ mod tests {
         let instance_id_offset = 18usize;
 
         // Point 0: instance_id = 42
-        let start = 0 * point_step as usize + instance_id_offset;
+        let start = instance_id_offset;
         let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
         assert_eq!(val, 42);
 
         // Point 1: instance_id = 99
-        let start = 1 * point_step as usize + instance_id_offset;
+        let start = point_step as usize + instance_id_offset;
         let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
         assert_eq!(val, 99);
     }

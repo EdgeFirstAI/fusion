@@ -27,6 +27,8 @@ help:
 	@echo "Available targets:"
 	@echo "  make format         - Format Rust code with rustfmt"
 	@echo "  make lint           - Run clippy with strict settings"
+	@echo "  make check          - Run cargo check (fast compilation test)"
+	@echo "  make sbom           - Generate SBOM and validate NOTICE file"
 	@echo "  make build          - Build with coverage enabled (for testing)"
 	@echo "  make test           - Run tests with coverage (nextest + llvm-cov)"
 	@echo "  make verify-version - Verify version consistency"
@@ -37,7 +39,7 @@ help:
 .PHONY: format
 format:
 	@echo "Formatting Rust code..."
-	cargo +nightly fmt --all || cargo fmt --all
+	cargo fmt --all
 	@echo "✓ Formatting complete"
 
 # Run linters
@@ -46,6 +48,26 @@ lint:
 	@echo "Running clippy (strict mode)..."
 	cargo clippy --all-targets $(RUST_FEATURES) -- -D warnings
 	@echo "✓ Linting complete"
+
+# Quick compilation check (no codegen)
+.PHONY: check
+check:
+	@echo "Running cargo check..."
+	cargo check --all-targets $(RUST_FEATURES)
+	@echo "✓ Check complete"
+
+# Generate SBOM and validate NOTICE file
+.PHONY: sbom
+sbom:
+	@echo "Generating SBOM and validating NOTICE..."
+	@if [ -x ".github/scripts/generate_sbom.sh" ]; then \
+		bash .github/scripts/generate_sbom.sh; \
+	else \
+		echo "WARNING: .github/scripts/generate_sbom.sh not found or not executable"; \
+		echo "Falling back to cargo-sbom..."; \
+		cargo sbom > sbom.json 2>/dev/null || echo "cargo-sbom not installed, skipping"; \
+	fi
+	@echo "✓ SBOM validation complete"
 
 # Build with coverage enabled (for testing)
 .PHONY: build

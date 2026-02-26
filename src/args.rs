@@ -197,7 +197,11 @@ impl Args {
     /// allows setting `MODEL = ""` or `CONNECT = ""` in environment files to
     /// represent the disabled/unset state.
     pub fn normalize(&mut self) {
-        if self.model.as_ref().is_some_and(|p| p.as_os_str().is_empty()) {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
             self.model = None;
         }
         if self

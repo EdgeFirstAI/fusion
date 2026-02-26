@@ -171,9 +171,7 @@ mod projection_test {
                 id: None,
             }, // behind
         ];
-        let cam_mtx = [
-            1260.0, 0.0, 960.0, 0.0, 1260.0, 540.0, 0.0, 0.0, 1.0,
-        ];
+        let cam_mtx = [1260.0, 0.0, 960.0, 0.0, 1260.0, 540.0, 0.0, 0.0, 1.0];
         let transform = Transform {
             translation: Vector3 {
                 x: 0.0,
@@ -187,12 +185,8 @@ mod projection_test {
                 w: 1.0,
             },
         };
-        let proj = transform_and_project_points(
-            &mut points,
-            &[transform],
-            &cam_mtx,
-            (1920.0, 1080.0),
-        );
+        let proj =
+            transform_and_project_points(&mut points, &[transform], &cam_mtx, (1920.0, 1080.0));
         // In-front point should have valid [0,1] projection
         assert!(
             proj[0][0] >= 0.0 && proj[0][0] <= 1.0,

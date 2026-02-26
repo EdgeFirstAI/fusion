@@ -51,6 +51,21 @@ mod transform;
 const BASE_LINK_FRAME_ID: &str = "base_link";
 
 type Grid = (Vec<Vec<f32>>, u64);
+
+/// Data loaded from a single point cloud frame: the cloud, parsed points,
+/// sensor-to-base transform, camera intrinsics, segmentation mask, and receive time.
+type LoadedFrame = (
+    PointCloud2,
+    Vec<ParsedPoint>,
+    Transform,
+    CameraInfo,
+    Mask,
+    std::time::Instant,
+);
+
+/// Fusion output: (vision_class, fusion_class, instance_ids, has_cluster_ids, cluster_map).
+type FusionResult = (Vec<u8>, Vec<u8>, Vec<u32>, bool, HashMap<u32, Vec<usize>>);
+
 const FUSION_CLASS: &str = "fusion_class";
 const INSTANCE_ID: &str = "instance_id";
 const VISION_CLASS: &str = "vision_class";
@@ -388,11 +403,7 @@ fn setup_bins(bins: &mut Vec<Vec<Bin>>, args: &Args) {
 }
 
 #[instrument(skip_all)]
-async fn load_data(
-    msg: &Sample,
-    data: &Mutexes,
-) -> Result<(PointCloud2, Vec<ParsedPoint>, Transform, CameraInfo, Mask, std::time::Instant), String>
-{
+async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> {
     let (mut pcd, points) = {
         let pcd: PointCloud2 = match serde_cdr::deserialize(&msg.payload().to_bytes()) {
             Ok(v) => v,
@@ -460,7 +471,7 @@ async fn fusion(
     args: &Args,
     session: &Session,
     data: &Mutexes,
-) -> (Vec<u8>, Vec<u8>, Vec<u32>, bool, HashMap<u32, Vec<usize>>) {
+) -> FusionResult {
     let cam_mtx = cam_info.k.map(|v| v as f32);
     let proj = transform_and_project_points(
         points,
@@ -487,15 +498,20 @@ async fn fusion(
         }
     }
 
-    let (vision_class, instance_id) = get_vision_class_and_instance(
-        points, &proj, mask, boxes2d_ref, has_cluster_ids, &ids,
-    );
+    let (vision_class, instance_id) =
+        get_vision_class_and_instance(points, &proj, mask, boxes2d_ref, has_cluster_ids, &ids);
     drop(boxes2d_guard);
 
     let fusion_predictions = get_fusion_predictions(track, tracker, grid, args, session).await;
     let fusion_class = get_fusion_class(points, &fusion_predictions, has_cluster_ids, &ids);
 
-    (vision_class, fusion_class, instance_id, has_cluster_ids, ids)
+    (
+        vision_class,
+        fusion_class,
+        instance_id,
+        has_cluster_ids,
+        ids,
+    )
 }
 
 async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
@@ -631,10 +647,11 @@ async fn publish(
 /// Convert a track ID string to a u32 instance_id.
 /// Empty string uses fallback_seq (for ephemeral per-frame IDs).
 /// Non-empty string hashes to a u32 (never 0) that is stable within a
-/// single process session. The mapping is **not** guaranteed to be stable
-/// across different Rust toolchain versions or compilations because
-/// `DefaultHasher` may change its algorithm. Cross-session persistence of
-/// `instance_id` values must not be assumed by consumers.
+/// single process lifetime. Values are **only valid within the current
+/// process**; they are not stable across service restarts, different Rust
+/// toolchain versions, or recompilations because `DefaultHasher` may change
+/// its algorithm. Consumers must not persist or compare `instance_id` values
+/// across process boundaries.
 fn track_id_to_instance_id(track_id: &str, fallback_seq: u32) -> u32 {
     if track_id.is_empty() {
         fallback_seq
@@ -643,7 +660,11 @@ fn track_id_to_instance_id(track_id: &str, fallback_seq: u32) -> u32 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         track_id.hash(&mut hasher);
         let h = hasher.finish() as u32;
-        if h == 0 { 1 } else { h }
+        if h == 0 {
+            1
+        } else {
+            h
+        }
     }
 }
 
@@ -658,6 +679,11 @@ fn parse_box_label(label: &str) -> u8 {
     })
 }
 
+/// Assign each projected point to the detection box whose centre is nearest.
+/// When a point falls inside multiple overlapping boxes, the box with the
+/// smallest squared distance to the point wins.  Equal distances are broken
+/// by iteration order (first box in `detect.boxes` wins), which is
+/// deterministic for a given detection frame.
 fn box_fusion_no_cluster(proj: &[[f32; 2]], detect: &Detect) -> (Vec<u8>, Vec<u32>) {
     let mut classes = vec![0u8; proj.len()];
     let mut instances = vec![0u32; proj.len()];
@@ -854,6 +880,7 @@ async fn publish_pcd(
 }
 
 #[instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn publish_grid(
     grid_publ: Option<&Publisher<'_>>,
     header: Header,
@@ -958,7 +985,11 @@ fn get_3d_bbox(
             score: 1.0,
             speed: 0.0,
             track: Track {
-                id: if inst > 0 { inst.to_string() } else { "".to_string() },
+                id: if inst > 0 {
+                    inst.to_string()
+                } else {
+                    "".to_string()
+                },
                 lifetime: 0,
                 created: header.stamp.clone(),
             },
@@ -1423,6 +1454,11 @@ fn centroids_get_class(
     )
 }
 
+/// Update centroid classes using the ByteTrack multi-object tracker.
+///
+/// `_centroid_instance_id` is accepted (but not yet modified) to keep the
+/// call-site signature consistent with `centroids_get_class`.  Future work
+/// may propagate tracker-assigned instance IDs back through this path.
 fn centroids_update_tracker_classes(
     centroid_points: &[ParsedPoint],
     centroid_vision_class: &mut [u8],
@@ -1525,8 +1561,12 @@ fn get_occupied_cluster(
     cluster_ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
-    let (mut centroid_points, mut centroid_vision_class, mut centroid_fusion_class, mut centroid_instance_id) =
-        centroids_get_class(cluster_ids, points, vision_class, fusion_class, instance_id);
+    let (
+        mut centroid_points,
+        mut centroid_vision_class,
+        mut centroid_fusion_class,
+        mut centroid_instance_id,
+    ) = centroids_get_class(cluster_ids, points, vision_class, fusion_class, instance_id);
     // want to track points that have class != 0
     let timestamp = header.stamp.to_nanos();
     centroids_update_tracker_classes(
@@ -1770,7 +1810,13 @@ fn get_occupied_no_cluster(
     insert_standard_fields(&mut grid_pcd);
 
     let grid_instance_id = vec![0u32; grid_points.len()];
-    let data = serialize_pcd(&grid_points, &grid_pcd.fields, &vision_class, &fusion_class, &grid_instance_id);
+    let data = serialize_pcd(
+        &grid_points,
+        &grid_pcd.fields,
+        &vision_class,
+        &fusion_class,
+        &grid_instance_id,
+    );
     grid_pcd.row_step = data.len() as u32;
     grid_pcd.data = data;
 
@@ -1951,15 +1997,16 @@ mod tests {
     #[test]
     fn test_box_fusion_no_cluster_single_box() {
         // Box centered at (0.5, 0.5) with size 0.4x0.4
-        let detect = make_detect(vec![
-            make_box(0.5, 0.5, 0.4, 0.4, "3", "track-abc"),
-        ]);
+        let detect = make_detect(vec![make_box(0.5, 0.5, 0.4, 0.4, "3", "track-abc")]);
         // Point inside the box, point outside the box
         let proj = vec![[0.5, 0.5], [0.1, 0.1]];
         let (classes, instances) = box_fusion_no_cluster(&proj, &detect);
 
         assert_eq!(classes[0], 3, "point inside box should get class 3");
-        assert_ne!(instances[0], 0, "point inside box should get non-zero instance");
+        assert_ne!(
+            instances[0], 0,
+            "point inside box should get non-zero instance"
+        );
         assert_eq!(classes[1], 0, "point outside box should get class 0");
         assert_eq!(instances[1], 0, "point outside box should get instance 0");
     }
@@ -1967,30 +2014,44 @@ mod tests {
     #[test]
     fn test_box_fusion_no_cluster_no_track_id() {
         // Box with empty track_id
-        let detect = make_detect(vec![
-            make_box(0.5, 0.5, 0.4, 0.4, "2", ""),
-        ]);
+        let detect = make_detect(vec![make_box(0.5, 0.5, 0.4, 0.4, "2", "")]);
         let proj = vec![[0.5, 0.5]];
         let (classes, instances) = box_fusion_no_cluster(&proj, &detect);
 
         assert_eq!(classes[0], 2);
         // fallback_seq is (box_idx + 1) = 1, so instance should be 1
-        assert_eq!(instances[0], 1, "empty track_id should produce ephemeral instance (fallback_seq)");
+        assert_eq!(
+            instances[0], 1,
+            "empty track_id should produce ephemeral instance (fallback_seq)"
+        );
     }
 
     #[test]
     fn test_box_fusion_clustered_assigns_whole_cluster() {
         // Two points in cluster 10, one in cluster 20
         let points = vec![
-            ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: Some(10) },
-            ParsedPoint { x: 2.0, y: 0.0, z: 0.0, id: Some(10) },
-            ParsedPoint { x: 3.0, y: 0.0, z: 0.0, id: Some(20) },
+            ParsedPoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 3.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(20),
+            },
         ];
         // All three project inside the box
         let proj = vec![[0.5, 0.5], [0.55, 0.5], [0.6, 0.5]];
-        let detect = make_detect(vec![
-            make_box(0.55, 0.5, 0.2, 0.2, "5", "uuid-xyz"),
-        ]);
+        let detect = make_detect(vec![make_box(0.55, 0.5, 0.2, 0.2, "5", "uuid-xyz")]);
         let mut clusters: HashMap<u32, Vec<usize>> = HashMap::new();
         clusters.insert(10, vec![0, 1]);
         clusters.insert(20, vec![2]);
@@ -1998,9 +2059,18 @@ mod tests {
         let (classes, instances) = box_fusion_clustered(&points, &proj, &detect, &clusters);
 
         // Cluster 10 has 2 points inside box, cluster 20 has 1 -> cluster 10 wins
-        assert_eq!(classes[0], 5, "first point of winning cluster should get class");
-        assert_eq!(classes[1], 5, "second point of winning cluster should get class");
-        assert_eq!(instances[0], instances[1], "all points in cluster get same instance");
+        assert_eq!(
+            classes[0], 5,
+            "first point of winning cluster should get class"
+        );
+        assert_eq!(
+            classes[1], 5,
+            "second point of winning cluster should get class"
+        );
+        assert_eq!(
+            instances[0], instances[1],
+            "all points in cluster get same instance"
+        );
         assert_ne!(instances[0], 0, "instance should be non-zero");
         // Cluster 20 was not the winner, so point 2 should be 0
         assert_eq!(classes[2], 0, "losing cluster should not get class");
@@ -2014,20 +2084,102 @@ mod tests {
         let (classes, instances) = box_fusion_no_cluster(&proj, &detect);
 
         assert!(classes.iter().all(|&c| c == 0), "all classes should be 0");
-        assert!(instances.iter().all(|&i| i == 0), "all instances should be 0");
+        assert!(
+            instances.iter().all(|&i| i == 0),
+            "all instances should be 0"
+        );
     }
 
     #[test]
     fn test_track_id_to_instance_id_hash_persistent() {
         let id1 = track_id_to_instance_id("some-uuid-123", 99);
         let id2 = track_id_to_instance_id("some-uuid-123", 42);
-        assert_eq!(id1, id2, "same track_id should always produce the same hash regardless of fallback");
+        assert_eq!(
+            id1, id2,
+            "same track_id should always produce the same hash regardless of fallback"
+        );
         assert_ne!(id1, 0, "hashed instance_id should never be 0");
     }
 
     #[test]
     fn test_track_id_to_instance_id_empty_uses_fallback() {
-        assert_eq!(track_id_to_instance_id("", 7), 7, "empty track_id should return fallback_seq");
-        assert_eq!(track_id_to_instance_id("", 0), 0, "empty track_id with fallback 0 returns 0");
+        assert_eq!(
+            track_id_to_instance_id("", 7),
+            7,
+            "empty track_id should return fallback_seq"
+        );
+        assert_eq!(
+            track_id_to_instance_id("", 0),
+            0,
+            "empty track_id with fallback 0 returns 0"
+        );
+    }
+
+    #[test]
+    fn test_parse_box_label_valid() {
+        assert_eq!(parse_box_label("0"), 0);
+        assert_eq!(parse_box_label("1"), 1);
+        assert_eq!(parse_box_label("255"), 255);
+    }
+
+    #[test]
+    fn test_parse_box_label_empty_defaults_to_zero() {
+        assert_eq!(parse_box_label(""), 0);
+    }
+
+    #[test]
+    fn test_parse_box_label_non_numeric_defaults_to_zero() {
+        assert_eq!(parse_box_label("abc"), 0);
+    }
+
+    #[test]
+    fn test_parse_box_label_out_of_range_defaults_to_zero() {
+        assert_eq!(parse_box_label("300"), 0);
+    }
+
+    #[test]
+    fn test_box_fusion_clustered_overlapping_boxes() {
+        // Two overlapping boxes compete for the same cluster.
+        // Box A covers all 3 points in cluster 10, Box B covers only 1.
+        // Box A should win because it has more points in that cluster.
+        let points = vec![
+            ParsedPoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 3.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+        ];
+        let proj = vec![[0.5, 0.5], [0.55, 0.5], [0.6, 0.5]];
+        // Box A: large, covers all three projected points
+        let box_a = make_box(0.55, 0.5, 0.3, 0.3, "7", "track-a");
+        // Box B: small, covers only the first projected point
+        let box_b = make_box(0.5, 0.5, 0.02, 0.02, "9", "track-b");
+        let detect = make_detect(vec![box_a, box_b]);
+
+        let mut clusters: HashMap<u32, Vec<usize>> = HashMap::new();
+        clusters.insert(10, vec![0, 1, 2]);
+
+        let (classes, instances) = box_fusion_clustered(&points, &proj, &detect, &clusters);
+
+        // Box A has 3 points in cluster 10, Box B has 1 -> Box A wins
+        assert_eq!(classes[0], 7, "cluster should get Box A's class");
+        assert_eq!(classes[1], 7);
+        assert_eq!(classes[2], 7);
+        assert_ne!(instances[0], 0);
+        assert_eq!(instances[0], instances[1]);
+        assert_eq!(instances[1], instances[2]);
     }
 }
