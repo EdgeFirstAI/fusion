@@ -6,7 +6,7 @@ use log::error;
 use std::collections::HashMap;
 use tracing::instrument;
 
-use crate::{FUSION_CLASS, VISION_CLASS};
+use crate::{FUSION_CLASS, INSTANCE_ID, VISION_CLASS};
 
 pub struct ParsedPoint {
     pub x: f32,
@@ -205,6 +205,7 @@ pub fn serialize_pcd(
     fields: &[PointField],
     vision_class: &[u8],
     fusion_class: &[u8],
+    instance_id: &[u32],
 ) -> Vec<u8> {
     let mut name_to_field = HashMap::new();
     let mut point_step = 0;
@@ -227,6 +228,7 @@ pub fn serialize_pcd(
                 }
                 VISION_CLASS => serialize_field_u8(f, &vision_class[i], point_offset, &mut buf),
                 FUSION_CLASS => serialize_field_u8(f, &fusion_class[i], point_offset, &mut buf),
+                INSTANCE_ID => serialize_field_u32(f, &instance_id[i], point_offset, &mut buf),
                 _ => {}
             }
         }
@@ -371,4 +373,181 @@ pub fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
         count: new_field.count,
     });
     pcd.point_step += SIZE_OF_DATATYPE[new_field.datatype as usize] as u32 * new_field.count;
+}
+
+/// Insert the standard fusion output fields into a PointCloud2 message.
+/// Resets `fields` and `point_step` before inserting.
+pub fn insert_standard_fields(pcd: &mut PointCloud2) {
+    pcd.fields = Vec::new();
+    pcd.point_step = 0;
+    for (field_name, datatype) in [
+        ("x", point_field::FLOAT32),
+        ("y", point_field::FLOAT32),
+        ("z", point_field::FLOAT32),
+        ("cluster_id", point_field::UINT32),
+        (FUSION_CLASS, point_field::UINT8),
+        (VISION_CLASS, point_field::UINT8),
+        (INSTANCE_ID, point_field::UINT32),
+    ] {
+        insert_field(
+            pcd,
+            PointField {
+                name: field_name.to_string(),
+                offset: 0, // offset is calculated by insert_field
+                datatype,
+                count: 1,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build the standard output field list including instance_id
+    fn make_fields() -> (Vec<PointField>, u32) {
+        let mut offset = 0u32;
+        let mut fields = Vec::new();
+        for (name, datatype) in [
+            ("x", point_field::FLOAT32),
+            ("y", point_field::FLOAT32),
+            ("z", point_field::FLOAT32),
+            ("cluster_id", point_field::UINT32),
+            (FUSION_CLASS, point_field::UINT8),
+            (VISION_CLASS, point_field::UINT8),
+            (INSTANCE_ID, point_field::UINT32),
+        ] {
+            fields.push(PointField {
+                name: name.to_string(),
+                offset,
+                datatype,
+                count: 1,
+            });
+            offset += SIZE_OF_DATATYPE[datatype as usize] as u32;
+        }
+        (fields, offset)
+    }
+
+    #[test]
+    fn serialize_pcd_writes_instance_id_at_expected_offset() {
+        let points = vec![
+            ParsedPoint {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 4.0,
+                y: 5.0,
+                z: 6.0,
+                id: Some(20),
+            },
+        ];
+        let vision_class = vec![1u8, 2u8];
+        let fusion_class = vec![3u8, 4u8];
+        let instance_id = vec![42u32, 99u32];
+
+        let (fields, point_step) = make_fields();
+        let buf = serialize_pcd(&points, &fields, &vision_class, &fusion_class, &instance_id);
+
+        // Total buffer size should be point_step * num_points
+        assert_eq!(buf.len(), point_step as usize * points.len());
+
+        // instance_id field is the last field: offset = 3*4 (xyz) + 4 (cluster_id) + 1 (fusion) + 1 (vision) = 18
+        let instance_id_offset = 18usize;
+
+        // Point 0: instance_id = 42
+        let start = instance_id_offset;
+        let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
+        assert_eq!(val, 42);
+
+        // Point 1: instance_id = 99
+        let start = point_step as usize + instance_id_offset;
+        let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
+        assert_eq!(val, 99);
+    }
+
+    #[test]
+    fn serialize_pcd_zero_instance_ids() {
+        let points = vec![
+            ParsedPoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            },
+            ParsedPoint {
+                x: 1.0,
+                y: 1.0,
+                z: 1.0,
+                id: None,
+            },
+            ParsedPoint {
+                x: 2.0,
+                y: 2.0,
+                z: 2.0,
+                id: None,
+            },
+        ];
+        let vision_class = vec![0u8; 3];
+        let fusion_class = vec![0u8; 3];
+        let instance_id = vec![0u32; 3];
+
+        let (fields, point_step) = make_fields();
+        let buf = serialize_pcd(&points, &fields, &vision_class, &fusion_class, &instance_id);
+
+        let instance_id_offset = 18usize;
+
+        for i in 0..3 {
+            let start = i * point_step as usize + instance_id_offset;
+            let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
+            assert_eq!(val, 0, "instance_id for point {i} should be 0");
+        }
+    }
+
+    #[test]
+    fn serialize_pcd_preserves_other_fields_with_instance_id() {
+        let points = vec![ParsedPoint {
+            x: 1.5,
+            y: 2.5,
+            z: 3.5,
+            id: Some(7),
+        }];
+        let vision_class = vec![5u8];
+        let fusion_class = vec![9u8];
+        let instance_id = vec![100u32];
+
+        let (fields, point_step) = make_fields();
+        let buf = serialize_pcd(&points, &fields, &vision_class, &fusion_class, &instance_id);
+
+        assert_eq!(buf.len(), point_step as usize);
+
+        // x at offset 0
+        let val = f32::from_ne_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(val, 1.5);
+
+        // y at offset 4
+        let val = f32::from_ne_bytes(buf[4..8].try_into().unwrap());
+        assert_eq!(val, 2.5);
+
+        // z at offset 8
+        let val = f32::from_ne_bytes(buf[8..12].try_into().unwrap());
+        assert_eq!(val, 3.5);
+
+        // cluster_id at offset 12
+        let val = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
+        assert_eq!(val, 7);
+
+        // fusion_class at offset 16
+        assert_eq!(buf[16], 9);
+
+        // vision_class at offset 17
+        assert_eq!(buf[17], 5);
+
+        // instance_id at offset 18
+        let val = u32::from_ne_bytes(buf[18..22].try_into().unwrap());
+        assert_eq!(val, 100);
+    }
 }

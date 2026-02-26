@@ -26,7 +26,11 @@ pub struct Box2D {
     pub label: u8,
 }
 
-pub async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<Mask>>>) {
+pub async fn mask_handler(
+    session: Session,
+    args: Args,
+    mask: Arc<Mutex<Option<(Mask, std::time::Instant)>>>,
+) {
     let mask_sub = session
         .declare_subscriber(args.mask_topic.clone())
         .await
@@ -65,7 +69,7 @@ pub async fn mask_handler(session: Session, args: Args, mask: Arc<Mutex<Option<M
             .collect();
         new_mask.mask = mask_argmax;
         let mut guard = mask.lock().await;
-        *guard = Some(new_mask);
+        *guard = Some((new_mask, std::time::Instant::now()));
     }
 }
 

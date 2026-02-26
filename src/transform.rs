@@ -85,7 +85,16 @@ pub(crate) fn transform_and_project_points(
 
     for mut c in xyz.column_iter_mut() {
         let z = c.z;
-        c /= z;
+        if z <= 0.0 {
+            // Behind camera: after CONVERT_COORD multiplication, (-1,-1,1)
+            // maps to (2,2) in normalized image coords, which falls outside
+            // the [0,1) range checked by check_in_bounds.
+            c[0] = -1.0;
+            c[1] = -1.0;
+            c[2] = 1.0;
+        } else {
+            c /= z;
+        }
     }
 
     let xy = CONVERT_COORD * xyz;
@@ -144,5 +153,58 @@ mod projection_test {
         };
         let proj = transform_and_project_points(&mut points, &[transform], &cam_mtx, (1.0, 1.0));
         println!("Projected values: {proj:?}");
+    }
+
+    #[test]
+    fn test_behind_camera_points_out_of_bounds() {
+        let mut points = vec![
+            ParsedPoint {
+                x: 10.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            }, // in front
+            ParsedPoint {
+                x: -5.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            }, // behind
+        ];
+        let cam_mtx = [1260.0, 0.0, 960.0, 0.0, 1260.0, 540.0, 0.0, 0.0, 1.0];
+        let transform = Transform {
+            translation: Vector3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            rotation: Quaternion {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                w: 1.0,
+            },
+        };
+        let proj =
+            transform_and_project_points(&mut points, &[transform], &cam_mtx, (1920.0, 1080.0));
+        // In-front point should have valid [0,1] projection
+        assert!(
+            proj[0][0] >= 0.0 && proj[0][0] <= 1.0,
+            "front point x={}",
+            proj[0][0]
+        );
+        assert!(
+            proj[0][1] >= 0.0 && proj[0][1] <= 1.0,
+            "front point y={}",
+            proj[0][1]
+        );
+        // Behind-camera point should NOT be in [0,1] bounds
+        let behind = &proj[1];
+        assert!(
+            behind[0] < 0.0 || behind[0] > 1.0 || behind[1] < 0.0 || behind[1] > 1.0,
+            "behind-camera point should be out of bounds but got ({}, {})",
+            behind[0],
+            behind[1]
+        );
     }
 }

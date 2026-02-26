@@ -6,6 +6,12 @@ use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
 
+/// Parse a path that may be empty. An empty string is accepted and stored as an
+/// empty PathBuf, which `Args::normalize()` later converts to `None`.
+fn parse_optional_path(s: &str) -> Result<PathBuf, std::convert::Infallible> {
+    Ok(PathBuf::from(s))
+}
+
 #[derive(Debug, Clone, ValueEnum, Copy, Eq, PartialEq)]
 pub enum PCDSource {
     Disabled,
@@ -39,6 +45,14 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/camera/info")]
     pub info_topic: String,
 
+    /// boxes2d input topic for instance detection. leave empty to disable
+    #[arg(long, env, default_value = "rt/model/boxes2d")]
+    pub boxes2d_topic: String,
+
+    /// Maximum age in seconds for mask/boxes2d data before warning. 0 = disabled
+    #[arg(long, env, default_value = "0.5")]
+    pub max_mask_age: f32,
+
     /// bbox3d output topic
     #[arg(long, env, default_value = "rt/fusion/boxes3d")]
     pub bbox3d_topic: String,
@@ -60,11 +74,11 @@ pub struct Args {
     pub model_output_topic: String,
 
     /// model, leave empty to disable
-    #[arg(short, long, env)]
+    #[arg(short, long, env, value_parser = parse_optional_path)]
     pub model: Option<PathBuf>,
 
     /// model decoder
-    #[arg(long, env)]
+    #[arg(long, env, value_parser = parse_optional_path)]
     pub model_decoder: Option<PathBuf>,
 
     /// set the model to be polar
@@ -175,6 +189,31 @@ pub struct Args {
     /// disable zenoh multicast scouting
     #[arg(long, env)]
     no_multicast_scouting: bool,
+}
+
+impl Args {
+    /// Normalize parsed arguments: convert empty strings to None for optional
+    /// path parameters, and filter empty strings from endpoint lists. This
+    /// allows setting `MODEL = ""` or `CONNECT = ""` in environment files to
+    /// represent the disabled/unset state.
+    pub fn normalize(&mut self) {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            self.model = None;
+        }
+        if self
+            .model_decoder
+            .as_ref()
+            .is_some_and(|p| p.as_os_str().is_empty())
+        {
+            self.model_decoder = None;
+        }
+        self.connect.retain(|s| !s.is_empty());
+        self.listen.retain(|s| !s.is_empty());
+    }
 }
 
 impl From<Args> for Config {

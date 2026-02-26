@@ -71,5 +71,5 @@ tracy-client = { version = "0.18.2", default-features = false, features = [
     "fibers",
 ] }
 uuid = { version = "1.18.1", features = ["v4"] }
-zenoh = "1.5.1"
+zenoh = "1.7.2"
 zstd = { version = "0.13.3", features = ["experimental"] }
