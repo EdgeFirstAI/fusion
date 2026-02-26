@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-02-26
+
+### Added
+
+- `instance_id` field (UINT32) in all fusion output PointCloud2 messages for instance-level object identification
+- boxes2d detection fusion: subscribe to `rt/model/boxes2d` topic and use 2D bounding boxes for point classification with per-instance tracking
+- `--boxes2d-topic` CLI parameter to configure the boxes2d subscription topic
+- `--max-mask-age` CLI parameter to control staleness threshold for mask and boxes2d data
+- `fusion.default` systemd EnvironmentFile documenting all configuration options
+- Behind-camera projection guard: points behind the camera are explicitly set out-of-bounds instead of producing invalid projections
+- Monotonic clock staleness warnings for mask and boxes2d data
+- `Args::normalize()` for handling empty-string environment variable overrides
+- `insert_standard_fields()` helper in pcd.rs to eliminate triplicated field layout code
+- `.github/copilot-instructions.md` with project coding conventions
+- `check` and `sbom` targets in Makefile
+- Unit tests for `parse_box_label`, `box_fusion_clustered` overlapping boxes, and `box_fusion_no_cluster`
+
+### Fixed
+
+- Replaced `.unwrap()` calls with defensive `match`/`if let` in `grid_nearest_cluster` and `late_fusion_clustered`
+- `parse_box_label` now logs a warning on invalid input instead of silently returning 0
+- Clippy warnings: extracted `LoadedFrame`/`FusionResult` type aliases for complex return types
+
+### Changed
+
+- Upgraded zenoh dependency from 1.5.1 to 1.7.2
+- Updated NOTICE file with current dependency versions
+- Updated documentation (README.md, ARCHITECTURE.md, TESTING.md) with boxes2d topic, instance_id field, and max_mask_age parameter
+- Release workflow now includes `fusion.default` as a release artifact
+
 ## [1.5.0] - 2026-02-14
 
 ### Added
