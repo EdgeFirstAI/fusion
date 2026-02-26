@@ -377,6 +377,32 @@ pub fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
     pcd.point_step += SIZE_OF_DATATYPE[new_field.datatype as usize] as u32 * new_field.count;
 }
 
+/// Insert the standard fusion output fields into a PointCloud2 message.
+/// Resets `fields` and `point_step` before inserting.
+pub fn insert_standard_fields(pcd: &mut PointCloud2) {
+    pcd.fields = Vec::new();
+    pcd.point_step = 0;
+    for (field_name, datatype) in [
+        ("x", point_field::FLOAT32),
+        ("y", point_field::FLOAT32),
+        ("z", point_field::FLOAT32),
+        ("cluster_id", point_field::UINT32),
+        (FUSION_CLASS, point_field::UINT8),
+        (VISION_CLASS, point_field::UINT8),
+        (INSTANCE_ID, point_field::UINT32),
+    ] {
+        insert_field(
+            pcd,
+            PointField {
+                name: field_name.to_string(),
+                offset: 0, // offset is calculated by insert_field
+                datatype,
+                count: 1,
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

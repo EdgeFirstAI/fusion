@@ -7,14 +7,14 @@ use edgefirst_schemas::{
     builtin_interfaces::Time,
     edgefirst_msgs::{Box as DetectBox, Detect, Mask, Track},
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
-    sensor_msgs::{point_field, CameraInfo, PointCloud2, PointField},
+    sensor_msgs::{CameraInfo, PointCloud2},
     serde_cdr,
     std_msgs::Header,
 };
 use fusion_model::spawn_fusion_model_thread;
 use log::{error, trace, warn};
 use mask::{mask_handler, mask_instance, Box2D};
-use pcd::{insert_field, parse_pcd, serialize_pcd, ParsedPoint};
+use pcd::{insert_standard_fields, parse_pcd, serialize_pcd, ParsedPoint};
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -630,12 +630,16 @@ async fn publish(
 
 /// Convert a track ID string to a u32 instance_id.
 /// Empty string uses fallback_seq (for ephemeral per-frame IDs).
-/// Non-empty string hashes to a persistent u32 (never 0).
+/// Non-empty string hashes to a u32 (never 0) that is stable within a
+/// single process session. The mapping is **not** guaranteed to be stable
+/// across different Rust toolchain versions or compilations because
+/// `DefaultHasher` may change its algorithm. Cross-session persistence of
+/// `instance_id` values must not be assumed by consumers.
 fn track_id_to_instance_id(track_id: &str, fallback_seq: u32) -> u32 {
     if track_id.is_empty() {
         fallback_seq
     } else {
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hasher;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         track_id.hash(&mut hasher);
         let h = hasher.finish() as u32;
@@ -645,7 +649,13 @@ fn track_id_to_instance_id(track_id: &str, fallback_seq: u32) -> u32 {
 
 /// Parse a detection box label string to u8 class index.
 fn parse_box_label(label: &str) -> u8 {
-    label.parse::<u8>().unwrap_or(0)
+    label.parse::<u8>().unwrap_or_else(|_| {
+        warn!(
+            "Failed to parse box label '{}' as u8 class index, defaulting to 0",
+            label
+        );
+        0
+    })
 }
 
 fn box_fusion_no_cluster(proj: &[[f32; 2]], detect: &Detect) -> (Vec<u8>, Vec<u32>) {
@@ -829,26 +839,7 @@ async fn publish_pcd(
     }
     let (points, vision_class, fusion_class) = points_data;
     let publ = publ.unwrap();
-    pcd.fields = Vec::new();
-    for (field_name, datatype) in [
-        ("x", point_field::FLOAT32),
-        ("y", point_field::FLOAT32),
-        ("z", point_field::FLOAT32),
-        ("cluster_id", point_field::UINT32),
-        (FUSION_CLASS, point_field::UINT8),
-        (VISION_CLASS, point_field::UINT8),
-        (INSTANCE_ID, point_field::UINT32),
-    ] {
-        insert_field(
-            pcd,
-            PointField {
-                name: field_name.to_string(),
-                offset: 0, // offset is calculated by the insert field function
-                datatype,
-                count: 1,
-            },
-        );
-    }
+    insert_standard_fields(pcd);
     let data = serialize_pcd(points, &pcd.fields, vision_class, fusion_class, instance_id);
     pcd.row_step = data.len() as u32;
     pcd.data = data;
@@ -1080,9 +1071,14 @@ fn grid_nearest_cluster(
         if min_dist2 > MAX_CLASSIFICATION_DISTANCE * MAX_CLASSIFICATION_DISTANCE {
             continue;
         }
-        let cluster_id = points[min_point_ind].id.unwrap();
-        for ind in clusters.get(&cluster_id).unwrap() {
-            class[*ind] = b.label;
+        let cluster_id = match points[min_point_ind].id {
+            Some(id) if id > 0 => id,
+            _ => continue,
+        };
+        if let Some(indices) = clusters.get(&cluster_id) {
+            for ind in indices {
+                class[*ind] = b.label;
+            }
         }
     }
 
@@ -1185,8 +1181,10 @@ fn late_fusion_clustered(
         }
     }
     for (box2d, cluster_id) in bbox_2d.into_iter().zip(bbox_id) {
-        for i in clusters.get(&cluster_id).unwrap() {
-            class[*i] = box2d.label;
+        if let Some(indices) = clusters.get(&cluster_id) {
+            for i in indices {
+                class[*i] = box2d.label;
+            }
         }
     }
 
@@ -1555,30 +1553,12 @@ fn get_occupied_cluster(
         width: centroid_points.len() as u32,
         is_bigendian: cfg!(target_endian = "big"),
         is_dense: true,
-        fields: Vec::new(), // will be set by insert_field
-        point_step: 0,      // will be set by insert_field
+        fields: Vec::new(),
+        point_step: 0,
         data: Vec::new(),
         row_step: 0,
     };
-    for (field_name, datatype) in [
-        ("x", point_field::FLOAT32),
-        ("y", point_field::FLOAT32),
-        ("z", point_field::FLOAT32),
-        ("cluster_id", point_field::UINT32),
-        (FUSION_CLASS, point_field::UINT8),
-        (VISION_CLASS, point_field::UINT8),
-        (INSTANCE_ID, point_field::UINT32),
-    ] {
-        insert_field(
-            &mut centroid_pcd,
-            PointField {
-                name: field_name.to_string(),
-                offset: 0, // offset is calculated by the insert field function
-                datatype,
-                count: 1,
-            },
-        );
-    }
+    insert_standard_fields(&mut centroid_pcd);
 
     let data = serialize_pcd(
         &centroid_points,
@@ -1782,30 +1762,12 @@ fn get_occupied_no_cluster(
         width: grid_points.len() as u32,
         is_bigendian: cfg!(target_endian = "big"),
         is_dense: true,
-        fields: Vec::new(), // will be set by insert_field
-        point_step: 0,      // will be set by insert_field
+        fields: Vec::new(),
+        point_step: 0,
         data: Vec::new(),
         row_step: 0,
     };
-    for (field_name, datatype) in [
-        ("x", point_field::FLOAT32),
-        ("y", point_field::FLOAT32),
-        ("z", point_field::FLOAT32),
-        ("cluster_id", point_field::UINT32),
-        (FUSION_CLASS, point_field::UINT8),
-        (VISION_CLASS, point_field::UINT8),
-        (INSTANCE_ID, point_field::UINT32),
-    ] {
-        insert_field(
-            &mut grid_pcd,
-            PointField {
-                name: field_name.to_string(),
-                offset: 0, // offset is calculated by the insert field function
-                datatype,
-                count: 1,
-            },
-        );
-    }
+    insert_standard_fields(&mut grid_pcd);
 
     let grid_instance_id = vec![0u32; grid_points.len()];
     let data = serialize_pcd(&grid_points, &grid_pcd.fields, &vision_class, &fusion_class, &grid_instance_id);

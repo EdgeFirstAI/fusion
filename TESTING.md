@@ -36,6 +36,7 @@ Fusion is a pub/sub service that requires live sensor data or recorded Zenoh top
 | `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame (DMA buffer) |
 | `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model |
 | `rt/model/mask` | `edgefirst_msgs/Mask` | Segmentation mask |
+| `rt/model/boxes2d` | `edgefirst_msgs/Detect` | 2D detection boxes (optional, for instance-level fusion) |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration |
 | `rt/tf_static` | `geometry_msgs/TransformStamped` | Coordinate transforms |
 

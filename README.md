@@ -180,6 +180,7 @@ edgefirst-fusion --help
 - `--camera-topic <TOPIC>` - Camera DMA buffer input (default: `rt/camera/dma`)
 - `--radarcube-topic <TOPIC>` - Radar cube input (default: `rt/radar/cube`)
 - `--mask-topic <TOPIC>` - Segmentation mask input (default: `rt/model/mask`)
+- `--boxes2d-topic <TOPIC>` - 2D detection boxes input for instance-level fusion (default: `rt/model/boxes2d`). Set to empty to disable.
 - `--info-topic <TOPIC>` - Camera info input (default: `rt/camera/info`)
 
 **Output Topics:**
@@ -199,6 +200,10 @@ edgefirst-fusion --help
 - `--model-grid-size <W> <H>` - Grid cell real-world size in meters (default: `1 1`)
 - `--model-polar` - Use polar coordinate model grid
 - `--logits` - Apply sigmoid to model output (default: `true`)
+
+**Vision & Instance Detection:**
+
+- `--max-mask-age <SECS>` - Maximum age in seconds for mask/boxes2d data before warning (default: `0.5`, 0 = disabled)
 
 **Tracking Configuration:**
 

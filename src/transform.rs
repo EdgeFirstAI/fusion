@@ -86,7 +86,9 @@ pub(crate) fn transform_and_project_points(
     for mut c in xyz.column_iter_mut() {
         let z = c.z;
         if z <= 0.0 {
-            // Behind camera: set to out-of-bounds so check_in_bounds rejects
+            // Behind camera: after CONVERT_COORD multiplication, (-1,-1,1)
+            // maps to (2,2) in normalized image coords, which falls outside
+            // the [0,1) range checked by check_in_bounds.
             c[0] = -1.0;
             c[1] = -1.0;
             c[2] = 1.0;

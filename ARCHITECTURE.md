@@ -34,6 +34,7 @@ graph TB
         InfoSub["rt/camera/info<br/>CameraInfo"]
         TFSub["rt/tf_static<br/>TransformStamped"]
         CubeSub["rt/radar/cube<br/>RadarCube"]
+        Boxes2dSub["rt/model/boxes2d<br/>Detect"]
     end
 
     subgraph "Main Thread (Tokio Async Runtime)"
@@ -67,6 +68,7 @@ graph TB
     CameraSub --> ModelThread
     CubeSub --> ModelThread
     MaskSub --> MaskTask
+    Boxes2dSub --> Init
     InfoSub --> Init
     TFSub --> Init
 
@@ -84,11 +86,13 @@ graph TB
     Init -.->|"shared state"| LidarThread
     ModelThread -.->|"grid predictions"| RadarThread
     ModelThread -.->|"grid predictions"| LidarThread
+    Init -.->|"boxes2d shared state"| RadarThread
+    Init -.->|"boxes2d shared state"| LidarThread
 ```
 
 ### Key Architectural Properties
 
-- **Shared State via Mutex**: Camera info, segmentation masks, transforms, and model predictions are shared between threads using `tokio::sync::Mutex`
+- **Shared State via Mutex**: Camera info, segmentation masks, transforms, model predictions, and 2D detection boxes are shared between threads using `tokio::sync::Mutex`
 - **Dedicated Fusion Threads**: Radar and LiDAR processing each run in their own thread with a dedicated single-threaded Tokio runtime
 - **Independent Model Thread**: ML inference runs independently, publishing predictions consumed by fusion threads
 - **Drain-on-Receive**: Fusion threads drain old messages and process only the latest, preventing queue buildup
@@ -213,6 +217,7 @@ Threads communicate through shared state protected by `tokio::sync::Mutex`:
 | `Mask` | Mask handler thread | Fusion threads | Segmentation mask for late fusion |
 | `Transform` | Main thread (subscriber callback) | Fusion threads | Sensor-to-base_link transforms |
 | `Grid` | Model thread | Fusion threads | ML model occupancy predictions |
+| `Boxes2d` | `boxes2d_callback` (Zenoh cb) | Fusion threads | Detection boxes for instance-level identification |
 
 ### Drain-Receive Pattern
 
@@ -237,6 +242,7 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 | `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame as DMA buffer |
 | `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
 | `rt/model/mask` | `edgefirst_msgs/Mask` | Vision model segmentation mask |
+| `rt/model/boxes2d` | `edgefirst_msgs/Detect` | 2D detection boxes for instance-level fusion |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
 | `rt/tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |
 
@@ -257,8 +263,9 @@ The fusion output adds classification fields to input point clouds:
 |-------|------|-------------|
 | `x`, `y`, `z` | FLOAT32 | 3D coordinates (base_link frame) |
 | `cluster_id` | UINT32 | Cluster identifier (from input) |
-| `vision_class` | UINT8 | Class from camera mask projection |
+| `vision_class` | UINT8 | Class from camera mask projection or boxes2d detection |
 | `fusion_class` | UINT8 | Class from ML model grid prediction |
+| `instance_id` | UINT32 | Instance identifier from boxes2d detection track ID (0 = no instance) |
 
 ---
 
