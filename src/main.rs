@@ -705,7 +705,11 @@ pub fn hash_track_id(track_id: &str) -> u32 {
         h ^= byte as u32;
         h = h.wrapping_mul(0x0100_0193);
     }
-    if h == 0 { 1 } else { h }
+    if h == 0 {
+        1
+    } else {
+        h
+    }
 }
 
 /// Parse a detection box label string to u8 class index.
