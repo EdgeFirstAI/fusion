@@ -37,21 +37,21 @@ pub struct Args {
     #[arg(long, env, default_value = "")]
     pub lidar_output_topic: String,
 
-    /// mask input topic
-    #[arg(long, env, default_value = "rt/model/mask")]
-    pub mask_topic: String,
-
     /// camera info input topic
     #[arg(long, env, default_value = "rt/camera/info")]
     pub info_topic: String,
 
-    /// boxes2d input topic for instance detection. leave empty to disable
-    #[arg(long, env, default_value = "rt/model/boxes2d")]
-    pub boxes2d_topic: String,
+    /// unified vision model output topic. leave empty to disable
+    #[arg(long, env, default_value = "rt/model/output")]
+    pub vision_model_topic: String,
 
-    /// Maximum age in seconds for mask/boxes2d data before warning. 0 = disabled
+    /// model info topic for label resolution. leave empty to disable
+    #[arg(long, env, default_value = "rt/model/info")]
+    pub model_info_topic: String,
+
+    /// Maximum age in seconds for model output data before warning. 0 = disabled
     #[arg(long, env, default_value = "0.5")]
-    pub max_mask_age: f32,
+    pub max_model_age: f32,
 
     /// bbox3d output topic
     #[arg(long, env, default_value = "rt/fusion/boxes3d")]

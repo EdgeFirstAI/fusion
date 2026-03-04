@@ -1,16 +1,9 @@
 // Copyright 2025 Au-Zone Technologies Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
-use edgefirst_schemas::{edgefirst_msgs::Mask, serde_cdr};
+use edgefirst_schemas::edgefirst_msgs::Mask;
 use itertools::Itertools;
-use log::error;
-use tokio::sync::Mutex;
-use tracing::{info_span, instrument};
-use zenoh::Session;
-
-use crate::{args::Args, drain_recv, DrainRecvTimeoutSettings};
+use tracing::instrument;
 
 // Finds the argmax of the slice. Panics if the slice is empty
 pub fn argmax_slice<T: Ord>(slice: &[T]) -> u8 {
@@ -26,51 +19,31 @@ pub struct Box2D {
     pub label: u8,
 }
 
-pub async fn mask_handler(
-    session: Session,
-    args: Args,
-    mask: Arc<Mutex<Option<(Mask, std::time::Instant)>>>,
-) {
-    let mask_sub = session
-        .declare_subscriber(args.mask_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh subscriber");
-    let mut timeout = DrainRecvTimeoutSettings::default();
-    loop {
-        let sample = match drain_recv(&mask_sub, &mut timeout).await {
-            Some(v) => v,
-            None => continue,
-        };
-
-        let mut new_mask: Mask = match info_span!("mask_deserialize")
-            .in_scope(|| serde_cdr::deserialize::<Mask>(&sample.payload().to_bytes()))
-        {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to deserialize message: {e:?}");
-                continue;
-            }
-        };
-
-        if new_mask.encoding == "zstd" {
-            new_mask.encoding = "".to_owned();
-            new_mask.mask = zstd::decode_all(new_mask.mask.as_slice())
-                .expect("Cannot decompress zstd encoded mask");
-        }
-
-        if new_mask.width == 0 || new_mask.height == 0 {
-            continue;
-        }
-        let mask_classes = new_mask.mask.len() / new_mask.width as usize / new_mask.height as usize;
-        let mask_argmax: Vec<u8> = new_mask
-            .mask
-            .chunks_exact(mask_classes)
-            .map(argmax_slice)
-            .collect();
-        new_mask.mask = mask_argmax;
-        let mut guard = mask.lock().await;
-        *guard = Some((new_mask, std::time::Instant::now()));
+/// Decompress (if zstd) and argmax a multi-channel mask into a single-channel
+/// class-index mask. Modifies the mask in-place.
+pub fn process_mask(mask: &mut Mask) {
+    if mask.encoding == "zstd" {
+        mask.encoding = String::new();
+        mask.mask = zstd::decode_all(mask.mask.as_slice())
+            .expect("Cannot decompress zstd encoded mask");
     }
+    if mask.width == 0 || mask.height == 0 {
+        return;
+    }
+    let channels = mask.mask.len() / (mask.width as usize * mask.height as usize);
+    if channels > 1 {
+        mask.mask = mask.mask.chunks_exact(channels).map(argmax_slice).collect();
+    }
+}
+
+/// Resolve a box label to a u8 class index using the labels list.
+pub fn resolve_box_label(label: &str, labels: Option<&[String]>) -> u8 {
+    if let Some(labels) = labels {
+        if let Some(idx) = labels.iter().position(|l| l == label) {
+            return (idx + 1).min(255) as u8;
+        }
+    }
+    label.parse::<u8>().unwrap_or(0)
 }
 
 #[instrument(skip_all)]
