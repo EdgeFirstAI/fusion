@@ -498,7 +498,14 @@ mod tests {
 
         let (fields, point_step) = make_fields();
         assert_eq!(point_step, 24, "point_step should be 24 bytes");
-        let buf = serialize_pcd(&points, &fields, &vision_class, &fusion_class, &instance_id, &track_id);
+        let buf = serialize_pcd(
+            &points,
+            &fields,
+            &vision_class,
+            &fusion_class,
+            &instance_id,
+            &track_id,
+        );
 
         // Total buffer size should be point_step * num_points
         assert_eq!(buf.len(), point_step as usize * points.len());
@@ -556,7 +563,14 @@ mod tests {
         let track_id = vec![0u32; 3];
 
         let (fields, point_step) = make_fields();
-        let buf = serialize_pcd(&points, &fields, &vision_class, &fusion_class, &instance_id, &track_id);
+        let buf = serialize_pcd(
+            &points,
+            &fields,
+            &vision_class,
+            &fusion_class,
+            &instance_id,
+            &track_id,
+        );
 
         let instance_id_offset = 18usize;
         let track_id_offset = 20usize;
@@ -586,7 +600,14 @@ mod tests {
         let track_id = vec![5555u32];
 
         let (fields, point_step) = make_fields();
-        let buf = serialize_pcd(&points, &fields, &vision_class, &fusion_class, &instance_id, &track_id);
+        let buf = serialize_pcd(
+            &points,
+            &fields,
+            &vision_class,
+            &fusion_class,
+            &instance_id,
+            &track_id,
+        );
 
         assert_eq!(buf.len(), point_step as usize);
         assert_eq!(point_step, 24);

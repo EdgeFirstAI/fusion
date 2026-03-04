@@ -147,16 +147,8 @@ mod projection_test {
             &cam_mtx,
             (1920.0, 1080.0),
         );
-        assert!(
-            (proj[0][0] - 0.5).abs() < 0.001,
-            "center u={}",
-            proj[0][0]
-        );
-        assert!(
-            (proj[0][1] - 0.5).abs() < 0.001,
-            "center v={}",
-            proj[0][1]
-        );
+        assert!((proj[0][0] - 0.5).abs() < 0.001, "center u={}", proj[0][0]);
+        assert!((proj[0][1] - 0.5).abs() < 0.001, "center v={}", proj[0][1]);
     }
 
     #[test]
