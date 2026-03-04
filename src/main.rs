@@ -54,10 +54,23 @@ type Grid = (Vec<Vec<f32>>, u64);
 
 /// Data loaded from a single point cloud frame: the cloud, parsed points,
 /// sensor-to-base transform, camera-to-base transform, and camera intrinsics.
-type LoadedFrame = (PointCloud2, Vec<ParsedPoint>, Transform, Transform, CameraInfo);
+type LoadedFrame = (
+    PointCloud2,
+    Vec<ParsedPoint>,
+    Transform,
+    Transform,
+    CameraInfo,
+);
 
 /// Fusion output: (vision_class, fusion_class, instance_ids, track_ids, has_cluster_ids, cluster_map).
-type FusionResult = (Vec<u8>, Vec<u8>, Vec<u16>, Vec<u32>, bool, HashMap<u32, Vec<usize>>);
+type FusionResult = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u16>,
+    Vec<u32>,
+    bool,
+    HashMap<u32, Vec<usize>>,
+);
 
 const FUSION_CLASS: &str = "fusion_class";
 const INSTANCE_ID: &str = "instance_id";
@@ -116,8 +129,7 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let model_output: Arc<Mutex<Option<(Model, std::time::Instant)>>> =
-        Arc::new(Mutex::new(None));
+    let model_output: Arc<Mutex<Option<(Model, std::time::Instant)>>> = Arc::new(Mutex::new(None));
     let _model_output_sub = if !args.vision_model_topic.is_empty() {
         let cb = model_output_callback(model_output.clone());
         Some(
@@ -255,9 +267,7 @@ fn model_output_callback(
     }
 }
 
-fn model_labels_callback(
-    labels: Arc<Mutex<Option<Vec<String>>>>,
-) -> impl FnMut(Sample) {
+fn model_labels_callback(labels: Arc<Mutex<Option<Vec<String>>>>) -> impl FnMut(Sample) {
     move |s: Sample| {
         let info: ModelInfo = match serde_cdr::deserialize(&s.payload().to_bytes()) {
             Ok(v) => v,
@@ -536,14 +546,8 @@ async fn fusion(
     let model_labels_guard = data.model_info.lock().await;
     let labels = model_labels_guard.as_deref();
 
-    let (vision_class, instance_id, track_id) = get_vision_class_and_instance(
-        points,
-        &proj,
-        model_ref,
-        has_cluster_ids,
-        &ids,
-        labels,
-    );
+    let (vision_class, instance_id, track_id) =
+        get_vision_class_and_instance(points, &proj, model_ref, has_cluster_ids, &ids, labels);
     drop(model_labels_guard);
     drop(model_guard);
 
@@ -697,23 +701,25 @@ pub fn hash_track_id(track_id: &str) -> u32 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         track_id.hash(&mut hasher);
         let h = hasher.finish() as u32;
-        if h == 0 { 1 } else { h }
+        if h == 0 {
+            1
+        } else {
+            h
+        }
     }
 }
 
 /// Parse a detection box label string to u8 class index.
 ///
 /// When a `labels` list is provided (from `ModelInfo`), the label is looked up
-/// by string and its 1-based index is returned (0 = background, matching the
-/// mask argmax convention). Falls back to numeric parsing, then to 0.
+/// by string and its index is returned (0 = background, matching the mask
+/// argmax convention). Falls back to numeric parsing, then to 0.
 fn parse_box_label(label: &str, labels: Option<&[String]>) -> u8 {
-    // Try label list lookup first (index + 1, since 0 = background)
     if let Some(labels) = labels {
         if let Some(idx) = labels.iter().position(|l| l == label) {
-            return (idx + 1).min(255) as u8;
+            return idx.min(255) as u8;
         }
     }
-    // Fallback: try parsing as numeric index
     label.parse::<u8>().unwrap_or_else(|_| {
         warn!("Unknown box label '{}', defaulting to 0", label);
         0
@@ -802,7 +808,9 @@ fn box_fusion_clustered(
         if let Some((&best_cluster, &best_count)) =
             cluster_counts.iter().max_by_key(|(_, count)| *count)
         {
-            let entry = cluster_assignment.entry(best_cluster).or_insert((0, 0, 0, 0));
+            let entry = cluster_assignment
+                .entry(best_cluster)
+                .or_insert((0, 0, 0, 0));
             if best_count > entry.3 {
                 *entry = (label, instance, track, best_count);
             }
@@ -841,7 +849,13 @@ fn get_vision_class_and_instance(
         if first_mask.boxed && !model.boxes.is_empty() {
             // Instance segmentation: per-box masks placed at box coordinates
             return boxed_mask_fusion(
-                points, proj, &model.masks, &model.boxes, labels, has_cluster_ids, ids,
+                points,
+                proj,
+                &model.masks,
+                &model.boxes,
+                labels,
+                has_cluster_ids,
+                ids,
             );
         } else {
             // Semantic segmentation: process full-frame mask
@@ -896,9 +910,8 @@ fn prepare_box_masks(
         .zip(boxes.iter())
         .enumerate()
         .filter_map(|(i, (mask, det_box))| {
-            let raw_len = mask.mask.len();
             let mut m = mask.clone();
-            process_mask(&mut m);
+            let channels = process_mask(&mut m);
             let w = m.width as usize;
             let h = m.height as usize;
             if w == 0 || h == 0 || m.mask.len() != w * h {
@@ -908,10 +921,7 @@ fn prepare_box_masks(
             if class_idx == 0 {
                 return None;
             }
-            // If the mask was multi-channel (raw_len > w*h), process_mask did
-            // argmax and values are class indices (0=bg). Otherwise values are
-            // raw confidence bytes.
-            let argmaxed = raw_len > w * h;
+            let argmaxed = channels > 1;
             let half_w = det_box.width / 2.0;
             let half_h = det_box.height / 2.0;
             Some(PreparedBoxMask {
@@ -954,12 +964,17 @@ fn lookup_point_in_masks(u: f32, v: f32, prepared: &[PreparedBoxMask]) -> (u8, u
         let mx = (rel_x * bm.width as f32) as usize;
         let my = (rel_y * bm.height as f32) as usize;
         let val = bm.mask[my * bm.width + mx];
-        // For argmaxed masks: val is a class index (0=background, 1+=foreground).
-        // For single-channel masks: val is confidence (0-255), threshold it.
-        let foreground = if bm.argmaxed { val > 0 } else { val >= MASK_THRESHOLD };
-        if foreground && val > best_score {
-            best_score = val;
-            best = (bm.class_idx, bm.instance_id, bm.track_id);
+        if bm.argmaxed {
+            // Argmaxed: val is a class index (0=background). First hit wins.
+            if val > 0 {
+                return (bm.class_idx, bm.instance_id, bm.track_id);
+            }
+        } else {
+            // Single-channel confidence: pick highest above threshold.
+            if val >= MASK_THRESHOLD && val > best_score {
+                best_score = val;
+                best = (bm.class_idx, bm.instance_id, bm.track_id);
+            }
         }
     }
     best
@@ -1185,7 +1200,14 @@ async fn publish_pcd(
     let (points, vision_class, fusion_class) = points_data;
     let publ = publ.unwrap();
     insert_standard_fields(pcd);
-    let data = serialize_pcd(points, &pcd.fields, vision_class, fusion_class, instance_id, track_id);
+    let data = serialize_pcd(
+        points,
+        &pcd.fields,
+        vision_class,
+        fusion_class,
+        instance_id,
+        track_id,
+    );
     pcd.row_step = data.len() as u32;
     pcd.data = data;
     pcd.is_bigendian = cfg!(target_endian = "big");
@@ -2348,9 +2370,24 @@ mod tests {
     #[test]
     fn test_box_fusion_clustered_assigns_whole_cluster() {
         let points = vec![
-            ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: Some(10) },
-            ParsedPoint { x: 2.0, y: 0.0, z: 0.0, id: Some(10) },
-            ParsedPoint { x: 3.0, y: 0.0, z: 0.0, id: Some(20) },
+            ParsedPoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 3.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(20),
+            },
         ];
         let proj = vec![[0.5, 0.5], [0.55, 0.5], [0.6, 0.5]];
         let boxes = vec![make_box(0.55, 0.5, 0.2, 0.2, "5", "uuid-xyz")];
@@ -2358,14 +2395,30 @@ mod tests {
         clusters.insert(10, vec![0, 1]);
         clusters.insert(20, vec![2]);
 
-        let (classes, instances, track_ids) = box_fusion_clustered(&points, &proj, &boxes, &clusters, None);
+        let (classes, instances, track_ids) =
+            box_fusion_clustered(&points, &proj, &boxes, &clusters, None);
 
-        assert_eq!(classes[0], 5, "first point of winning cluster should get class");
-        assert_eq!(classes[1], 5, "second point of winning cluster should get class");
-        assert_eq!(instances[0], instances[1], "all points in cluster get same instance");
+        assert_eq!(
+            classes[0], 5,
+            "first point of winning cluster should get class"
+        );
+        assert_eq!(
+            classes[1], 5,
+            "second point of winning cluster should get class"
+        );
+        assert_eq!(
+            instances[0], instances[1],
+            "all points in cluster get same instance"
+        );
         assert_ne!(instances[0], 0, "instance should be non-zero");
-        assert_ne!(track_ids[0], 0, "track_id should be non-zero for tracked box");
-        assert_eq!(track_ids[0], track_ids[1], "all points in cluster get same track_id");
+        assert_ne!(
+            track_ids[0], 0,
+            "track_id should be non-zero for tracked box"
+        );
+        assert_eq!(
+            track_ids[0], track_ids[1],
+            "all points in cluster get same track_id"
+        );
         assert_eq!(classes[2], 0, "losing cluster should not get class");
         assert_eq!(instances[2], 0, "losing cluster should not get instance");
     }
@@ -2377,15 +2430,24 @@ mod tests {
         let (classes, instances, track_ids) = box_fusion_no_cluster(&proj, &boxes, None);
 
         assert!(classes.iter().all(|&c| c == 0), "all classes should be 0");
-        assert!(instances.iter().all(|&i| i == 0), "all instances should be 0");
-        assert!(track_ids.iter().all(|&t| t == 0), "all track_ids should be 0");
+        assert!(
+            instances.iter().all(|&i| i == 0),
+            "all instances should be 0"
+        );
+        assert!(
+            track_ids.iter().all(|&t| t == 0),
+            "all track_ids should be 0"
+        );
     }
 
     #[test]
     fn test_hash_track_id_persistent() {
         let id1 = hash_track_id("some-uuid-123");
         let id2 = hash_track_id("some-uuid-123");
-        assert_eq!(id1, id2, "same track_id should always produce the same hash");
+        assert_eq!(
+            id1, id2,
+            "same track_id should always produce the same hash"
+        );
         assert_ne!(id1, 0, "hashed track_id should never be 0");
     }
 
@@ -2418,10 +2480,14 @@ mod tests {
 
     #[test]
     fn test_parse_box_label_with_labels_list() {
-        let labels = vec!["background".to_string(), "person".to_string(), "car".to_string()];
-        assert_eq!(parse_box_label("person", Some(&labels)), 2);
-        assert_eq!(parse_box_label("car", Some(&labels)), 3);
-        assert_eq!(parse_box_label("background", Some(&labels)), 1);
+        let labels = vec![
+            "background".to_string(),
+            "person".to_string(),
+            "car".to_string(),
+        ];
+        assert_eq!(parse_box_label("person", Some(&labels)), 1);
+        assert_eq!(parse_box_label("car", Some(&labels)), 2);
+        assert_eq!(parse_box_label("background", Some(&labels)), 0);
     }
 
     #[test]
@@ -2434,9 +2500,24 @@ mod tests {
     #[test]
     fn test_box_fusion_clustered_overlapping_boxes() {
         let points = vec![
-            ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: Some(10) },
-            ParsedPoint { x: 2.0, y: 0.0, z: 0.0, id: Some(10) },
-            ParsedPoint { x: 3.0, y: 0.0, z: 0.0, id: Some(10) },
+            ParsedPoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
+            ParsedPoint {
+                x: 3.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(10),
+            },
         ];
         let proj = vec![[0.5, 0.5], [0.55, 0.5], [0.6, 0.5]];
         let box_a = make_box(0.55, 0.5, 0.3, 0.3, "7", "track-a");
@@ -2446,7 +2527,8 @@ mod tests {
         let mut clusters: HashMap<u32, Vec<usize>> = HashMap::new();
         clusters.insert(10, vec![0, 1, 2]);
 
-        let (classes, instances, track_ids) = box_fusion_clustered(&points, &proj, &boxes, &clusters, None);
+        let (classes, instances, track_ids) =
+            box_fusion_clustered(&points, &proj, &boxes, &clusters, None);
 
         assert_eq!(classes[0], 7, "cluster should get Box A's class");
         assert_eq!(classes[1], 7);
@@ -2469,8 +2551,8 @@ mod tests {
             mask: vec![
                 10, 20, 5, // pixel (0,0): channel 1 wins -> class 1
                 30, 5, 10, // pixel (1,0): channel 0 wins -> class 0
-                5, 5, 40,  // pixel (0,1): channel 2 wins -> class 2
-                2, 1, 1,   // pixel (1,1): channel 0 wins -> class 0
+                5, 5, 40, // pixel (0,1): channel 2 wins -> class 2
+                2, 1, 1, // pixel (1,1): channel 0 wins -> class 0
             ],
             boxed: false,
         };
@@ -2516,16 +2598,23 @@ mod tests {
         // Model with boxes only, no masks
         let boxes = vec![make_box(0.5, 0.5, 0.4, 0.4, "2", "det-track")];
         let model = make_model(boxes, vec![]);
-        let points = vec![ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: None }];
+        let points = vec![ParsedPoint {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            id: None,
+        }];
         let proj = vec![[0.5, 0.5]];
         let ids = HashMap::new();
 
-        let (classes, instances, track_ids) = get_vision_class_and_instance(
-            &points, &proj, Some(&model), false, &ids, None,
-        );
+        let (classes, instances, track_ids) =
+            get_vision_class_and_instance(&points, &proj, Some(&model), false, &ids, None);
         assert_eq!(classes[0], 2);
         assert_ne!(instances[0], 0);
-        assert_ne!(track_ids[0], 0, "tracked detection should have non-zero track_id");
+        assert_ne!(
+            track_ids[0], 0,
+            "tracked detection should have non-zero track_id"
+        );
     }
 
     #[test]
@@ -2540,14 +2629,18 @@ mod tests {
             boxed: false,
         };
         let model = make_model(vec![], vec![mask]);
-        let points = vec![ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: None }];
+        let points = vec![ParsedPoint {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+            id: None,
+        }];
         // Project to pixel (1,1) in normalized coords -> (0.75, 0.75) -> mask[1*2+1] = 3
         let proj = vec![[0.75, 0.75]];
         let ids = HashMap::new();
 
-        let (classes, instances, track_ids) = get_vision_class_and_instance(
-            &points, &proj, Some(&model), false, &ids, None,
-        );
+        let (classes, instances, track_ids) =
+            get_vision_class_and_instance(&points, &proj, Some(&model), false, &ids, None);
         assert_eq!(classes[0], 3);
         assert_eq!(instances[0], 0, "semantic segmentation has no instance IDs");
         assert_eq!(track_ids[0], 0, "semantic segmentation has no track IDs");
@@ -2563,31 +2656,44 @@ mod tests {
             length: 1,
             encoding: String::new(),
             // Single-channel confidence mask: high confidence in upper-left quadrant
-            mask: vec![
-                255, 255, 0, 0,
-                255, 255, 0, 0,
-                  0,   0, 0, 0,
-                  0,   0, 0, 0,
-            ],
+            mask: vec![255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             boxed: true,
         };
         let det_box = make_box(0.25, 0.25, 0.5, 0.5, "person", "track-1");
         let model = make_model(vec![det_box], vec![mask]);
         let points = vec![
-            ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: None },
-            ParsedPoint { x: 5.0, y: 0.0, z: 0.0, id: None },
+            ParsedPoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            },
+            ParsedPoint {
+                x: 5.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            },
         ];
         // First point projects into the mask, second projects outside
         let proj = vec![[0.1, 0.1], [0.9, 0.9]];
         let ids = HashMap::new();
 
-        let (classes, instances, track_ids) = get_vision_class_and_instance(
-            &points, &proj, Some(&model), false, &ids, Some(&labels),
-        );
+        let (classes, instances, track_ids) =
+            get_vision_class_and_instance(&points, &proj, Some(&model), false, &ids, Some(&labels));
         assert_ne!(classes[0], 0, "point inside instance mask should get class");
-        assert_ne!(instances[0], 0, "point inside instance mask should get instance");
-        assert_ne!(track_ids[0], 0, "point inside instance mask should get track_id");
-        assert_eq!(classes[1], 0, "point outside instance mask should be background");
+        assert_ne!(
+            instances[0], 0,
+            "point inside instance mask should get instance"
+        );
+        assert_ne!(
+            track_ids[0], 0,
+            "point inside instance mask should get track_id"
+        );
+        assert_eq!(
+            classes[1], 0,
+            "point outside instance mask should be background"
+        );
     }
 
     #[test]
@@ -2596,13 +2702,17 @@ mod tests {
         // Box 2: centered at (0.75, 0.75), size 0.5x0.5 → covers [0.5, 0.5] to [1.0, 1.0]
         let masks = vec![
             Mask {
-                width: 2, height: 2, length: 1,
+                width: 2,
+                height: 2,
+                length: 1,
                 encoding: String::new(),
                 mask: vec![255, 255, 255, 255], // all foreground
                 boxed: true,
             },
             Mask {
-                width: 2, height: 2, length: 1,
+                width: 2,
+                height: 2,
+                length: 1,
                 encoding: String::new(),
                 mask: vec![255, 255, 255, 255],
                 boxed: true,
@@ -2610,23 +2720,58 @@ mod tests {
         ];
         let boxes = vec![
             DetectBox {
-                center_x: 0.25, center_y: 0.25, width: 0.5, height: 0.5,
-                label: "1".to_string(), score: 0.9, distance: 0.0, speed: 0.0,
-                track: Track { id: "track-a".to_string(), lifetime: 0, created: Time { sec: 0, nanosec: 0 } },
+                center_x: 0.25,
+                center_y: 0.25,
+                width: 0.5,
+                height: 0.5,
+                label: "1".to_string(),
+                score: 0.9,
+                distance: 0.0,
+                speed: 0.0,
+                track: Track {
+                    id: "track-a".to_string(),
+                    lifetime: 0,
+                    created: Time { sec: 0, nanosec: 0 },
+                },
             },
             DetectBox {
-                center_x: 0.75, center_y: 0.75, width: 0.5, height: 0.5,
-                label: "2".to_string(), score: 0.9, distance: 0.0, speed: 0.0,
-                track: Track { id: "track-b".to_string(), lifetime: 0, created: Time { sec: 0, nanosec: 0 } },
+                center_x: 0.75,
+                center_y: 0.75,
+                width: 0.5,
+                height: 0.5,
+                label: "2".to_string(),
+                score: 0.9,
+                distance: 0.0,
+                speed: 0.0,
+                track: Track {
+                    id: "track-b".to_string(),
+                    lifetime: 0,
+                    created: Time { sec: 0, nanosec: 0 },
+                },
             },
         ];
         let ids: HashMap<u32, Vec<usize>> = HashMap::new();
         // Point in box 1, point in box 2, point well outside both boxes (beyond edge tolerance)
         let proj = vec![[0.1, 0.1], [0.75, 0.75], [0.55, 1.1]];
         let points = vec![
-            ParsedPoint { x: 0.0, y: 0.0, z: 0.0, id: None },
-            ParsedPoint { x: 0.0, y: 0.0, z: 0.0, id: None },
-            ParsedPoint { x: 0.0, y: 0.0, z: 0.0, id: None },
+            ParsedPoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            },
+            ParsedPoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            },
+            ParsedPoint {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+                id: None,
+            },
         ];
 
         let (classes, instances, track_ids) =
@@ -2644,19 +2789,41 @@ mod tests {
     fn test_instance_mask_fusion_clustered() {
         // Box centered at (0.25, 0.25), covering [0.0, 0.0] to [0.5, 0.5]
         let masks = vec![Mask {
-            width: 2, height: 2, length: 1,
+            width: 2,
+            height: 2,
+            length: 1,
             encoding: String::new(),
             mask: vec![255, 255, 255, 255],
             boxed: true,
         }];
         let boxes = vec![DetectBox {
-            center_x: 0.25, center_y: 0.25, width: 0.5, height: 0.5,
-            label: "1".to_string(), score: 0.9, distance: 0.0, speed: 0.0,
-            track: Track { id: "track-a".to_string(), lifetime: 0, created: Time { sec: 0, nanosec: 0 } },
+            center_x: 0.25,
+            center_y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            label: "1".to_string(),
+            score: 0.9,
+            distance: 0.0,
+            speed: 0.0,
+            track: Track {
+                id: "track-a".to_string(),
+                lifetime: 0,
+                created: Time { sec: 0, nanosec: 0 },
+            },
         }];
         let points = vec![
-            ParsedPoint { x: 1.0, y: 0.0, z: 0.0, id: Some(5) },
-            ParsedPoint { x: 2.0, y: 0.0, z: 0.0, id: Some(5) },
+            ParsedPoint {
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(5),
+            },
+            ParsedPoint {
+                x: 2.0,
+                y: 0.0,
+                z: 0.0,
+                id: Some(5),
+            },
         ];
         // Both points in cluster 5 project into box region
         let proj = vec![[0.1, 0.1], [0.2, 0.2]];

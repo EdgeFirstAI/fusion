@@ -20,27 +20,46 @@ pub struct Box2D {
 }
 
 /// Decompress (if zstd) and argmax a multi-channel mask into a single-channel
-/// class-index mask. Modifies the mask in-place.
-pub fn process_mask(mask: &mut Mask) {
+/// class-index mask. Modifies the mask in-place. Returns the number of
+/// channels detected (1 if single-channel or invalid, >1 if argmax was applied).
+pub fn process_mask(mask: &mut Mask) -> usize {
     if mask.encoding == "zstd" {
-        mask.encoding = String::new();
-        mask.mask = zstd::decode_all(mask.mask.as_slice())
-            .expect("Cannot decompress zstd encoded mask");
+        match zstd::decode_all(mask.mask.as_slice()) {
+            Ok(decoded) => {
+                mask.encoding = String::new();
+                mask.mask = decoded;
+            }
+            Err(e) => {
+                log::error!("Failed to decompress zstd mask: {e}");
+                mask.mask.clear();
+                mask.width = 0;
+                mask.height = 0;
+                return 1;
+            }
+        }
     }
     if mask.width == 0 || mask.height == 0 {
-        return;
+        mask.mask.clear();
+        return 1;
     }
-    let channels = mask.mask.len() / (mask.width as usize * mask.height as usize);
+    let pixels = mask.width as usize * mask.height as usize;
+    if mask.mask.is_empty() || pixels == 0 || mask.mask.len() % pixels != 0 {
+        mask.mask = vec![0; pixels];
+        return 1;
+    }
+    let channels = mask.mask.len() / pixels;
     if channels > 1 {
         mask.mask = mask.mask.chunks_exact(channels).map(argmax_slice).collect();
     }
+    channels
 }
 
 /// Resolve a box label to a u8 class index using the labels list.
+/// Index 0 is background (matching the mask argmax convention).
 pub fn resolve_box_label(label: &str, labels: Option<&[String]>) -> u8 {
     if let Some(labels) = labels {
         if let Some(idx) = labels.iter().position(|l| l == label) {
-            return (idx + 1).min(255) as u8;
+            return idx.min(255) as u8;
         }
     }
     label.parse::<u8>().unwrap_or(0)
