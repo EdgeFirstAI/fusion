@@ -686,27 +686,26 @@ async fn publish(
     join!(publ_bbox, publ_pcd, publ_grid);
 }
 
-/// Hash a track ID string to a u32.
-/// Empty string returns 0 (reserved for no-track).
-/// Non-empty string hashes to a u32 (never 0) that is stable within a
-/// single process lifetime. Values are **only valid within the current
-/// process**; they are not stable across service restarts, different Rust
-/// toolchain versions, or recompilations because `DefaultHasher` may change
-/// its algorithm.
+/// Hash a track ID string to a u32 using FNV-1a.
+///
+/// Empty string returns 0 (reserved for no-track). Non-empty string hashes
+/// to a u32 (never 0) that is deterministic and stable across processes,
+/// platforms, and language implementations.
+///
+/// Algorithm: FNV-1a 32-bit (offset basis `0x811c9dc5`, prime `0x01000193`)
+/// operating on the raw UTF-8 bytes of the input string.
+///
+/// Reference: <https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function>
 pub fn hash_track_id(track_id: &str) -> u32 {
     if track_id.is_empty() {
-        0
-    } else {
-        use std::hash::Hasher;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        track_id.hash(&mut hasher);
-        let h = hasher.finish() as u32;
-        if h == 0 {
-            1
-        } else {
-            h
-        }
+        return 0;
     }
+    let mut h: u32 = 0x811c_9dc5;
+    for &byte in track_id.as_bytes() {
+        h ^= byte as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    if h == 0 { 1 } else { h }
 }
 
 /// Parse a detection box label string to u8 class index.
@@ -2441,14 +2440,15 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_track_id_persistent() {
-        let id1 = hash_track_id("some-uuid-123");
-        let id2 = hash_track_id("some-uuid-123");
+    fn test_hash_track_id_deterministic() {
+        // FNV-1a 32-bit of b"some-uuid-123" — verifiable in any language.
+        assert_eq!(hash_track_id("some-uuid-123"), 0x781c_f9b2);
         assert_eq!(
-            id1, id2,
-            "same track_id should always produce the same hash"
+            hash_track_id("some-uuid-123"),
+            hash_track_id("some-uuid-123"),
+            "same input must always produce the same hash"
         );
-        assert_ne!(id1, 0, "hashed track_id should never be 0");
+        assert_ne!(hash_track_id("some-uuid-123"), 0);
     }
 
     #[test]
