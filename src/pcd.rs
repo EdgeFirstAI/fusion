@@ -2,644 +2,565 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use edgefirst_schemas::sensor_msgs::{point_field, PointCloud2, PointField};
-use log::error;
-use std::collections::HashMap;
+use log::warn;
 use tracing::instrument;
 
 use crate::{FUSION_CLASS, INSTANCE_ID, TRACK_ID, VISION_CLASS};
 
-pub struct ParsedPoint {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub id: Option<u32>,
+/// Structure-of-Arrays representation of a point cloud frame with fusion
+/// annotations. All vectors are parallel and indexed by point index.
+pub struct FusionFrame {
+    pub len: usize,
+    // Core geometry (from input PCD)
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+    pub z: Vec<f32>,
+    // Cluster IDs from input (empty if no clustering)
+    pub cluster_id: Vec<u32>,
+    // Projection results (filled by transform_and_project_points)
+    pub proj_u: Vec<f32>,
+    pub proj_v: Vec<f32>,
+    // Fusion results (filled by fusion algorithms)
+    pub vision_class: Vec<u8>,
+    pub fusion_class: Vec<u8>,
+    pub instance_id: Vec<u16>,
+    pub track_id: Vec<u32>,
 }
 
-const SIZE_OF_DATATYPE: [usize; 9] = [
-    0, 1, // pub const INT8: u8 = 1;
-    1, // pub const UINT8: u8 = 2;
-    2, // pub const INT16: u8 = 3;
-    2, // pub const UINT16: u8 = 4;
-    4, // pub const INT32: u8 = 5;
-    4, // pub const UINT32: u8 = 6;
-    4, // pub const FLOAT32: u8 = 7;
-    8, //pub const FLOAT64: u8 = 8;
-];
+impl FusionFrame {
+    /// Create a new frame with pre-allocated capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            len: 0,
+            x: Vec::with_capacity(capacity),
+            y: Vec::with_capacity(capacity),
+            z: Vec::with_capacity(capacity),
+            cluster_id: Vec::new(),
+            proj_u: Vec::new(),
+            proj_v: Vec::new(),
+            vision_class: vec![0; capacity],
+            fusion_class: vec![0; capacity],
+            instance_id: vec![0; capacity],
+            track_id: vec![0; capacity],
+        }
+    }
 
-fn parse_point_be(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
-    let mut p = ParsedPoint {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-        id: None,
+    /// Returns true if the input PCD had cluster_id fields.
+    pub fn has_clusters(&self) -> bool {
+        !self.cluster_id.is_empty()
+    }
+}
+
+/// Resolved byte offsets for fields within a single point record.
+struct FieldOffsets {
+    x: usize,
+    y: usize,
+    z: usize,
+    cluster_id: Option<usize>,
+}
+
+/// Scan `PointCloud2.fields` once to find byte offsets for known fields.
+fn resolve_offsets(fields: &[PointField]) -> FieldOffsets {
+    let mut offsets = FieldOffsets {
+        x: 0,
+        y: 4,
+        z: 8,
+        cluster_id: None,
     };
     for f in fields {
-        let start = f.offset as usize;
-
-        let val = match f.datatype {
-            point_field::INT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
-                i8::from_be_bytes(bytes) as f32
-            }
-            point_field::UINT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
-                u8::from_be_bytes(bytes) as f32
-            }
-            point_field::INT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
-                i16::from_be_bytes(bytes) as f32
-            }
-            point_field::UINT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
-                u16::from_be_bytes(bytes) as f32
-            }
-            point_field::INT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
-                i32::from_be_bytes(bytes) as f32
-            }
-            point_field::UINT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
-                u32::from_be_bytes(bytes) as f32
-            }
-            point_field::FLOAT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
-                f32::from_be_bytes(bytes)
-            }
-            point_field::FLOAT64 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 8 element: {e:?}"));
-                f64::from_be_bytes(bytes) as f32
-            }
-            d => {
-                error!("Unknown datatype in PointField: {d}");
-                continue;
-            }
-        };
         match f.name.as_str() {
-            "x" => p.x = val,
-            "y" => p.y = val,
-            "z" => p.z = val,
-            "cluster_id" => {
-                let _ = p.id.insert(val as u32);
-            }
+            "x" => offsets.x = f.offset as usize,
+            "y" => offsets.y = f.offset as usize,
+            "z" => offsets.z = f.offset as usize,
+            "cluster_id" => offsets.cluster_id = Some(f.offset as usize),
             _ => {}
         }
     }
-
-    p
+    offsets
 }
 
-fn parse_point_le(fields: &Vec<PointField>, data: &[u8]) -> ParsedPoint {
-    let mut p = ParsedPoint {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-        id: None,
-    };
-    for f in fields {
-        let start = f.offset as usize;
-        let val = match f.datatype {
-            point_field::INT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
-                i8::from_le_bytes(bytes) as f32
-            }
-            point_field::UINT8 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT8 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 1 element: {e:?}"));
-                u8::from_le_bytes(bytes) as f32
-            }
-            point_field::INT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
-                i16::from_le_bytes(bytes) as f32
-            }
-            point_field::UINT16 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT16 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 2 element: {e:?}"));
-                u16::from_le_bytes(bytes) as f32
-            }
-            point_field::INT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::INT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
-                i32::from_le_bytes(bytes) as f32
-            }
-            point_field::UINT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::UINT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
-                u32::from_le_bytes(bytes) as f32
-            }
-            point_field::FLOAT32 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT32 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 4 element: {e:?}"));
-                f32::from_le_bytes(bytes)
-            }
-            point_field::FLOAT64 => {
-                let bytes = data[start..start + SIZE_OF_DATATYPE[point_field::FLOAT64 as usize]]
-                    .try_into()
-                    .unwrap_or_else(|e| panic!("Expected slice with 8 element: {e:?}"));
-                f64::from_le_bytes(bytes) as f32
-            }
-            d => {
-                error!("Unknown datatype in PointField: {d}");
-                continue;
-            }
+/// Read an f32 from a byte slice at the given offset using the appropriate
+/// endianness.
+#[inline(always)]
+fn read_f32(data: &[u8], offset: usize, big_endian: bool) -> f32 {
+    let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+    if big_endian {
+        f32::from_be_bytes(bytes)
+    } else {
+        f32::from_le_bytes(bytes)
+    }
+}
+
+/// Read a u32 from a byte slice at the given offset using the appropriate
+/// endianness.
+#[inline(always)]
+fn read_u32(data: &[u8], offset: usize, big_endian: bool) -> u32 {
+    let bytes: [u8; 4] = data[offset..offset + 4].try_into().unwrap();
+    if big_endian {
+        u32::from_be_bytes(bytes)
+    } else {
+        u32::from_le_bytes(bytes)
+    }
+}
+
+/// Parse a PointCloud2 message into a FusionFrame using branchless
+/// offset-based gather. Field offsets are resolved once, then each point
+/// is read with a stride loop — no per-field string matching.
+#[instrument(skip_all)]
+pub fn parse_pcd(pcd: &PointCloud2) -> FusionFrame {
+    let offsets = resolve_offsets(&pcd.fields);
+    let stride = pcd.point_step as usize;
+    let n = (pcd.height * pcd.width) as usize;
+    let data = &pcd.data;
+    let be = pcd.is_bigendian;
+    let has_cid = offsets.cluster_id.is_some();
+
+    let mut frame = FusionFrame::new(n);
+    if has_cid {
+        frame.cluster_id.reserve(n);
+    }
+
+    for i in 0..n {
+        let base = i * stride;
+        frame.x.push(read_f32(data, base + offsets.x, be));
+        frame.y.push(read_f32(data, base + offsets.y, be));
+        frame.z.push(read_f32(data, base + offsets.z, be));
+        if let Some(cid_off) = offsets.cluster_id {
+            frame.cluster_id.push(read_u32(data, base + cid_off, be));
+        }
+    }
+    frame.len = n;
+    frame
+}
+
+/// Classes topic point layout: x(f32) y(f32) z(f32) fusion_class(u8)
+/// vision_class(u8) instance_id(u16) = 16 bytes/point
+const CLASSES_POINT_STEP: u32 = 16;
+
+/// Tracks topic point layout: x(f32) y(f32) z(f32) track_id(u32)
+/// = 16 bytes/point
+const TRACKS_POINT_STEP: u32 = 16;
+
+/// Build the PointField descriptors for the classes topic.
+fn classes_fields() -> Vec<PointField> {
+    vec![
+        PointField {
+            name: "x".into(),
+            offset: 0,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "y".into(),
+            offset: 4,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "z".into(),
+            offset: 8,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: FUSION_CLASS.into(),
+            offset: 12,
+            datatype: point_field::UINT8,
+            count: 1,
+        },
+        PointField {
+            name: VISION_CLASS.into(),
+            offset: 13,
+            datatype: point_field::UINT8,
+            count: 1,
+        },
+        PointField {
+            name: INSTANCE_ID.into(),
+            offset: 14,
+            datatype: point_field::UINT16,
+            count: 1,
+        },
+    ]
+}
+
+/// Build the PointField descriptors for the tracks topic.
+fn tracks_fields() -> Vec<PointField> {
+    vec![
+        PointField {
+            name: "x".into(),
+            offset: 0,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "y".into(),
+            offset: 4,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "z".into(),
+            offset: 8,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: TRACK_ID.into(),
+            offset: 12,
+            datatype: point_field::UINT32,
+            count: 1,
+        },
+    ]
+}
+
+/// Serialize xyzc (16 bytes/point) for rt/fusion/classes.
+///
+/// Layout per point: x(f32) y(f32) z(f32) fusion_class(u8) vision_class(u8)
+/// instance_id(u16)
+#[instrument(skip_all)]
+pub fn serialize_classes(
+    frame: &FusionFrame,
+    header: &edgefirst_schemas::std_msgs::Header,
+) -> PointCloud2 {
+    let n = frame.len;
+    let step = CLASSES_POINT_STEP as usize;
+    let mut data = vec![0u8; n * step];
+
+    for i in 0..n {
+        let base = i * step;
+        data[base..base + 4].copy_from_slice(&frame.x[i].to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&frame.y[i].to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&frame.z[i].to_le_bytes());
+        data[base + 12] = frame.fusion_class[i];
+        data[base + 13] = frame.vision_class[i];
+        data[base + 14..base + 16].copy_from_slice(&frame.instance_id[i].to_le_bytes());
+    }
+
+    PointCloud2 {
+        header: header.clone(),
+        height: 1,
+        width: n as u32,
+        fields: classes_fields(),
+        is_bigendian: false,
+        point_step: CLASSES_POINT_STEP,
+        row_step: data.len() as u32,
+        data,
+        is_dense: true,
+    }
+}
+
+/// Serialize xyzt (16 bytes/point) for rt/fusion/tracks.
+///
+/// Layout per point: x(f32) y(f32) z(f32) track_id(u32)
+#[instrument(skip_all)]
+pub fn serialize_tracks(
+    frame: &FusionFrame,
+    header: &edgefirst_schemas::std_msgs::Header,
+) -> PointCloud2 {
+    let n = frame.len;
+    let step = TRACKS_POINT_STEP as usize;
+    let mut data = vec![0u8; n * step];
+
+    for i in 0..n {
+        let base = i * step;
+        data[base..base + 4].copy_from_slice(&frame.x[i].to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&frame.y[i].to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&frame.z[i].to_le_bytes());
+        data[base + 12..base + 16].copy_from_slice(&frame.track_id[i].to_le_bytes());
+    }
+
+    PointCloud2 {
+        header: header.clone(),
+        height: 1,
+        width: n as u32,
+        fields: tracks_fields(),
+        is_bigendian: false,
+        point_step: TRACKS_POINT_STEP,
+        row_step: data.len() as u32,
+        data,
+        is_dense: true,
+    }
+}
+
+/// Serialize a FusionFrame for the occupancy grid topic. Uses the same
+/// field layout as the legacy format for backward compatibility with grid
+/// consumers: x y z cluster_id fusion_class vision_class instance_id track_id
+/// (24 bytes/point).
+#[instrument(skip_all)]
+pub fn serialize_grid(
+    frame: &FusionFrame,
+    header: &edgefirst_schemas::std_msgs::Header,
+) -> PointCloud2 {
+    let n = frame.len;
+    let step = 24usize;
+    let mut data = vec![0u8; n * step];
+
+    for i in 0..n {
+        let base = i * step;
+        data[base..base + 4].copy_from_slice(&frame.x[i].to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&frame.y[i].to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&frame.z[i].to_le_bytes());
+        let cid = if i < frame.cluster_id.len() {
+            frame.cluster_id[i]
+        } else {
+            0
         };
-        match f.name.as_str() {
-            "x" => p.x = val,
-            "y" => p.y = val,
-            "z" => p.z = val,
-            "cluster_id" => {
-                let _ = p.id.insert(val as u32);
-            }
-            _ => {}
-        }
+        data[base + 12..base + 16].copy_from_slice(&cid.to_le_bytes());
+        data[base + 16] = frame.fusion_class[i];
+        data[base + 17] = frame.vision_class[i];
+        data[base + 18..base + 20].copy_from_slice(&frame.instance_id[i].to_le_bytes());
+        data[base + 20..base + 24].copy_from_slice(&frame.track_id[i].to_le_bytes());
     }
 
-    p
-}
-
-#[instrument(skip_all)]
-pub fn parse_pcd(pcd: &PointCloud2) -> Vec<ParsedPoint> {
-    let mut points = Vec::new();
-    for i in 0..pcd.height {
-        for j in 0..pcd.width {
-            let start = (i * pcd.row_step + j * pcd.point_step) as usize;
-            let end = start + pcd.point_step as usize;
-            let p = if pcd.is_bigendian {
-                parse_point_be(&pcd.fields, &pcd.data[start..end])
-            } else {
-                parse_point_le(&pcd.fields, &pcd.data[start..end])
-            };
-            points.push(p);
-        }
-    }
-    points
-}
-
-#[instrument(skip_all)]
-pub fn serialize_pcd(
-    points: &[ParsedPoint],
-    fields: &[PointField],
-    vision_class: &[u8],
-    fusion_class: &[u8],
-    instance_id: &[u16],
-    track_id: &[u32],
-) -> Vec<u8> {
-    let mut name_to_field = HashMap::new();
-    let mut point_step = 0;
-    for f in fields {
-        point_step = point_step.max(f.offset as usize + SIZE_OF_DATATYPE[f.datatype as usize]);
-        name_to_field.insert(f.name.clone(), f);
-    }
-    let row_step = point_step * points.len();
-    let mut buf = vec![0u8; row_step];
-
-    let mut point_offset = 0usize;
-    for (i, p) in points.iter().enumerate() {
-        for f in fields {
-            match f.name.as_str() {
-                "x" => serialize_field_f32(f, &p.x, point_offset, &mut buf),
-                "y" => serialize_field_f32(f, &p.y, point_offset, &mut buf),
-                "z" => serialize_field_f32(f, &p.z, point_offset, &mut buf),
-                "cluster_id" => {
-                    serialize_field_u32(f, &p.id.unwrap_or_default(), point_offset, &mut buf)
-                }
-                VISION_CLASS => serialize_field_u8(f, &vision_class[i], point_offset, &mut buf),
-                FUSION_CLASS => serialize_field_u8(f, &fusion_class[i], point_offset, &mut buf),
-                INSTANCE_ID => serialize_field_u16(f, &instance_id[i], point_offset, &mut buf),
-                TRACK_ID => serialize_field_u32(f, &track_id[i], point_offset, &mut buf),
-                _ => {}
-            }
-        }
-        point_offset += point_step;
-    }
-    buf
-}
-
-// TODO: see if there is some trait which can make this better than three copy
-// and pasted functions
-fn serialize_field_f32(field: &PointField, val: &f32, point_offset: usize, buf: &mut [u8]) {
-    let start = point_offset + field.offset as usize;
-    let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
-    match field.datatype {
-        point_field::INT8 => {
-            let d = (*val as i8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT8 => {
-            let d = (*val as u8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT16 => {
-            let d = (*val as i16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT16 => {
-            let d = (*val as u16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT32 => {
-            let d = (*val as i32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT32 => {
-            let d = (*val as u32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT32 => {
-            let d = { *val }.to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT64 => {
-            let d = (*val as f64).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        d => {
-            error!("Unknown datatype in PointField: {d}");
-        }
+    PointCloud2 {
+        header: header.clone(),
+        height: 1,
+        width: n as u32,
+        fields: grid_fields(),
+        is_bigendian: false,
+        point_step: 24,
+        row_step: data.len() as u32,
+        data,
+        is_dense: true,
     }
 }
 
-fn serialize_field_u8(field: &PointField, val: &u8, point_offset: usize, buf: &mut [u8]) {
-    let start = point_offset + field.offset as usize;
-    let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
-    match field.datatype {
-        point_field::INT8 => {
-            let d = (*val as i8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT8 => {
-            let d = { *val }.to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT16 => {
-            let d = (*val as i16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT16 => {
-            let d = (*val as u16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT32 => {
-            let d = (*val as i32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT32 => {
-            let d = (*val as u32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT32 => {
-            let d = (*val as f32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT64 => {
-            let d = (*val as f64).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        d => {
-            error!("Unknown datatype in PointField: {d}");
-        }
-    }
-}
-
-fn serialize_field_u16(field: &PointField, val: &u16, point_offset: usize, buf: &mut [u8]) {
-    let start = point_offset + field.offset as usize;
-    let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
-    match field.datatype {
-        point_field::INT8 => {
-            let d = (*val as i8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT8 => {
-            let d = (*val as u8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT16 => {
-            let d = (*val as i16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT16 => {
-            let d = (*val).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT32 => {
-            let d = (*val as i32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT32 => {
-            let d = (*val as u32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT32 => {
-            let d = (*val as f32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT64 => {
-            let d = (*val as f64).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        d => {
-            error!("Unknown datatype in PointField: {d}");
-        }
-    }
-}
-
-fn serialize_field_u32(field: &PointField, val: &u32, point_offset: usize, buf: &mut [u8]) {
-    let start = point_offset + field.offset as usize;
-    let end = start + SIZE_OF_DATATYPE[field.datatype as usize];
-    match field.datatype {
-        point_field::INT8 => {
-            let d = (*val as i8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT8 => {
-            let d = (*val as u8).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT16 => {
-            let d = (*val as i16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT16 => {
-            let d = (*val as u16).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::INT32 => {
-            let d = (*val as i32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::UINT32 => {
-            let d = (*val).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT32 => {
-            let d = (*val as f32).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        point_field::FLOAT64 => {
-            let d = (*val as f64).to_ne_bytes();
-            buf[start..end].copy_from_slice(&d);
-        }
-        d => {
-            error!("Unknown datatype in PointField: {d}");
-        }
-    }
-}
-
-pub fn insert_field(pcd: &mut PointCloud2, new_field: PointField) {
-    pcd.fields.push(PointField {
-        name: new_field.name,
-        offset: pcd.point_step,
-        datatype: new_field.datatype,
-        count: new_field.count,
-    });
-    pcd.point_step += SIZE_OF_DATATYPE[new_field.datatype as usize] as u32 * new_field.count;
-}
-
-/// Insert the standard fusion output fields into a PointCloud2 message.
-/// Resets `fields` and `point_step` before inserting.
-pub fn insert_standard_fields(pcd: &mut PointCloud2) {
-    pcd.fields = Vec::new();
-    pcd.point_step = 0;
-    for (field_name, datatype) in [
-        ("x", point_field::FLOAT32),
-        ("y", point_field::FLOAT32),
-        ("z", point_field::FLOAT32),
-        ("cluster_id", point_field::UINT32),
-        (FUSION_CLASS, point_field::UINT8),
-        (VISION_CLASS, point_field::UINT8),
-        (INSTANCE_ID, point_field::UINT16),
-        (TRACK_ID, point_field::UINT32),
-    ] {
-        insert_field(
-            pcd,
-            PointField {
-                name: field_name.to_string(),
-                offset: 0, // offset is calculated by insert_field
-                datatype,
-                count: 1,
-            },
-        );
-    }
+/// Build the PointField descriptors for the grid/legacy format.
+fn grid_fields() -> Vec<PointField> {
+    vec![
+        PointField {
+            name: "x".into(),
+            offset: 0,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "y".into(),
+            offset: 4,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "z".into(),
+            offset: 8,
+            datatype: point_field::FLOAT32,
+            count: 1,
+        },
+        PointField {
+            name: "cluster_id".into(),
+            offset: 12,
+            datatype: point_field::UINT32,
+            count: 1,
+        },
+        PointField {
+            name: FUSION_CLASS.into(),
+            offset: 16,
+            datatype: point_field::UINT8,
+            count: 1,
+        },
+        PointField {
+            name: VISION_CLASS.into(),
+            offset: 17,
+            datatype: point_field::UINT8,
+            count: 1,
+        },
+        PointField {
+            name: INSTANCE_ID.into(),
+            offset: 18,
+            datatype: point_field::UINT16,
+            count: 1,
+        },
+        PointField {
+            name: TRACK_ID.into(),
+            offset: 20,
+            datatype: point_field::UINT32,
+            count: 1,
+        },
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgefirst_schemas::builtin_interfaces::Time;
+    use edgefirst_schemas::std_msgs::Header;
 
-    /// Build the standard output field list including instance_id and track_id
-    fn make_fields() -> (Vec<PointField>, u32) {
-        let mut offset = 0u32;
-        let mut fields = Vec::new();
-        for (name, datatype) in [
-            ("x", point_field::FLOAT32),
-            ("y", point_field::FLOAT32),
-            ("z", point_field::FLOAT32),
-            ("cluster_id", point_field::UINT32),
-            (FUSION_CLASS, point_field::UINT8),
-            (VISION_CLASS, point_field::UINT8),
-            (INSTANCE_ID, point_field::UINT16),
-            (TRACK_ID, point_field::UINT32),
-        ] {
+    fn test_header() -> Header {
+        Header {
+            stamp: Time { sec: 0, nanosec: 0 },
+            frame_id: "test".to_string(),
+        }
+    }
+
+    /// Build a PointCloud2 with xyz + optional cluster_id fields, little-endian.
+    fn make_input_pcd(points: &[(f32, f32, f32)], cluster_ids: Option<&[u32]>) -> PointCloud2 {
+        let has_cid = cluster_ids.is_some();
+        let point_step: u32 = if has_cid { 16 } else { 12 };
+        let n = points.len();
+        let mut data = vec![0u8; n * point_step as usize];
+
+        for (i, (x, y, z)) in points.iter().enumerate() {
+            let base = i * point_step as usize;
+            data[base..base + 4].copy_from_slice(&x.to_le_bytes());
+            data[base + 4..base + 8].copy_from_slice(&y.to_le_bytes());
+            data[base + 8..base + 12].copy_from_slice(&z.to_le_bytes());
+            if let Some(cids) = cluster_ids {
+                data[base + 12..base + 16].copy_from_slice(&cids[i].to_le_bytes());
+            }
+        }
+
+        let mut fields = vec![
+            PointField {
+                name: "x".into(),
+                offset: 0,
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+            PointField {
+                name: "y".into(),
+                offset: 4,
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+            PointField {
+                name: "z".into(),
+                offset: 8,
+                datatype: point_field::FLOAT32,
+                count: 1,
+            },
+        ];
+        if has_cid {
             fields.push(PointField {
-                name: name.to_string(),
-                offset,
-                datatype,
+                name: "cluster_id".into(),
+                offset: 12,
+                datatype: point_field::UINT32,
                 count: 1,
             });
-            offset += SIZE_OF_DATATYPE[datatype as usize] as u32;
         }
-        (fields, offset)
+
+        PointCloud2 {
+            header: test_header(),
+            height: 1,
+            width: n as u32,
+            fields,
+            is_bigendian: false,
+            point_step,
+            row_step: data.len() as u32,
+            data,
+            is_dense: true,
+        }
     }
 
     #[test]
-    fn serialize_pcd_writes_instance_id_and_track_id_at_expected_offset() {
-        let points = vec![
-            ParsedPoint {
-                x: 1.0,
-                y: 2.0,
-                z: 3.0,
-                id: Some(10),
-            },
-            ParsedPoint {
-                x: 4.0,
-                y: 5.0,
-                z: 6.0,
-                id: Some(20),
-            },
-        ];
-        let vision_class = vec![1u8, 2u8];
-        let fusion_class = vec![3u8, 4u8];
-        let instance_id = vec![42u16, 99u16];
-        let track_id = vec![1000u32, 2000u32];
+    fn parse_pcd_xyz_only() {
+        let pcd = make_input_pcd(&[(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)], None);
+        let frame = parse_pcd(&pcd);
+        assert_eq!(frame.len, 2);
+        assert_eq!(frame.x, vec![1.0, 4.0]);
+        assert_eq!(frame.y, vec![2.0, 5.0]);
+        assert_eq!(frame.z, vec![3.0, 6.0]);
+        assert!(!frame.has_clusters());
+    }
 
-        let (fields, point_step) = make_fields();
-        assert_eq!(point_step, 24, "point_step should be 24 bytes");
-        let buf = serialize_pcd(
-            &points,
-            &fields,
-            &vision_class,
-            &fusion_class,
-            &instance_id,
-            &track_id,
-        );
+    #[test]
+    fn parse_pcd_with_cluster_ids() {
+        let pcd = make_input_pcd(&[(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)], Some(&[10, 20]));
+        let frame = parse_pcd(&pcd);
+        assert_eq!(frame.len, 2);
+        assert!(frame.has_clusters());
+        assert_eq!(frame.cluster_id, vec![10, 20]);
+    }
 
-        // Total buffer size should be point_step * num_points
-        assert_eq!(buf.len(), point_step as usize * points.len());
+    #[test]
+    fn serialize_classes_roundtrip() {
+        let mut frame = FusionFrame::new(2);
+        frame.x = vec![1.5, 4.0];
+        frame.y = vec![2.5, 5.0];
+        frame.z = vec![3.5, 6.0];
+        frame.fusion_class = vec![9, 4];
+        frame.vision_class = vec![5, 2];
+        frame.instance_id = vec![100, 99];
+        frame.track_id = vec![5555, 2000];
+        frame.len = 2;
 
-        // instance_id (u16) at offset 18
-        let instance_id_offset = 18usize;
-        let track_id_offset = 20usize;
+        let header = test_header();
+        let pcd = serialize_classes(&frame, &header);
 
-        // Point 0: instance_id = 42
-        let start = instance_id_offset;
-        let val = u16::from_ne_bytes(buf[start..start + 2].try_into().unwrap());
-        assert_eq!(val, 42);
+        assert_eq!(pcd.point_step, 16);
+        assert_eq!(pcd.width, 2);
+        assert_eq!(pcd.data.len(), 32);
 
-        // Point 0: track_id = 1000
-        let start = track_id_offset;
-        let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
+        // Point 0
+        let val = f32::from_le_bytes(pcd.data[0..4].try_into().unwrap());
+        assert_eq!(val, 1.5);
+        let val = f32::from_le_bytes(pcd.data[4..8].try_into().unwrap());
+        assert_eq!(val, 2.5);
+        let val = f32::from_le_bytes(pcd.data[8..12].try_into().unwrap());
+        assert_eq!(val, 3.5);
+        assert_eq!(pcd.data[12], 9); // fusion_class
+        assert_eq!(pcd.data[13], 5); // vision_class
+        let val = u16::from_le_bytes(pcd.data[14..16].try_into().unwrap());
+        assert_eq!(val, 100); // instance_id
+
+        // Point 1
+        let val = f32::from_le_bytes(pcd.data[16..20].try_into().unwrap());
+        assert_eq!(val, 4.0);
+        assert_eq!(pcd.data[28], 4); // fusion_class
+        assert_eq!(pcd.data[29], 2); // vision_class
+    }
+
+    #[test]
+    fn serialize_tracks_roundtrip() {
+        let mut frame = FusionFrame::new(2);
+        frame.x = vec![1.5, 4.0];
+        frame.y = vec![2.5, 5.0];
+        frame.z = vec![3.5, 6.0];
+        frame.track_id = vec![1000, 2000];
+        frame.len = 2;
+
+        let header = test_header();
+        let pcd = serialize_tracks(&frame, &header);
+
+        assert_eq!(pcd.point_step, 16);
+        assert_eq!(pcd.width, 2);
+        assert_eq!(pcd.data.len(), 32);
+
+        // Point 0: track_id at offset 12
+        let val = u32::from_le_bytes(pcd.data[12..16].try_into().unwrap());
         assert_eq!(val, 1000);
 
-        // Point 1: instance_id = 99
-        let start = point_step as usize + instance_id_offset;
-        let val = u16::from_ne_bytes(buf[start..start + 2].try_into().unwrap());
-        assert_eq!(val, 99);
-
-        // Point 1: track_id = 2000
-        let start = point_step as usize + track_id_offset;
-        let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
+        // Point 1: track_id at offset 28
+        let val = u32::from_le_bytes(pcd.data[28..32].try_into().unwrap());
         assert_eq!(val, 2000);
     }
 
     #[test]
-    fn serialize_pcd_zero_instance_ids_and_track_ids() {
-        let points = vec![
-            ParsedPoint {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-                id: None,
-            },
-            ParsedPoint {
-                x: 1.0,
-                y: 1.0,
-                z: 1.0,
-                id: None,
-            },
-            ParsedPoint {
-                x: 2.0,
-                y: 2.0,
-                z: 2.0,
-                id: None,
-            },
-        ];
-        let vision_class = vec![0u8; 3];
-        let fusion_class = vec![0u8; 3];
-        let instance_id = vec![0u16; 3];
-        let track_id = vec![0u32; 3];
+    fn serialize_grid_preserves_all_fields() {
+        let mut frame = FusionFrame::new(1);
+        frame.x = vec![1.5];
+        frame.y = vec![2.5];
+        frame.z = vec![3.5];
+        frame.cluster_id = vec![7];
+        frame.fusion_class = vec![9];
+        frame.vision_class = vec![5];
+        frame.instance_id = vec![100];
+        frame.track_id = vec![5555];
+        frame.len = 1;
 
-        let (fields, point_step) = make_fields();
-        let buf = serialize_pcd(
-            &points,
-            &fields,
-            &vision_class,
-            &fusion_class,
-            &instance_id,
-            &track_id,
-        );
+        let header = test_header();
+        let pcd = serialize_grid(&frame, &header);
+        let buf = &pcd.data;
 
-        let instance_id_offset = 18usize;
-        let track_id_offset = 20usize;
+        assert_eq!(pcd.point_step, 24);
+        assert_eq!(buf.len(), 24);
 
-        for i in 0..3 {
-            let start = i * point_step as usize + instance_id_offset;
-            let val = u16::from_ne_bytes(buf[start..start + 2].try_into().unwrap());
-            assert_eq!(val, 0, "instance_id for point {i} should be 0");
-
-            let start = i * point_step as usize + track_id_offset;
-            let val = u32::from_ne_bytes(buf[start..start + 4].try_into().unwrap());
-            assert_eq!(val, 0, "track_id for point {i} should be 0");
-        }
-    }
-
-    #[test]
-    fn serialize_pcd_preserves_other_fields_with_instance_id_and_track_id() {
-        let points = vec![ParsedPoint {
-            x: 1.5,
-            y: 2.5,
-            z: 3.5,
-            id: Some(7),
-        }];
-        let vision_class = vec![5u8];
-        let fusion_class = vec![9u8];
-        let instance_id = vec![100u16];
-        let track_id = vec![5555u32];
-
-        let (fields, point_step) = make_fields();
-        let buf = serialize_pcd(
-            &points,
-            &fields,
-            &vision_class,
-            &fusion_class,
-            &instance_id,
-            &track_id,
-        );
-
-        assert_eq!(buf.len(), point_step as usize);
-        assert_eq!(point_step, 24);
-
-        // x at offset 0
-        let val = f32::from_ne_bytes(buf[0..4].try_into().unwrap());
-        assert_eq!(val, 1.5);
-
-        // y at offset 4
-        let val = f32::from_ne_bytes(buf[4..8].try_into().unwrap());
-        assert_eq!(val, 2.5);
-
-        // z at offset 8
-        let val = f32::from_ne_bytes(buf[8..12].try_into().unwrap());
-        assert_eq!(val, 3.5);
-
-        // cluster_id at offset 12
-        let val = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
-        assert_eq!(val, 7);
-
-        // fusion_class at offset 16
-        assert_eq!(buf[16], 9);
-
-        // vision_class at offset 17
-        assert_eq!(buf[17], 5);
-
-        // instance_id (u16) at offset 18
-        let val = u16::from_ne_bytes(buf[18..20].try_into().unwrap());
-        assert_eq!(val, 100);
-
-        // track_id (u32) at offset 20
-        let val = u32::from_ne_bytes(buf[20..24].try_into().unwrap());
-        assert_eq!(val, 5555);
+        assert_eq!(f32::from_le_bytes(buf[0..4].try_into().unwrap()), 1.5);
+        assert_eq!(f32::from_le_bytes(buf[4..8].try_into().unwrap()), 2.5);
+        assert_eq!(f32::from_le_bytes(buf[8..12].try_into().unwrap()), 3.5);
+        assert_eq!(u32::from_le_bytes(buf[12..16].try_into().unwrap()), 7);
+        assert_eq!(buf[16], 9); // fusion_class
+        assert_eq!(buf[17], 5); // vision_class
+        assert_eq!(u16::from_le_bytes(buf[18..20].try_into().unwrap()), 100);
+        assert_eq!(u32::from_le_bytes(buf[20..24].try_into().unwrap()), 5555);
     }
 }

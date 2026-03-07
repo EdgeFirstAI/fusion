@@ -14,7 +14,7 @@ use edgefirst_schemas::{
 use fusion_model::spawn_fusion_model_thread;
 use log::{error, trace, warn};
 use mask::{mask_instance, process_mask, resolve_box_label, Box2D};
-use pcd::{insert_standard_fields, parse_pcd, serialize_pcd, ParsedPoint};
+use pcd::{parse_pcd, serialize_classes, serialize_grid, serialize_tracks, FusionFrame};
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -52,25 +52,9 @@ const BASE_LINK_FRAME_ID: &str = "base_link";
 
 type Grid = (Vec<Vec<f32>>, u64);
 
-/// Data loaded from a single point cloud frame: the cloud, parsed points,
+/// Data loaded from a single point cloud frame: the cloud header, parsed frame,
 /// sensor-to-base transform, camera-to-base transform, and camera intrinsics.
-type LoadedFrame = (
-    PointCloud2,
-    Vec<ParsedPoint>,
-    Transform,
-    Transform,
-    CameraInfo,
-);
-
-/// Fusion output: (vision_class, fusion_class, instance_ids, track_ids, has_cluster_ids, cluster_map).
-type FusionResult = (
-    Vec<u8>,
-    Vec<u8>,
-    Vec<u16>,
-    Vec<u32>,
-    bool,
-    HashMap<u32, Vec<usize>>,
-);
+type LoadedFrame = (Header, FusionFrame, Transform, Transform, CameraInfo);
 
 const FUSION_CLASS: &str = "fusion_class";
 const INSTANCE_ID: &str = "instance_id";
@@ -169,8 +153,51 @@ async fn main() {
     let fusion_model_handle =
         spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
 
-    let (radar_sub, radar_publ, lidar_sub, lidar_publ, grid_publ, bbox_publ) =
-        declare_sub_pub(&session, &args).await;
+    let (radar_sub, lidar_sub, grid_publ, bbox_publ) = declare_sub_pub(&session, &args).await;
+
+    // Declare per-context publishers for the shared output topics.
+    // Each fusion thread needs its own publisher instance.
+    let radar_classes_publ = if !args.classes_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.classes_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
+    let radar_tracks_publ = if !args.tracks_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.tracks_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
+    let lidar_classes_publ = if !args.classes_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.classes_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
+    let lidar_tracks_publ = if !args.tracks_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.tracks_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
+
     // wait 2s for the tf_static to get transforms
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -187,7 +214,8 @@ async fn main() {
     let mut zenoh_radar = ZenohCtx {
         session: session.clone(),
         pcd_sub: radar_sub,
-        pcd_publ: radar_publ,
+        classes_publ: radar_classes_publ,
+        tracks_publ: radar_tracks_publ,
         grid_publ: None,
         bbox_publ: None,
     };
@@ -195,7 +223,8 @@ async fn main() {
     let mut zenoh_lidar = ZenohCtx {
         session,
         pcd_sub: lidar_sub,
-        pcd_publ: lidar_publ,
+        classes_publ: lidar_classes_publ,
+        tracks_publ: lidar_tracks_publ,
         grid_publ: None,
         bbox_publ: None,
     };
@@ -309,9 +338,7 @@ async fn declare_sub_pub(
     args: &Args,
 ) -> (
     Option<Subscriber<FifoChannelHandler<Sample>>>,
-    Option<Publisher<'static>>,
     Option<Subscriber<FifoChannelHandler<Sample>>>,
-    Option<Publisher<'static>>,
     Publisher<'static>,
     Publisher<'static>,
 ) {
@@ -321,17 +348,6 @@ async fn declare_sub_pub(
                 .declare_subscriber(args.radar_pcd_topic.clone())
                 .await
                 .expect("Failed to declare Zenoh subscriber"),
-        )
-    } else {
-        None
-    };
-
-    let radar_publ = if !args.radar_output_topic.is_empty() {
-        Some(
-            session
-                .declare_publisher(args.radar_output_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh publisher"),
         )
     } else {
         None
@@ -348,16 +364,6 @@ async fn declare_sub_pub(
         None
     };
 
-    let lidar_publ = if !args.lidar_output_topic.is_empty() {
-        Some(
-            session
-                .declare_publisher(args.lidar_output_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh publisher"),
-        )
-    } else {
-        None
-    };
     let grid_publ = session
         .declare_publisher(args.grid_topic.clone())
         .await
@@ -368,9 +374,7 @@ async fn declare_sub_pub(
         .await
         .expect("Failed to declare Zenoh publisher");
 
-    (
-        radar_sub, radar_publ, lidar_sub, lidar_publ, grid_publ, bbox_publ,
-    )
+    (radar_sub, lidar_sub, grid_publ, bbox_publ)
 }
 
 pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHandle<()> {
@@ -390,7 +394,8 @@ pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHa
 pub struct ZenohCtx {
     session: Session,
     pcd_sub: Option<Subscriber<FifoChannelHandler<Sample>>>,
-    pcd_publ: Option<Publisher<'static>>,
+    classes_publ: Option<Publisher<'static>>,
+    tracks_publ: Option<Publisher<'static>>,
     grid_publ: Option<Publisher<'static>>,
     bbox_publ: Option<Publisher<'static>>,
 }
@@ -425,26 +430,27 @@ fn setup_bins(bins: &mut Vec<Vec<Bin>>, args: &Args) {
 
 #[instrument(skip_all)]
 async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> {
-    let (mut pcd, points) = {
+    let (header, frame) = {
         let pcd: PointCloud2 = match serde_cdr::deserialize(&msg.payload().to_bytes()) {
             Ok(v) => v,
             Err(e) => return Err(format!("Failed to deserialize PCD: {e:?}")),
         };
-        let points = parse_pcd(&pcd);
-        (pcd, points)
+        let frame = parse_pcd(&pcd);
+        let header = pcd.header;
+        // frame_id will be overwritten below
+        (header, frame)
     };
+
+    let pcd_frame_id = header.frame_id.clone();
 
     let transform = data
         .tf_static
         .lock()
         .await
-        .get(&(BASE_LINK_FRAME_ID.to_owned(), pcd.header.frame_id.clone()))
+        .get(&(BASE_LINK_FRAME_ID.to_owned(), pcd_frame_id.clone()))
         .map_or_else(
             || {
-                warn!(
-                    "Did not find transform from base_link to {}",
-                    pcd.header.frame_id
-                );
+                warn!("Did not find transform from base_link to {}", pcd_frame_id);
                 Transform {
                     translation: Vector3 {
                         x: 0.0,
@@ -461,7 +467,10 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
             },
             |v| *v,
         );
-    pcd.header.frame_id = BASE_LINK_FRAME_ID.to_string(); // frame_id is base link because the tf transform was applied
+    let header = Header {
+        stamp: header.stamp,
+        frame_id: BASE_LINK_FRAME_ID.to_string(),
+    };
 
     let cam_info = match data.info.lock().await {
         v if v.is_some() => v.as_ref().unwrap().clone(),
@@ -499,13 +508,13 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
             |v| *v,
         );
 
-    Ok((pcd, points, transform, cam_transform, cam_info))
+    Ok((header, frame, transform, cam_transform, cam_info))
 }
 
 #[instrument(skip_all)]
 #[allow(clippy::too_many_arguments)]
 async fn fusion(
-    points: &mut [ParsedPoint],
+    frame: &mut FusionFrame,
     transform: Transform,
     cam_transform: Transform,
     cam_info: &CameraInfo,
@@ -515,17 +524,17 @@ async fn fusion(
     args: &Args,
     session: &Session,
     data: &Mutexes,
-) -> FusionResult {
+) -> HashMap<u32, Vec<usize>> {
     let cam_mtx = cam_info.k.map(|v| v as f32);
-    let proj = transform_and_project_points(
-        points,
+    transform_and_project_points(
+        frame,
         &transform,
         &cam_transform,
         &cam_mtx,
         (cam_info.width as f32, cam_info.height as f32),
     );
 
-    let (has_cluster_ids, ids) = get_cluster_ids(points);
+    let ids = get_cluster_ids(frame);
 
     // Lock model output and check age
     let model_guard = data.model_output.lock().await;
@@ -546,22 +555,14 @@ async fn fusion(
     let model_labels_guard = data.model_info.lock().await;
     let labels = model_labels_guard.as_deref();
 
-    let (vision_class, instance_id, track_id) =
-        get_vision_class_and_instance(points, &proj, model_ref, has_cluster_ids, &ids, labels);
+    get_vision_class_and_instance(frame, model_ref, &ids, labels);
     drop(model_labels_guard);
     drop(model_guard);
 
     let fusion_predictions = get_fusion_predictions(track, tracker, grid, args, session).await;
-    let fusion_class = get_fusion_class(points, &fusion_predictions, has_cluster_ids, &ids);
+    get_fusion_class(frame, &fusion_predictions, &ids);
 
-    (
-        vision_class,
-        fusion_class,
-        instance_id,
-        track_id,
-        has_cluster_ids,
-        ids,
-    )
+    ids
 }
 
 async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
@@ -590,7 +591,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             }
         };
 
-        let (mut pcd, mut points, transform, cam_transform, cam_info) =
+        let (header, mut frame, transform, cam_transform, cam_info) =
             match load_data(&msg, &data).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -599,8 +600,8 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
                 }
             };
 
-        let (vision_class, fusion_class, instance_id, track_id, has_cluster_ids, ids) = fusion(
-            &mut points,
+        let ids = fusion(
+            &mut frame,
             transform,
             cam_transform,
             &cam_info,
@@ -616,13 +617,8 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         publish(
             &zenoh,
             args,
-            &mut pcd,
-            &points,
-            &vision_class,
-            &fusion_class,
-            &instance_id,
-            &track_id,
-            has_cluster_ids,
+            &header,
+            &frame,
             &ids,
             &mut tracker,
             &mut bins,
@@ -642,48 +638,30 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
 async fn publish(
     zenoh: &ZenohCtx,
     args: &Args,
-    pcd: &mut PointCloud2,
-    points: &[ParsedPoint],
-    vision_class: &[u8],
-    fusion_class: &[u8],
-    instance_id: &[u16],
-    track_id: &[u32],
-    has_cluster_ids: bool,
+    header: &Header,
+    frame: &FusionFrame,
     ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
     bins: &mut [Vec<Bin>],
     frame_index: u128,
 ) {
-    let pcd_header = pcd.header.clone();
+    let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), header, frame, ids);
 
-    let publ_bbox = publish_bbox3d(
-        zenoh.bbox_publ.as_ref(),
-        pcd_header.clone(),
-        (points, vision_class, fusion_class),
-        instance_id,
-        (has_cluster_ids, ids),
-    );
+    let publ_classes = publish_classes(zenoh.classes_publ.as_ref(), frame, header);
 
-    let publ_pcd = publish_pcd(
-        zenoh.pcd_publ.as_ref(),
-        pcd,
-        (points, vision_class, fusion_class),
-        instance_id,
-        track_id,
-    );
+    let publ_tracks = publish_tracks(zenoh.tracks_publ.as_ref(), frame, header);
 
     let publ_grid = publish_grid(
         zenoh.grid_publ.as_ref(),
-        pcd_header.clone(),
-        (points, vision_class, fusion_class),
-        instance_id,
+        header,
+        frame,
         point_tracker,
         (bins, frame_index),
         args,
-        (has_cluster_ids, ids),
+        ids,
     );
 
-    join!(publ_bbox, publ_pcd, publ_grid);
+    join!(publ_bbox, publ_classes, publ_tracks, publ_grid);
 }
 
 /// Hash a track ID string to a u32 using FNV-1a.
@@ -734,17 +712,12 @@ fn parse_box_label(label: &str, labels: Option<&[String]>) -> u8 {
 /// smallest squared distance to the point wins.  Equal distances are broken
 /// by iteration order (first box in `detect.boxes` wins), which is
 /// deterministic for a given detection frame.
-fn box_fusion_no_cluster(
-    proj: &[[f32; 2]],
-    boxes: &[DetectBox],
-    labels: Option<&[String]>,
-) -> (Vec<u8>, Vec<u16>, Vec<u32>) {
-    let mut classes = vec![0u8; proj.len()];
-    let mut instances = vec![0u16; proj.len()];
-    let mut track_ids = vec![0u32; proj.len()];
-
-    for (i, [px, py]) in proj.iter().enumerate() {
-        if !check_in_bounds(px, py) {
+fn box_fusion_no_cluster(frame: &mut FusionFrame, boxes: &[DetectBox], labels: Option<&[String]>) {
+    let n = frame.len;
+    for i in 0..n {
+        let px = frame.proj_u[i];
+        let py = frame.proj_v[i];
+        if !check_in_bounds(&px, &py) {
             continue;
         }
         let mut best_dist2 = f32::MAX;
@@ -765,25 +738,18 @@ fn box_fusion_no_cluster(
                 }
             }
         }
-        classes[i] = best_class;
-        instances[i] = best_instance;
-        track_ids[i] = best_track;
+        frame.vision_class[i] = best_class;
+        frame.instance_id[i] = best_instance;
+        frame.track_id[i] = best_track;
     }
-
-    (classes, instances, track_ids)
 }
 
 fn box_fusion_clustered(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
+    frame: &mut FusionFrame,
     boxes: &[DetectBox],
     clusters: &HashMap<u32, Vec<usize>>,
     labels: Option<&[String]>,
-) -> (Vec<u8>, Vec<u16>, Vec<u32>) {
-    let mut classes = vec![0u8; points.len()];
-    let mut instances = vec![0u16; points.len()];
-    let mut track_ids = vec![0u32; points.len()];
-
+) {
     // For each cluster, track best box assignment: (class, instance_id, track_id, point_count)
     let mut cluster_assignment: HashMap<u32, (u8, u16, u32, usize)> = HashMap::new();
 
@@ -795,15 +761,16 @@ fn box_fusion_clustered(
         let track = hash_track_id(&b.track.id);
 
         let mut cluster_counts: HashMap<u32, usize> = HashMap::new();
-        for (i, [px, py]) in proj.iter().enumerate() {
-            if !check_in_bounds(px, py) {
+        for i in 0..frame.len {
+            let px = frame.proj_u[i];
+            let py = frame.proj_v[i];
+            if !check_in_bounds(&px, &py) {
                 continue;
             }
             if (px - b.center_x).abs() <= half_w && (py - b.center_y).abs() <= half_h {
-                if let Some(id) = points[i].id {
-                    if id > 0 {
-                        *cluster_counts.entry(id).or_default() += 1;
-                    }
+                let id = frame.cluster_id[i];
+                if id > 0 {
+                    *cluster_counts.entry(id).or_default() += 1;
                 }
             }
         }
@@ -823,65 +790,51 @@ fn box_fusion_clustered(
     for (cluster_id, (label, instance, track, _)) in &cluster_assignment {
         if let Some(point_indices) = clusters.get(cluster_id) {
             for &idx in point_indices {
-                classes[idx] = *label;
-                instances[idx] = *instance;
-                track_ids[idx] = *track;
+                frame.vision_class[idx] = *label;
+                frame.instance_id[idx] = *instance;
+                frame.track_id[idx] = *track;
             }
         }
     }
-
-    (classes, instances, track_ids)
 }
 
 fn get_vision_class_and_instance(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
+    frame: &mut FusionFrame,
     model: Option<&Model>,
-    has_cluster_ids: bool,
     ids: &HashMap<u32, Vec<usize>>,
     labels: Option<&[String]>,
-) -> (Vec<u8>, Vec<u16>, Vec<u32>) {
-    let n = points.len();
+) {
     let model = match model {
         Some(m) => m,
-        None => return (vec![0u8; n], vec![0u16; n], vec![0u32; n]),
+        None => return,
     };
 
     // PREFER masks when available (more precise)
     if let Some(first_mask) = model.masks.first() {
         if first_mask.boxed && !model.boxes.is_empty() {
             // Instance segmentation: per-box masks placed at box coordinates
-            return boxed_mask_fusion(
-                points,
-                proj,
-                &model.masks,
-                &model.boxes,
-                labels,
-                has_cluster_ids,
-                ids,
-            );
+            boxed_mask_fusion(frame, &model.masks, &model.boxes, labels, ids);
+            return;
         } else {
             // Semantic segmentation: process full-frame mask
             let mut mask = first_mask.clone();
             process_mask(&mut mask);
-            let vision_class = if has_cluster_ids {
-                late_fusion_clustered(points, proj, &mask, ids)
+            if frame.has_clusters() {
+                late_fusion_clustered(frame, &mask, ids);
             } else {
-                late_fusion_no_cluster(proj, &mask, 0.02)
-            };
-            return (vision_class, vec![0u16; n], vec![0u32; n]);
+                late_fusion_no_cluster(frame, &mask, 0.02);
+            }
+            return;
         }
     }
 
     // Fallback: detection only (boxes, no masks)
     if !model.boxes.is_empty() {
-        if has_cluster_ids {
-            box_fusion_clustered(points, proj, &model.boxes, ids, labels)
+        if frame.has_clusters() {
+            box_fusion_clustered(frame, &model.boxes, ids, labels);
         } else {
-            box_fusion_no_cluster(proj, &model.boxes, labels)
+            box_fusion_no_cluster(frame, &model.boxes, labels);
         }
-    } else {
-        (vec![0u8; n], vec![0u16; n], vec![0u32; n])
     }
 }
 
@@ -985,15 +938,10 @@ fn lookup_point_in_masks(u: f32, v: f32, prepared: &[PreparedBoxMask]) -> (u8, u
 
 /// Remove outlier points from each instance based on depth. Points farther
 /// than MAX_INSTANCE_DEPTH_SPREAD from the median depth are reset to 0.
-fn filter_depth_outliers(
-    points: &[ParsedPoint],
-    classes: &mut [u8],
-    instances: &mut [u16],
-    track_ids: &mut [u32],
-) {
+fn filter_depth_outliers(frame: &mut FusionFrame) {
     // Group point indices by instance_id
     let mut instance_points: HashMap<u16, Vec<usize>> = HashMap::new();
-    for (i, &inst) in instances.iter().enumerate() {
+    for (i, &inst) in frame.instance_id.iter().enumerate() {
         if inst > 0 {
             instance_points.entry(inst).or_default().push(i);
         }
@@ -1007,8 +955,7 @@ fn filter_depth_outliers(
         let mut depths: Vec<f32> = indices
             .iter()
             .map(|&i| {
-                let p = &points[i];
-                (p.x * p.x + p.y * p.y + p.z * p.z).sqrt()
+                (frame.x[i] * frame.x[i] + frame.y[i] * frame.y[i] + frame.z[i] * frame.z[i]).sqrt()
             })
             .collect();
         depths.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -1016,12 +963,14 @@ fn filter_depth_outliers(
 
         // Remove points too far from the median
         for &idx in indices {
-            let p = &points[idx];
-            let d = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+            let d = (frame.x[idx] * frame.x[idx]
+                + frame.y[idx] * frame.y[idx]
+                + frame.z[idx] * frame.z[idx])
+                .sqrt();
             if (d - median).abs() > MAX_INSTANCE_DEPTH_SPREAD {
-                classes[idx] = 0;
-                instances[idx] = 0;
-                track_ids[idx] = 0;
+                frame.vision_class[idx] = 0;
+                frame.instance_id[idx] = 0;
+                frame.track_id[idx] = 0;
             }
         }
     }
@@ -1030,85 +979,74 @@ fn filter_depth_outliers(
 /// Fuse per-box instance masks with projected lidar points.
 /// Each per-box mask is placed at its detection box coordinates in image space.
 fn boxed_mask_fusion(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
+    frame: &mut FusionFrame,
     masks: &[Mask],
     boxes: &[DetectBox],
     labels: Option<&[String]>,
-    has_cluster_ids: bool,
     ids: &HashMap<u32, Vec<usize>>,
-) -> (Vec<u8>, Vec<u16>, Vec<u32>) {
+) {
     let prepared = prepare_box_masks(masks, boxes, labels);
 
-    if has_cluster_ids {
-        boxed_mask_fusion_clustered(points, proj, &prepared, ids)
+    if frame.has_clusters() {
+        boxed_mask_fusion_clustered(frame, &prepared, ids);
     } else {
-        boxed_mask_fusion_no_cluster(points, proj, &prepared)
+        boxed_mask_fusion_no_cluster(frame, &prepared);
     }
 }
 
-fn boxed_mask_fusion_no_cluster(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
-    prepared: &[PreparedBoxMask],
-) -> (Vec<u8>, Vec<u16>, Vec<u32>) {
-    let n = proj.len();
-    let mut classes = vec![0u8; n];
-    let mut instances = vec![0u16; n];
-    let mut track_ids = vec![0u32; n];
+fn boxed_mask_fusion_no_cluster(frame: &mut FusionFrame, prepared: &[PreparedBoxMask]) {
+    let n = frame.len;
 
-    for (i, [u, v]) in proj.iter().enumerate() {
-        if !check_in_bounds(u, v) {
+    for i in 0..n {
+        let u = frame.proj_u[i];
+        let v = frame.proj_v[i];
+        if !check_in_bounds(&u, &v) {
             continue;
         }
-        let (cls, inst, trk) = lookup_point_in_masks(*u, *v, prepared);
-        classes[i] = cls;
-        instances[i] = inst;
-        track_ids[i] = trk;
+        let (cls, inst, trk) = lookup_point_in_masks(u, v, prepared);
+        frame.vision_class[i] = cls;
+        frame.instance_id[i] = inst;
+        frame.track_id[i] = trk;
     }
 
     // Edge tolerance: check 8 surrounding points for unclassified pixels
     let point_radius = 0.02f32;
-    for (i, [u, v]) in proj.iter().enumerate() {
-        if classes[i] != 0 {
+    for i in 0..n {
+        if frame.vision_class[i] != 0 {
             continue;
         }
+        let u = frame.proj_u[i];
+        let v = frame.proj_v[i];
         for angle in (0..360).step_by(45) {
-            let nu = *u + point_radius * (angle as f32).to_radians().sin();
-            let nv = *v + point_radius * (angle as f32).to_radians().cos();
+            let nu = u + point_radius * (angle as f32).to_radians().sin();
+            let nv = v + point_radius * (angle as f32).to_radians().cos();
             if !check_in_bounds(&nu, &nv) {
                 continue;
             }
             let (cls, inst, trk) = lookup_point_in_masks(nu, nv, prepared);
             if cls != 0 {
-                classes[i] = cls;
-                instances[i] = inst;
-                track_ids[i] = trk;
+                frame.vision_class[i] = cls;
+                frame.instance_id[i] = inst;
+                frame.track_id[i] = trk;
                 break;
             }
         }
     }
 
-    filter_depth_outliers(points, &mut classes, &mut instances, &mut track_ids);
-    (classes, instances, track_ids)
+    filter_depth_outliers(frame);
 }
 
 fn boxed_mask_fusion_clustered(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
+    frame: &mut FusionFrame,
     prepared: &[PreparedBoxMask],
     clusters: &HashMap<u32, Vec<usize>>,
-) -> (Vec<u8>, Vec<u16>, Vec<u32>) {
-    let n = points.len();
-    let mut classes = vec![0u8; n];
-    let mut instances = vec![0u16; n];
-    let mut track_ids = vec![0u32; n];
-
+) {
     for point_indices in clusters.values() {
         // Majority vote on instance_id among projected pixels in this cluster
         let mut votes: HashMap<u16, (u8, u32, usize)> = HashMap::new();
         for &idx in point_indices {
-            let [u, v] = proj[idx];
+            let u = frame.proj_u[idx];
+            let v = frame.proj_v[idx];
             if !check_in_bounds(&u, &v) {
                 continue;
             }
@@ -1123,27 +1061,25 @@ fn boxed_mask_fusion_clustered(
             votes.iter().max_by_key(|(_, (_, _, count))| *count)
         {
             for &idx in point_indices {
-                classes[idx] = best_class;
-                instances[idx] = best_inst;
-                track_ids[idx] = best_track;
+                frame.vision_class[idx] = best_class;
+                frame.instance_id[idx] = best_inst;
+                frame.track_id[idx] = best_track;
             }
         }
     }
 
-    filter_depth_outliers(points, &mut classes, &mut instances, &mut track_ids);
-    (classes, instances, track_ids)
+    filter_depth_outliers(frame);
 }
 
 fn get_fusion_class(
-    points: &[ParsedPoint],
+    frame: &mut FusionFrame,
     fusion_predictions: &[Box2D],
-    has_cluster_ids: bool,
     ids: &HashMap<u32, Vec<usize>>,
-) -> Vec<u8> {
-    if has_cluster_ids {
-        grid_nearest_cluster(fusion_predictions, points, ids)
+) {
+    if frame.has_clusters() {
+        grid_nearest_cluster(fusion_predictions, frame, ids);
     } else {
-        grid_nearest_point_no_cluster(fusion_predictions, points)
+        grid_nearest_point_no_cluster(fusion_predictions, frame);
     }
 }
 
@@ -1164,24 +1100,21 @@ async fn get_fusion_predictions(
 #[instrument(skip_all)]
 async fn publish_bbox3d(
     bbox_publ: Option<&Publisher<'_>>,
-    header: Header,
-    points_data: (&[ParsedPoint], &[u8], &[u8]),
-    instance_id: &[u16],
-    cluster_id_data: (bool, &HashMap<u32, Vec<usize>>),
+    header: &Header,
+    frame: &FusionFrame,
+    ids: &HashMap<u32, Vec<usize>>,
 ) {
     if bbox_publ.is_none() {
         return;
     }
-    let (has_cluster_ids, ids) = cluster_id_data;
     // Only create 3d bbox message when there are cluster IDs and bbox publishing is
     // enabled
-    if !has_cluster_ids {
+    if !frame.has_clusters() {
         return;
     }
 
     let bbox_publ = bbox_publ.unwrap();
-    let (points, vision_class, _) = points_data;
-    let (buf_bbox, enc_bbox) = get_3d_bbox(header, points, vision_class, instance_id, ids);
+    let (buf_bbox, enc_bbox) = get_3d_bbox(header, frame, ids);
 
     match bbox_publ.put(buf_bbox).encoding(enc_bbox).await {
         Ok(_) => trace!("Message Sent on {:?}", bbox_publ.key_expr()),
@@ -1190,34 +1123,30 @@ async fn publish_bbox3d(
 }
 
 #[instrument(skip_all)]
-async fn publish_pcd(
-    publ: Option<&Publisher<'_>>,
-    pcd: &mut PointCloud2,
-    points_data: (&[ParsedPoint], &[u8], &[u8]),
-    instance_id: &[u16],
-    track_id: &[u32],
-) {
-    if publ.is_none() {
-        return;
+async fn publish_classes(publ: Option<&Publisher<'_>>, frame: &FusionFrame, header: &Header) {
+    let publ = match publ {
+        Some(p) => p,
+        None => return,
+    };
+    let pcd = serialize_classes(frame, header);
+    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+    match publ.put(buf).encoding(enc).await {
+        Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
+        Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
     }
-    let (points, vision_class, fusion_class) = points_data;
-    let publ = publ.unwrap();
-    insert_standard_fields(pcd);
-    let data = serialize_pcd(
-        points,
-        &pcd.fields,
-        vision_class,
-        fusion_class,
-        instance_id,
-        track_id,
-    );
-    pcd.row_step = data.len() as u32;
-    pcd.data = data;
-    pcd.is_bigendian = cfg!(target_endian = "big");
-    let buf = serde_cdr::serialize(&pcd).unwrap();
-    let buf_pcd = ZBytes::from(buf);
-    let enc_pcd = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
-    match publ.put(buf_pcd).encoding(enc_pcd).await {
+}
+
+#[instrument(skip_all)]
+async fn publish_tracks(publ: Option<&Publisher<'_>>, frame: &FusionFrame, header: &Header) {
+    let publ = match publ {
+        Some(p) => p,
+        None => return,
+    };
+    let pcd = serialize_tracks(frame, header);
+    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
+    let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
+    match publ.put(buf).encoding(enc).await {
         Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
         Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
     }
@@ -1227,41 +1156,22 @@ async fn publish_pcd(
 #[allow(clippy::too_many_arguments)]
 async fn publish_grid(
     grid_publ: Option<&Publisher<'_>>,
-    header: Header,
-    points_data: (&[ParsedPoint], &[u8], &[u8]),
-    instance_id: &[u16],
+    header: &Header,
+    frame: &FusionFrame,
     point_tracker: &mut ByteTrack,
     bins_data: (&mut [Vec<Bin>], u128),
     args: &Args,
-    cluster_id_data: (bool, &HashMap<u32, Vec<usize>>),
+    ids: &HashMap<u32, Vec<usize>>,
 ) {
     if grid_publ.is_none() {
         return;
     };
     let grid_publ = grid_publ.unwrap();
-    let (has_cluster_ids, ids) = cluster_id_data;
-    let (points, vision_class, fusion_class) = points_data;
-    let (buf_grid, enc_grid) = if has_cluster_ids {
-        get_occupied_cluster(
-            header,
-            points,
-            vision_class,
-            fusion_class,
-            instance_id,
-            ids,
-            point_tracker,
-        )
+    let (buf_grid, enc_grid) = if frame.has_clusters() {
+        get_occupied_cluster(header, frame, ids, point_tracker)
     } else {
         let (bins, frame_index) = bins_data;
-        get_occupied_no_cluster(
-            header,
-            points,
-            vision_class,
-            fusion_class,
-            bins,
-            frame_index,
-            args,
-        )
+        get_occupied_no_cluster(header, frame, bins, frame_index, args)
     };
     match grid_publ.put(buf_grid).encoding(enc_grid).await {
         Ok(_) => trace!("Message Sent on {:?}", grid_publ.key_expr()),
@@ -1273,10 +1183,8 @@ async fn publish_grid(
 // will get a 3D bounding box generated. It is assumed that all points in the
 // same cluster ID will have the same class.
 fn get_3d_bbox(
-    header: Header,
-    points: &[ParsedPoint],
-    classes: &[u8],
-    instance_id: &[u16],
+    header: &Header,
+    frame: &FusionFrame,
     cluster_ids: &HashMap<u32, Vec<usize>>,
 ) -> (ZBytes, Encoding) {
     let mut bbox_3d = Vec::new();
@@ -1286,7 +1194,7 @@ fn get_3d_bbox(
         }
 
         // assumes that all points with the same class ID has the same class
-        let class = classes[inds[0]];
+        let class = frame.vision_class[inds[0]];
         if class == 0 {
             continue;
         }
@@ -1304,21 +1212,20 @@ fn get_3d_bbox(
         );
 
         for ind in inds.iter() {
-            let p = &points[*ind];
-            debug_assert_eq!(class, classes[*ind]);
-            x_max = x_max.max(p.x);
-            x_min = x_min.min(p.x);
+            debug_assert_eq!(class, frame.vision_class[*ind]);
+            x_max = x_max.max(frame.x[*ind]);
+            x_min = x_min.min(frame.x[*ind]);
 
-            y_max = y_max.max(p.y);
-            y_min = y_min.min(p.y);
+            y_max = y_max.max(frame.y[*ind]);
+            y_min = y_min.min(frame.y[*ind]);
 
-            z_max = z_max.max(p.z);
-            z_min = z_min.min(p.z);
+            z_max = z_max.max(frame.z[*ind]);
+            z_min = z_min.min(frame.z[*ind]);
         }
 
         // Add a 3D box using the max and min x,y,z values
         // TODO: Add 3D tracking to improve smoothness
-        let inst = instance_id[inds[0]];
+        let inst = frame.instance_id[inds[0]];
         bbox_3d.push(DetectBox {
             center_x: -(y_max + y_min) / 2.0, // we use an optical frame, so positive X is right
             center_y: -(z_max + z_min) / 2.0, // we use an optical frame, so positive Y is down
@@ -1345,7 +1252,7 @@ fn get_3d_bbox(
         output_time: header.stamp.clone(),
         boxes: bbox_3d,
         header: Header {
-            stamp: header.stamp,
+            stamp: header.stamp.clone(),
             frame_id: format!("{BASE_LINK_FRAME_ID}_optical"),
         },
     };
@@ -1400,24 +1307,21 @@ fn build_tf_msg() -> TransformStamped {
 // For each predicted grid box, find the nearest point in the PCD. If the
 // nearest point is within 2m, set the class of the point to the class of the
 // grid box
-fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedPoint]) -> Vec<u8> {
-    let mut class = vec![0; points.len()];
+fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], frame: &mut FusionFrame) {
     for b in fusion_predictions {
         let mut min_dist2 = f32::MAX;
         let mut min_point_ind = 0;
-        for (ind, p) in points.iter().enumerate() {
-            let dist2 = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
+        for ind in 0..frame.len {
+            let dist2 = (frame.x[ind] - b.center_x).powi(2) + (frame.y[ind] - b.center_y).powi(2);
             if dist2 < min_dist2 {
                 min_dist2 = dist2;
                 min_point_ind = ind;
             }
         }
         if min_dist2 < MAX_CLASSIFICATION_DISTANCE * MAX_CLASSIFICATION_DISTANCE {
-            class[min_point_ind] = b.label;
+            frame.fusion_class[min_point_ind] = b.label;
         }
     }
-
-    class
 }
 
 // For each predicted grid box, find the nearest cluster in the PCD. If the
@@ -1425,19 +1329,18 @@ fn grid_nearest_point_no_cluster(fusion_predictions: &[Box2D], points: &[ParsedP
 // the class of the grid box
 fn grid_nearest_cluster(
     fusion_predictions: &[Box2D],
-    points: &[ParsedPoint],
+    frame: &mut FusionFrame,
     clusters: &HashMap<u32, Vec<usize>>,
-) -> Vec<u8> {
-    let mut class = vec![0; points.len()];
+) {
     for b in fusion_predictions {
         let mut min_dist2 = f32::MAX;
         let mut min_point_ind = 0;
-        for (ind, p) in points.iter().enumerate() {
-            if p.id.is_none_or(|id| id == 0) {
+        for ind in 0..frame.len {
+            if frame.cluster_id[ind] == 0 {
                 continue;
             }
 
-            let dist2 = (p.x - b.center_x).powi(2) + (p.y - b.center_y).powi(2);
+            let dist2 = (frame.x[ind] - b.center_x).powi(2) + (frame.y[ind] - b.center_y).powi(2);
             if dist2 < min_dist2 {
                 min_dist2 = dist2;
                 min_point_ind = ind;
@@ -1446,18 +1349,16 @@ fn grid_nearest_cluster(
         if min_dist2 > MAX_CLASSIFICATION_DISTANCE * MAX_CLASSIFICATION_DISTANCE {
             continue;
         }
-        let cluster_id = match points[min_point_ind].id {
-            Some(id) if id > 0 => id,
-            _ => continue,
-        };
+        let cluster_id = frame.cluster_id[min_point_ind];
+        if cluster_id == 0 {
+            continue;
+        }
         if let Some(indices) = clusters.get(&cluster_id) {
             for ind in indices {
-                class[*ind] = b.label;
+                frame.fusion_class[*ind] = b.label;
             }
         }
     }
-
-    class
 }
 
 /// For each point, get the class of the point using the projection onto the
@@ -1467,7 +1368,7 @@ fn grid_nearest_cluster(
 ///
 /// Assumes that the mask is already argmax'd
 #[instrument(skip_all)]
-fn late_fusion_no_cluster(projection: &[[f32; 2]], mask: &Mask, point_radius: f32) -> Vec<u8> {
+fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &Mask, point_radius: f32) {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
     let index_mask = |x: f32, y: f32| -> u8 {
@@ -1476,38 +1377,38 @@ fn late_fusion_no_cluster(projection: &[[f32; 2]], mask: &Mask, point_radius: f3
         mask.mask[y * mask_width + x]
     };
 
-    let mut class = vec![0; projection.len()];
-    for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
-        if !check_in_bounds(x, y) {
+    for i in 0..frame.len {
+        let x = frame.proj_u[i];
+        let y = frame.proj_v[i];
+        if !check_in_bounds(&x, &y) {
             continue;
         }
-        *class = index_mask(*x, *y);
+        frame.vision_class[i] = index_mask(x, y);
     }
 
     if point_radius <= 0.0 {
-        return class;
+        return;
     }
 
-    for ([x, y], class) in projection.iter().zip(class.iter_mut()) {
-        if *class != 0 {
+    for i in 0..frame.len {
+        if frame.vision_class[i] != 0 {
             continue;
         }
-        // first do the center of the point, then 8 points around circumference
-        // negative -45 represents the center
+        let x = frame.proj_u[i];
+        let y = frame.proj_v[i];
         for angle in (0..360).step_by(45) {
-            let new_x = *x + (point_radius * (angle as f32).to_radians().sin());
-            let new_y = *y + (point_radius * (angle as f32).to_radians().cos());
+            let new_x = x + (point_radius * (angle as f32).to_radians().sin());
+            let new_y = y + (point_radius * (angle as f32).to_radians().cos());
             if !check_in_bounds(&new_x, &new_y) {
                 continue;
             }
             let argmax = index_mask(new_x, new_y);
             if argmax != 0 {
-                *class = argmax;
+                frame.vision_class[i] = argmax;
                 break;
             }
         }
     }
-    class
 }
 
 fn check_in_bounds(x: &f32, y: &f32) -> bool {
@@ -1520,11 +1421,10 @@ fn check_in_bounds(x: &f32, y: &f32) -> bool {
 /// Assumes that the mask is already argmax'd
 #[instrument(skip_all)]
 fn late_fusion_clustered(
-    points: &[ParsedPoint],
-    proj: &[[f32; 2]],
+    frame: &mut FusionFrame,
     mask: &Mask,
     clusters: &HashMap<u32, Vec<usize>>,
-) -> Vec<u8> {
+) {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
     let index_mask = |x: f32, y: f32| -> u8 {
@@ -1533,22 +1433,21 @@ fn late_fusion_clustered(
         mask.mask[y * mask_width + x]
     };
 
-    let mut class = vec![0; points.len()];
-
     let bbox_2d = mask_instance(&mask.mask, mask_width);
     let mut bbox_id = Vec::new();
     for b in &bbox_2d {
         let mut bbox_cluster_ids = Vec::new();
-        for i in 0..points.len() {
-            let [x, y] = proj[i];
+        for i in 0..frame.len {
+            let x = frame.proj_u[i];
+            let y = frame.proj_v[i];
             if (0.0..1.0).contains(&y)
                 && (0.0..1.0).contains(&x)
                 && (b.center_x - x).abs() <= b.width / 2.0
                 && (b.center_y - y).abs() <= b.height / 2.0
-                && points[i].id.unwrap_or_default() > 0
+                && frame.cluster_id[i] > 0
                 && index_mask(x, y) == b.label
             {
-                bbox_cluster_ids.push(points[i].id.unwrap_or_default());
+                bbox_cluster_ids.push(frame.cluster_id[i]);
             }
         }
         if let Some(cluster_id) = mode_slice(&bbox_cluster_ids) {
@@ -1558,31 +1457,24 @@ fn late_fusion_clustered(
     for (box2d, cluster_id) in bbox_2d.into_iter().zip(bbox_id) {
         if let Some(indices) = clusters.get(&cluster_id) {
             for i in indices {
-                class[*i] = box2d.label;
+                frame.vision_class[*i] = box2d.label;
             }
         }
     }
-
-    class
 }
 
-/// Checks if there are any cluster IDs in the PCD. Each cluster IDs and a
-/// vector of the indices of all points with that cluster ID are placed into a
-/// HashMap. Noise points are not included in the HashMap.
-fn get_cluster_ids(points: &[ParsedPoint]) -> (bool, HashMap<u32, Vec<usize>>) {
-    let mut has_cluster_id = false;
+/// Checks if there are any cluster IDs in the PCD and builds the cluster map.
+/// Noise points (id == 0) are not included in the HashMap.
+fn get_cluster_ids(frame: &FusionFrame) -> HashMap<u32, Vec<usize>> {
     let mut cluster_ids: HashMap<u32, Vec<usize>> = HashMap::new();
-    for (i, point) in points.iter().enumerate() {
-        if let Some(id) = point.id {
-            has_cluster_id = true;
-            if id == 0 {
-                // we ignore noise points
-                continue;
-            }
-            cluster_ids.entry(id).or_default().push(i);
+    for (i, &id) in frame.cluster_id.iter().enumerate() {
+        if id == 0 {
+            // we ignore noise points
+            continue;
         }
+        cluster_ids.entry(id).or_default().push(i);
     }
-    (has_cluster_id, cluster_ids)
+    cluster_ids
 }
 
 async fn grid_radar_tracked(
@@ -1749,83 +1641,59 @@ fn grid_to_xy(i: f32, j: f32, width: usize, args: &Args) -> (f32, f32) {
     }
 }
 
-fn centroids_get_class(
-    cluster_ids: &HashMap<u32, Vec<usize>>,
-    points: &[ParsedPoint],
-    vision_class: &[u8],
-    fusion_class: &[u8],
-    instance_id: &[u16],
-) -> (Vec<ParsedPoint>, Vec<u8>, Vec<u8>, Vec<u16>) {
+fn centroids_get_class(cluster_ids: &HashMap<u32, Vec<usize>>, frame: &FusionFrame) -> FusionFrame {
     let capacity = cluster_ids.len();
-    let mut centroid_points = Vec::with_capacity(capacity);
-    let mut centroid_vision_class = Vec::with_capacity(capacity);
-    let mut centroid_fusion_class = Vec::with_capacity(capacity);
-    let mut centroid_instance_id: Vec<u16> = Vec::with_capacity(capacity);
+    let mut centroid = FusionFrame::new(capacity);
+
     for id in cluster_ids {
         // sanity check, should not have cluster_ids with no points
         if id.1.is_empty() {
             continue;
         }
-        let vision_class = vision_class[id.1[0]];
-        let fusion_class = fusion_class[id.1[0]];
-        let instance_id = instance_id[id.1[0]];
+        let vision_class = frame.vision_class[id.1[0]];
+        let fusion_class = frame.fusion_class[id.1[0]];
+        let instance_id = frame.instance_id[id.1[0]];
         let mut xyzv = id.1.iter().fold([0.0, 0.0, 0.0, 0.0], |mut xyzv, ind| {
-            xyzv[0] += points[*ind].x;
-            xyzv[1] += points[*ind].y;
-            xyzv[2] += points[*ind].z;
+            xyzv[0] += frame.x[*ind];
+            xyzv[1] += frame.y[*ind];
+            xyzv[2] += frame.z[*ind];
             xyzv
         });
         for v in xyzv.iter_mut() {
             *v /= id.1.len() as f32
         }
-        let p = ParsedPoint {
-            x: xyzv[0],
-            y: xyzv[1],
-            z: xyzv[2],
-            id: Some(*id.0),
-        };
 
-        centroid_points.push(p);
-        centroid_vision_class.push(vision_class);
-        centroid_fusion_class.push(fusion_class);
-        centroid_instance_id.push(instance_id);
+        centroid.x.push(xyzv[0]);
+        centroid.y.push(xyzv[1]);
+        centroid.z.push(xyzv[2]);
+        centroid.cluster_id.push(*id.0);
+        centroid.vision_class[centroid.len] = vision_class;
+        centroid.fusion_class[centroid.len] = fusion_class;
+        centroid.instance_id[centroid.len] = instance_id;
+        centroid.len += 1;
     }
-    (
-        centroid_points,
-        centroid_vision_class,
-        centroid_fusion_class,
-        centroid_instance_id,
-    )
+    centroid
 }
 
 /// Update centroid classes using the ByteTrack multi-object tracker.
-///
-/// `_centroid_instance_id` is accepted (but not yet modified) to keep the
-/// call-site signature consistent with `centroids_get_class`.  Future work
-/// may propagate tracker-assigned instance IDs back through this path.
 fn centroids_update_tracker_classes(
-    centroid_points: &[ParsedPoint],
-    centroid_vision_class: &mut [u8],
-    centroid_fusion_class: &mut [u8],
-    _centroid_instance_id: &mut [u16],
+    centroid: &mut FusionFrame,
     point_tracker: &mut ByteTrack,
     timestamp: u64,
 ) {
-    let mut boxes: Vec<TrackerBox> = centroid_points
-        .iter()
-        .enumerate()
-        .map(|(ind, p)| TrackerBox {
-            xmin: p.x - 0.5,
-            xmax: p.x + 0.5,
-            ymin: p.y - 0.5,
-            ymax: p.y + 0.5,
-            score: if centroid_vision_class[ind] > 0 || centroid_fusion_class[ind] > 0 {
+    let mut boxes: Vec<TrackerBox> = (0..centroid.len)
+        .map(|ind| TrackerBox {
+            xmin: centroid.x[ind] - 0.5,
+            xmax: centroid.x[ind] + 0.5,
+            ymin: centroid.y[ind] - 0.5,
+            ymax: centroid.y[ind] + 0.5,
+            score: if centroid.vision_class[ind] > 0 || centroid.fusion_class[ind] > 0 {
                 1.0
             } else {
                 0.3
             },
-            vision_class: centroid_vision_class[ind],
-            fusion_class: centroid_fusion_class[ind],
+            vision_class: centroid.vision_class[ind],
+            fusion_class: centroid.fusion_class[ind],
         })
         .collect();
     let track_info = point_tracker.update(&mut boxes, timestamp);
@@ -1844,22 +1712,15 @@ fn centroids_update_tracker_classes(
             continue;
         }
         if boxes[i].vision_class == 0 {
-            centroid_vision_class[i] = point_tracker.uuid_map_vision_class[&uuid];
+            centroid.vision_class[i] = point_tracker.uuid_map_vision_class[&uuid];
         }
         if boxes[i].fusion_class == 0 {
-            centroid_fusion_class[i] = point_tracker.uuid_map_fusion_class[&uuid];
+            centroid.fusion_class[i] = point_tracker.uuid_map_fusion_class[&uuid];
         }
     }
 }
 
-fn centroids_add_tracks(
-    centroid_points: &mut Vec<ParsedPoint>,
-    centroid_vision_class: &mut Vec<u8>,
-    centroid_fusion_class: &mut Vec<u8>,
-    centroid_instance_id: &mut Vec<u16>,
-    point_tracker: &mut ByteTrack,
-    timestamp: u64,
-) {
+fn centroids_add_tracks(centroid: &mut FusionFrame, point_tracker: &mut ByteTrack, timestamp: u64) {
     for i in point_tracker.get_tracklets() {
         if i.last_updated == timestamp {
             continue;
@@ -1874,116 +1735,72 @@ fn centroids_add_tracks(
         }
         // this track wasn't updated
 
-        // should I check if there is still a point nearby?
-        // nearby points still should've been updated
-
-        let mut p = ParsedPoint {
-            x: 0.0,
-            y: 0.0,
-            z: 0.0,
-            id: Some(0),
-        };
-
         let predicted = i.get_predicted_location();
-        p.x = (predicted.xmin + predicted.xmax) / 2.0;
-        p.y = (predicted.ymin + predicted.ymax) / 2.0;
-        centroid_points.push(p);
-        centroid_vision_class.push(point_tracker.uuid_map_vision_class[&i.id]);
-        centroid_fusion_class.push(point_tracker.uuid_map_fusion_class[&i.id]);
-        centroid_instance_id.push(0);
+        let px = (predicted.xmin + predicted.xmax) / 2.0;
+        let py = (predicted.ymin + predicted.ymax) / 2.0;
+
+        centroid.x.push(px);
+        centroid.y.push(py);
+        centroid.z.push(0.0);
+        centroid.cluster_id.push(0);
+        // Extend annotation arrays
+        if centroid.len >= centroid.vision_class.len() {
+            centroid
+                .vision_class
+                .push(point_tracker.uuid_map_vision_class[&i.id]);
+            centroid
+                .fusion_class
+                .push(point_tracker.uuid_map_fusion_class[&i.id]);
+            centroid.instance_id.push(0);
+            centroid.track_id.push(0);
+        } else {
+            centroid.vision_class[centroid.len] = point_tracker.uuid_map_vision_class[&i.id];
+            centroid.fusion_class[centroid.len] = point_tracker.uuid_map_fusion_class[&i.id];
+            centroid.instance_id[centroid.len] = 0;
+            centroid.track_id[centroid.len] = 0;
+        }
+        centroid.len += 1;
         trace!("added extra point");
     }
 }
+
 /// Returns the centroid of clusters that have non-zero class_id. All points in
 /// a class should have the same class_id
 fn get_occupied_cluster(
-    header: Header,
-    points: &[ParsedPoint],
-    vision_class: &[u8],
-    fusion_class: &[u8],
-    instance_id: &[u16],
+    header: &Header,
+    frame: &FusionFrame,
     cluster_ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
-    let (
-        mut centroid_points,
-        mut centroid_vision_class,
-        mut centroid_fusion_class,
-        mut centroid_instance_id,
-    ) = centroids_get_class(cluster_ids, points, vision_class, fusion_class, instance_id);
+    let mut centroid = centroids_get_class(cluster_ids, frame);
     // want to track points that have class != 0
     let timestamp = header.stamp.to_nanos();
-    centroids_update_tracker_classes(
-        &centroid_points,
-        &mut centroid_vision_class,
-        &mut centroid_fusion_class,
-        &mut centroid_instance_id,
-        point_tracker,
-        timestamp,
-    );
+    centroids_update_tracker_classes(&mut centroid, point_tracker, timestamp);
+    centroids_add_tracks(&mut centroid, point_tracker, timestamp);
 
-    centroids_add_tracks(
-        &mut centroid_points,
-        &mut centroid_vision_class,
-        &mut centroid_fusion_class,
-        &mut centroid_instance_id,
-        point_tracker,
-        timestamp,
-    );
-
-    let mut centroid_pcd = PointCloud2 {
-        header,
-        height: 1,
-        width: centroid_points.len() as u32,
-        is_bigendian: cfg!(target_endian = "big"),
-        is_dense: true,
-        fields: Vec::new(),
-        point_step: 0,
-        data: Vec::new(),
-        row_step: 0,
-    };
-    insert_standard_fields(&mut centroid_pcd);
-
-    let centroid_track_id = vec![0u32; centroid_points.len()];
-    let data = serialize_pcd(
-        &centroid_points,
-        &centroid_pcd.fields,
-        &centroid_vision_class,
-        &centroid_fusion_class,
-        &centroid_instance_id,
-        &centroid_track_id,
-    );
-    centroid_pcd.row_step = data.len() as u32;
-    centroid_pcd.data = data;
-
-    let buf = ZBytes::from(serde_cdr::serialize(&centroid_pcd).unwrap());
+    let pcd = serialize_grid(&centroid, header);
+    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
 
     (buf, enc)
 }
 
-fn update_bins(
-    points: &[ParsedPoint],
-    vision_class: &[u8],
-    fusion_class: &[u8],
-    bins: &mut [Vec<Bin>],
-    args: &Args,
-) {
-    for (ind, p) in points.iter().enumerate() {
-        let mut range = (p.x.powi(2) + p.y.powi(2) + p.z.powi(2)).sqrt();
-        let mut angle = p.y.atan2(p.x).to_degrees();
+fn update_bins(frame: &FusionFrame, bins: &mut [Vec<Bin>], args: &Args) {
+    for ind in 0..frame.len {
+        let mut range = (frame.x[ind].powi(2) + frame.y[ind].powi(2) + frame.z[ind].powi(2)).sqrt();
+        let mut angle = frame.y[ind].atan2(frame.x[ind]).to_degrees();
 
         angle = angle.clamp(args.angle_bin_limit[0], args.angle_bin_limit[1] - 0.001);
         range = range.clamp(args.range_bin_limit[0], args.range_bin_limit[1] - 0.001);
 
         let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
         let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
-        let vision_class = vision_class[ind];
+        let vision_class = frame.vision_class[ind];
         if vision_class > 0 {
             bins[i][j].vision_classes.push(vision_class);
         }
 
-        let fusion_class = fusion_class[ind];
+        let fusion_class = frame.fusion_class[ind];
         if fusion_class > 0 {
             bins[i][j].fusion_classes.push(fusion_class);
         }
@@ -2091,14 +1908,8 @@ fn mark_grid_three_column(
     }
 }
 
-fn find_marked_bins(
-    bins: &[Vec<Bin>],
-    frame_index: u128,
-    args: &Args,
-) -> (Vec<ParsedPoint>, Vec<u8>, Vec<u8>) {
-    let mut grid_points = Vec::new();
-    let mut vision_class = Vec::new();
-    let mut fusion_class = Vec::new();
+fn find_marked_bins(bins: &[Vec<Bin>], frame_index: u128, args: &Args) -> FusionFrame {
+    let mut grid_frame = FusionFrame::new(0);
 
     let mut angle_found_marked = vec![false; bins.len()];
     for thresh in 0..=args.bin_delay {
@@ -2111,10 +1922,15 @@ fn find_marked_bins(
                     && frame_index - bins[i][j].first_marked >= args.bin_delay
                     && frame_index - bins[i][j].last_masked <= thresh
                 {
-                    let (p, vision, fusion) = draw_point(bins, i, j, args);
-                    grid_points.push(p);
-                    vision_class.push(vision);
-                    fusion_class.push(fusion);
+                    let (x, y, vision, fusion) = draw_point(bins, i, j, args);
+                    grid_frame.x.push(x);
+                    grid_frame.y.push(y);
+                    grid_frame.z.push(0.0);
+                    grid_frame.vision_class.push(vision);
+                    grid_frame.fusion_class.push(fusion);
+                    grid_frame.instance_id.push(0);
+                    grid_frame.track_id.push(0);
+                    grid_frame.len += 1;
                     angle_found_marked[i] = true;
                     // don't check more ranges
                     break;
@@ -2122,53 +1938,26 @@ fn find_marked_bins(
             }
         }
     }
-    (grid_points, vision_class, fusion_class)
+    grid_frame
 }
 
 /// Do a grid and highlight the grid based on point classes
 fn get_occupied_no_cluster(
-    header: Header,
-    points: &[ParsedPoint],
-    vision_class: &[u8],
-    fusion_class: &[u8],
+    header: &Header,
+    frame: &FusionFrame,
     bins: &mut [Vec<Bin>],
     frame_index: u128,
     args: &Args,
 ) -> (ZBytes, Encoding) {
-    update_bins(points, vision_class, fusion_class, bins, args);
+    update_bins(frame, bins, args);
 
     let mut angle_found_occupied = vec![false; bins.len()];
     mark_grid_one_column(bins, frame_index, &mut angle_found_occupied, args);
     mark_grid_three_column(bins, frame_index, &mut angle_found_occupied, args);
 
-    let (grid_points, vision_class, fusion_class) = find_marked_bins(bins, frame_index, args);
-    let mut grid_pcd = PointCloud2 {
-        header,
-        height: 1,
-        width: grid_points.len() as u32,
-        is_bigendian: cfg!(target_endian = "big"),
-        is_dense: true,
-        fields: Vec::new(),
-        point_step: 0,
-        data: Vec::new(),
-        row_step: 0,
-    };
-    insert_standard_fields(&mut grid_pcd);
-
-    let grid_instance_id = vec![0u16; grid_points.len()];
-    let grid_track_id = vec![0u32; grid_points.len()];
-    let data = serialize_pcd(
-        &grid_points,
-        &grid_pcd.fields,
-        &vision_class,
-        &fusion_class,
-        &grid_instance_id,
-        &grid_track_id,
-    );
-    grid_pcd.row_step = data.len() as u32;
-    grid_pcd.data = data;
-
-    let buf = ZBytes::from(serde_cdr::serialize(&grid_pcd).unwrap());
+    let grid_frame = find_marked_bins(bins, frame_index, args);
+    let pcd = serialize_grid(&grid_frame, header);
+    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
 
     (buf, enc)
@@ -2230,21 +2019,15 @@ fn mark_grid(bin: &mut Bin, curr: u128) {
     }
 }
 
-fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (ParsedPoint, u8, u8) {
-    let mut grid_point = ParsedPoint {
-        x: 0.0,
-        y: 0.0,
-        z: 0.0,
-        id: None,
-    };
+fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (f32, f32, u8, u8) {
     let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
     let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
 
     let angle = args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0];
     let range = args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0];
-    grid_point.x = angle.to_radians().cos() * range;
-    grid_point.y = angle.to_radians().sin() * range;
-    (grid_point, vision_class, fusion_class)
+    let x = angle.to_radians().cos() * range;
+    let y = angle.to_radians().sin() * range;
+    (x, y, vision_class, fusion_class)
 }
 
 struct Bin {
@@ -2345,100 +2128,136 @@ mod tests {
         }
     }
 
+    /// Helper to build a FusionFrame with projection data set.
+    fn make_frame_with_proj(
+        points: &[(f32, f32, f32)],
+        cluster_ids: Option<&[u32]>,
+        proj: &[[f32; 2]],
+    ) -> FusionFrame {
+        let n = points.len();
+        let mut frame = FusionFrame::new(n);
+        for (x, y, z) in points {
+            frame.x.push(*x);
+            frame.y.push(*y);
+            frame.z.push(*z);
+        }
+        if let Some(cids) = cluster_ids {
+            frame.cluster_id = cids.to_vec();
+        }
+        frame.proj_u = proj.iter().map(|p| p[0]).collect();
+        frame.proj_v = proj.iter().map(|p| p[1]).collect();
+        frame.len = n;
+        frame
+    }
+
     #[test]
     fn test_box_fusion_no_cluster_single_box() {
         let boxes = vec![make_box(0.5, 0.5, 0.4, 0.4, "3", "track-abc")];
         let proj = vec![[0.5, 0.5], [0.1, 0.1]];
-        let (classes, instances, track_ids) = box_fusion_no_cluster(&proj, &boxes, None);
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], None, &proj);
+        box_fusion_no_cluster(&mut frame, &boxes, None);
 
-        assert_eq!(classes[0], 3, "point inside box should get class 3");
-        assert_eq!(instances[0], 1, "serial instance_id should be 1");
-        assert_ne!(track_ids[0], 0, "tracked box should have non-zero track_id");
-        assert_eq!(classes[1], 0, "point outside box should get class 0");
-        assert_eq!(instances[1], 0, "point outside box should get instance 0");
-        assert_eq!(track_ids[1], 0, "point outside box should get track_id 0");
+        assert_eq!(
+            frame.vision_class[0], 3,
+            "point inside box should get class 3"
+        );
+        assert_eq!(frame.instance_id[0], 1, "serial instance_id should be 1");
+        assert_ne!(
+            frame.track_id[0], 0,
+            "tracked box should have non-zero track_id"
+        );
+        assert_eq!(
+            frame.vision_class[1], 0,
+            "point outside box should get class 0"
+        );
+        assert_eq!(
+            frame.instance_id[1], 0,
+            "point outside box should get instance 0"
+        );
+        assert_eq!(
+            frame.track_id[1], 0,
+            "point outside box should get track_id 0"
+        );
     }
 
     #[test]
     fn test_box_fusion_no_cluster_no_track_id() {
         let boxes = vec![make_box(0.5, 0.5, 0.4, 0.4, "2", "")];
         let proj = vec![[0.5, 0.5]];
-        let (classes, instances, track_ids) = box_fusion_no_cluster(&proj, &boxes, None);
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
+        box_fusion_no_cluster(&mut frame, &boxes, None);
 
-        assert_eq!(classes[0], 2);
-        assert_eq!(instances[0], 1, "serial instance_id should be 1");
-        assert_eq!(track_ids[0], 0, "empty track_id should produce track_id 0");
+        assert_eq!(frame.vision_class[0], 2);
+        assert_eq!(frame.instance_id[0], 1, "serial instance_id should be 1");
+        assert_eq!(
+            frame.track_id[0], 0,
+            "empty track_id should produce track_id 0"
+        );
     }
 
     #[test]
     fn test_box_fusion_clustered_assigns_whole_cluster() {
-        let points = vec![
-            ParsedPoint {
-                x: 1.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(10),
-            },
-            ParsedPoint {
-                x: 2.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(10),
-            },
-            ParsedPoint {
-                x: 3.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(20),
-            },
-        ];
         let proj = vec![[0.5, 0.5], [0.55, 0.5], [0.6, 0.5]];
+        let mut frame = make_frame_with_proj(
+            &[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0)],
+            Some(&[10, 10, 20]),
+            &proj,
+        );
         let boxes = vec![make_box(0.55, 0.5, 0.2, 0.2, "5", "uuid-xyz")];
         let mut clusters: HashMap<u32, Vec<usize>> = HashMap::new();
         clusters.insert(10, vec![0, 1]);
         clusters.insert(20, vec![2]);
 
-        let (classes, instances, track_ids) =
-            box_fusion_clustered(&points, &proj, &boxes, &clusters, None);
+        box_fusion_clustered(&mut frame, &boxes, &clusters, None);
 
         assert_eq!(
-            classes[0], 5,
+            frame.vision_class[0], 5,
             "first point of winning cluster should get class"
         );
         assert_eq!(
-            classes[1], 5,
+            frame.vision_class[1], 5,
             "second point of winning cluster should get class"
         );
         assert_eq!(
-            instances[0], instances[1],
+            frame.instance_id[0], frame.instance_id[1],
             "all points in cluster get same instance"
         );
-        assert_ne!(instances[0], 0, "instance should be non-zero");
+        assert_ne!(frame.instance_id[0], 0, "instance should be non-zero");
         assert_ne!(
-            track_ids[0], 0,
+            frame.track_id[0], 0,
             "track_id should be non-zero for tracked box"
         );
         assert_eq!(
-            track_ids[0], track_ids[1],
+            frame.track_id[0], frame.track_id[1],
             "all points in cluster get same track_id"
         );
-        assert_eq!(classes[2], 0, "losing cluster should not get class");
-        assert_eq!(instances[2], 0, "losing cluster should not get instance");
+        assert_eq!(
+            frame.vision_class[2], 0,
+            "losing cluster should not get class"
+        );
+        assert_eq!(
+            frame.instance_id[2], 0,
+            "losing cluster should not get instance"
+        );
     }
 
     #[test]
     fn test_box_fusion_empty_boxes_returns_zeros() {
         let boxes: Vec<DetectBox> = vec![];
         let proj = vec![[0.5, 0.5], [0.3, 0.7]];
-        let (classes, instances, track_ids) = box_fusion_no_cluster(&proj, &boxes, None);
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], None, &proj);
+        box_fusion_no_cluster(&mut frame, &boxes, None);
 
-        assert!(classes.iter().all(|&c| c == 0), "all classes should be 0");
         assert!(
-            instances.iter().all(|&i| i == 0),
+            frame.vision_class.iter().all(|&c| c == 0),
+            "all classes should be 0"
+        );
+        assert!(
+            frame.instance_id.iter().all(|&i| i == 0),
             "all instances should be 0"
         );
         assert!(
-            track_ids.iter().all(|&t| t == 0),
+            frame.track_id.iter().all(|&t| t == 0),
             "all track_ids should be 0"
         );
     }
@@ -2503,27 +2322,12 @@ mod tests {
 
     #[test]
     fn test_box_fusion_clustered_overlapping_boxes() {
-        let points = vec![
-            ParsedPoint {
-                x: 1.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(10),
-            },
-            ParsedPoint {
-                x: 2.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(10),
-            },
-            ParsedPoint {
-                x: 3.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(10),
-            },
-        ];
         let proj = vec![[0.5, 0.5], [0.55, 0.5], [0.6, 0.5]];
+        let mut frame = make_frame_with_proj(
+            &[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0)],
+            Some(&[10, 10, 10]),
+            &proj,
+        );
         let box_a = make_box(0.55, 0.5, 0.3, 0.3, "7", "track-a");
         let box_b = make_box(0.5, 0.5, 0.02, 0.02, "9", "track-b");
         let boxes = vec![box_a, box_b];
@@ -2531,17 +2335,16 @@ mod tests {
         let mut clusters: HashMap<u32, Vec<usize>> = HashMap::new();
         clusters.insert(10, vec![0, 1, 2]);
 
-        let (classes, instances, track_ids) =
-            box_fusion_clustered(&points, &proj, &boxes, &clusters, None);
+        box_fusion_clustered(&mut frame, &boxes, &clusters, None);
 
-        assert_eq!(classes[0], 7, "cluster should get Box A's class");
-        assert_eq!(classes[1], 7);
-        assert_eq!(classes[2], 7);
-        assert_ne!(instances[0], 0);
-        assert_eq!(instances[0], instances[1]);
-        assert_eq!(instances[1], instances[2]);
-        assert_ne!(track_ids[0], 0);
-        assert_eq!(track_ids[0], track_ids[1]);
+        assert_eq!(frame.vision_class[0], 7, "cluster should get Box A's class");
+        assert_eq!(frame.vision_class[1], 7);
+        assert_eq!(frame.vision_class[2], 7);
+        assert_ne!(frame.instance_id[0], 0);
+        assert_eq!(frame.instance_id[0], frame.instance_id[1]);
+        assert_eq!(frame.instance_id[1], frame.instance_id[2]);
+        assert_ne!(frame.track_id[0], 0);
+        assert_eq!(frame.track_id[0], frame.track_id[1]);
     }
 
     #[test]
@@ -2602,21 +2405,15 @@ mod tests {
         // Model with boxes only, no masks
         let boxes = vec![make_box(0.5, 0.5, 0.4, 0.4, "2", "det-track")];
         let model = make_model(boxes, vec![]);
-        let points = vec![ParsedPoint {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-            id: None,
-        }];
         let proj = vec![[0.5, 0.5]];
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
 
-        let (classes, instances, track_ids) =
-            get_vision_class_and_instance(&points, &proj, Some(&model), false, &ids, None);
-        assert_eq!(classes[0], 2);
-        assert_ne!(instances[0], 0);
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, None);
+        assert_eq!(frame.vision_class[0], 2);
+        assert_ne!(frame.instance_id[0], 0);
         assert_ne!(
-            track_ids[0], 0,
+            frame.track_id[0], 0,
             "tracked detection should have non-zero track_id"
         );
     }
@@ -2633,21 +2430,21 @@ mod tests {
             boxed: false,
         };
         let model = make_model(vec![], vec![mask]);
-        let points = vec![ParsedPoint {
-            x: 1.0,
-            y: 0.0,
-            z: 0.0,
-            id: None,
-        }];
         // Project to pixel (1,1) in normalized coords -> (0.75, 0.75) -> mask[1*2+1] = 3
         let proj = vec![[0.75, 0.75]];
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
 
-        let (classes, instances, track_ids) =
-            get_vision_class_and_instance(&points, &proj, Some(&model), false, &ids, None);
-        assert_eq!(classes[0], 3);
-        assert_eq!(instances[0], 0, "semantic segmentation has no instance IDs");
-        assert_eq!(track_ids[0], 0, "semantic segmentation has no track IDs");
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, None);
+        assert_eq!(frame.vision_class[0], 3);
+        assert_eq!(
+            frame.instance_id[0], 0,
+            "semantic segmentation has no instance IDs"
+        );
+        assert_eq!(
+            frame.track_id[0], 0,
+            "semantic segmentation has no track IDs"
+        );
     }
 
     #[test]
@@ -2665,45 +2462,34 @@ mod tests {
         };
         let det_box = make_box(0.25, 0.25, 0.5, 0.5, "person", "track-1");
         let model = make_model(vec![det_box], vec![mask]);
-        let points = vec![
-            ParsedPoint {
-                x: 1.0,
-                y: 0.0,
-                z: 0.0,
-                id: None,
-            },
-            ParsedPoint {
-                x: 5.0,
-                y: 0.0,
-                z: 0.0,
-                id: None,
-            },
-        ];
         // First point projects into the mask, second projects outside
         let proj = vec![[0.1, 0.1], [0.9, 0.9]];
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (5.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
 
-        let (classes, instances, track_ids) =
-            get_vision_class_and_instance(&points, &proj, Some(&model), false, &ids, Some(&labels));
-        assert_ne!(classes[0], 0, "point inside instance mask should get class");
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, Some(&labels));
         assert_ne!(
-            instances[0], 0,
+            frame.vision_class[0], 0,
+            "point inside instance mask should get class"
+        );
+        assert_ne!(
+            frame.instance_id[0], 0,
             "point inside instance mask should get instance"
         );
         assert_ne!(
-            track_ids[0], 0,
+            frame.track_id[0], 0,
             "point inside instance mask should get track_id"
         );
         assert_eq!(
-            classes[1], 0,
+            frame.vision_class[1], 0,
             "point outside instance mask should be background"
         );
     }
 
     #[test]
     fn test_instance_mask_fusion_no_cluster() {
-        // Box 1: centered at (0.25, 0.25), size 0.5x0.5 → covers [0.0, 0.0] to [0.5, 0.5]
-        // Box 2: centered at (0.75, 0.75), size 0.5x0.5 → covers [0.5, 0.5] to [1.0, 1.0]
+        // Box 1: centered at (0.25, 0.25), size 0.5x0.5 -> covers [0.0, 0.0] to [0.5, 0.5]
+        // Box 2: centered at (0.75, 0.75), size 0.5x0.5 -> covers [0.5, 0.5] to [1.0, 1.0]
         let masks = vec![
             Mask {
                 width: 2,
@@ -2757,36 +2543,29 @@ mod tests {
         let ids: HashMap<u32, Vec<usize>> = HashMap::new();
         // Point in box 1, point in box 2, point well outside both boxes (beyond edge tolerance)
         let proj = vec![[0.1, 0.1], [0.75, 0.75], [0.55, 1.1]];
-        let points = vec![
-            ParsedPoint {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-                id: None,
-            },
-            ParsedPoint {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-                id: None,
-            },
-            ParsedPoint {
-                x: 0.0,
-                y: 0.0,
-                z: 0.0,
-                id: None,
-            },
-        ];
+        let mut frame = make_frame_with_proj(
+            &[(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)],
+            None,
+            &proj,
+        );
 
-        let (classes, instances, track_ids) =
-            boxed_mask_fusion(&points, &proj, &masks, &boxes, None, false, &ids);
-        assert_eq!(classes[0], 1, "point in box 1 should be class 1");
-        assert_eq!(instances[0], 1, "point in box 1 should be instance 1");
-        assert_ne!(track_ids[0], 0, "point in box 1 should have track_id");
-        assert_eq!(classes[1], 2, "point in box 2 should be class 2");
-        assert_eq!(instances[1], 2, "point in box 2 should be instance 2");
-        assert_ne!(track_ids[1], 0, "point in box 2 should have track_id");
-        assert_eq!(classes[2], 0, "point outside boxes should be background");
+        boxed_mask_fusion(&mut frame, &masks, &boxes, None, &ids);
+        assert_eq!(frame.vision_class[0], 1, "point in box 1 should be class 1");
+        assert_eq!(
+            frame.instance_id[0], 1,
+            "point in box 1 should be instance 1"
+        );
+        assert_ne!(frame.track_id[0], 0, "point in box 1 should have track_id");
+        assert_eq!(frame.vision_class[1], 2, "point in box 2 should be class 2");
+        assert_eq!(
+            frame.instance_id[1], 2,
+            "point in box 2 should be instance 2"
+        );
+        assert_ne!(frame.track_id[1], 0, "point in box 2 should have track_id");
+        assert_eq!(
+            frame.vision_class[2], 0,
+            "point outside boxes should be background"
+        );
     }
 
     #[test]
@@ -2815,32 +2594,19 @@ mod tests {
                 created: Time { sec: 0, nanosec: 0 },
             },
         }];
-        let points = vec![
-            ParsedPoint {
-                x: 1.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(5),
-            },
-            ParsedPoint {
-                x: 2.0,
-                y: 0.0,
-                z: 0.0,
-                id: Some(5),
-            },
-        ];
         // Both points in cluster 5 project into box region
         let proj = vec![[0.1, 0.1], [0.2, 0.2]];
+        let mut frame =
+            make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], Some(&[5, 5]), &proj);
         let mut clusters: HashMap<u32, Vec<usize>> = HashMap::new();
         clusters.insert(5, vec![0, 1]);
 
-        let (classes, instances, track_ids) =
-            boxed_mask_fusion(&points, &proj, &masks, &boxes, None, true, &clusters);
-        assert_eq!(classes[0], 1);
-        assert_eq!(classes[1], 1);
-        assert_eq!(instances[0], 1);
-        assert_eq!(instances[1], 1);
-        assert_ne!(track_ids[0], 0);
-        assert_ne!(track_ids[1], 0);
+        boxed_mask_fusion(&mut frame, &masks, &boxes, None, &clusters);
+        assert_eq!(frame.vision_class[0], 1);
+        assert_eq!(frame.vision_class[1], 1);
+        assert_eq!(frame.instance_id[0], 1);
+        assert_eq!(frame.instance_id[1], 1);
+        assert_ne!(frame.track_id[0], 0);
+        assert_ne!(frame.track_id[1], 0);
     }
 }

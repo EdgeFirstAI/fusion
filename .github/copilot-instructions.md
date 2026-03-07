@@ -67,3 +67,31 @@ linker automatically.
 - Run `cargo test` before committing
 - New functionality requires unit tests (minimum 70% coverage)
 - CI runs `cargo clippy -- -D warnings` — all warnings are errors
+
+## On-Target Testing
+
+The fusion service runs on an i.MX8MP (Cortex-A53) target. To deploy and
+test on-target:
+
+1. **Check the systemd override** to find the install path:
+   ```bash
+   ssh <host> cat /etc/systemd/system/fusion.service.d/override.conf
+   ```
+   Typically the binary is installed under `/home/torizon/edgefirst-fusion`.
+
+2. **Cross-compile** the release binary:
+   ```bash
+   cargo zigbuild --release --target aarch64-unknown-linux-gnu
+   ```
+
+3. **Stop the service, deploy, and restart:**
+   ```bash
+   ssh <host> sudo systemctl stop fusion
+   scp target/aarch64-unknown-linux-gnu/release/edgefirst-fusion <host>:/home/torizon/edgefirst-fusion/edgefirst-fusion
+   ssh <host> sudo systemctl start fusion
+   ```
+
+4. **Capture logs:**
+   ```bash
+   ssh <host> journalctl --no-pager -fu fusion
+   ```

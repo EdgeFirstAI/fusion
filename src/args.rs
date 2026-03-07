@@ -29,13 +29,13 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/lidar/clusters")]
     pub lidar_pcd_topic: String,
 
-    /// radar output topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/fusion/radar")]
-    pub radar_output_topic: String,
+    /// classes output topic (xyzc). leave empty to disable
+    #[arg(long, env, default_value = "rt/fusion/classes")]
+    pub classes_topic: String,
 
-    /// lidar output topic. leave empty to disable
+    /// tracks output topic (xyzt). leave empty to disable
     #[arg(long, env, default_value = "")]
-    pub lidar_output_topic: String,
+    pub tracks_topic: String,
 
     /// camera info input topic
     #[arg(long, env, default_value = "rt/camera/info")]
