@@ -44,6 +44,7 @@ mod mask;
 mod pcd;
 #[cfg(feature = "deepviewrt")]
 mod rtm_model;
+mod simd;
 mod tflite_model;
 mod tracker;
 mod transform;
@@ -62,6 +63,22 @@ const TRACK_ID: &str = "track_id";
 const VISION_CLASS: &str = "vision_class";
 const MAX_CLASSIFICATION_DISTANCE: f32 = 2.0;
 const UNINITIALIZED_COORD: f32 = 99999.0;
+
+/// Pre-computed (sin, cos) for 8 evenly spaced angles (0, 45, 90, ..., 315°).
+/// Used by edge-tolerance loops to avoid per-point trig calls.
+const EDGE_OFFSETS: [(f32, f32); 8] = {
+    const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    [
+        (0.0, 1.0),  // 0°
+        (S, S),      // 45°
+        (1.0, 0.0),  // 90°
+        (S, -S),     // 135°
+        (0.0, -1.0), // 180°
+        (-S, -S),    // 225°
+        (-1.0, 0.0), // 270°
+        (-S, S),     // 315°
+    ]
+};
 
 #[tokio::main]
 async fn main() {
@@ -939,9 +956,15 @@ fn lookup_point_in_masks(u: f32, v: f32, prepared: &[PreparedBoxMask]) -> (u8, u
 /// Remove outlier points from each instance based on depth. Points farther
 /// than MAX_INSTANCE_DEPTH_SPREAD from the median depth are reset to 0.
 fn filter_depth_outliers(frame: &mut FusionFrame) {
+    let n = frame.len;
+
+    // Pre-compute all depths in a single SIMD-accelerated pass
+    let mut all_depths = vec![0.0f32; n];
+    simd::magnitude3_f32(&frame.x[..n], &frame.y[..n], &frame.z[..n], &mut all_depths);
+
     // Group point indices by instance_id
     let mut instance_points: HashMap<u16, Vec<usize>> = HashMap::new();
-    for (i, &inst) in frame.instance_id.iter().enumerate() {
+    for (i, &inst) in frame.instance_id[..n].iter().enumerate() {
         if inst > 0 {
             instance_points.entry(inst).or_default().push(i);
         }
@@ -951,23 +974,14 @@ fn filter_depth_outliers(frame: &mut FusionFrame) {
         if indices.len() < 2 {
             continue;
         }
-        // Compute depths (distance from origin in base_link frame)
-        let mut depths: Vec<f32> = indices
-            .iter()
-            .map(|&i| {
-                (frame.x[i] * frame.x[i] + frame.y[i] * frame.y[i] + frame.z[i] * frame.z[i]).sqrt()
-            })
-            .collect();
+        // Gather pre-computed depths and find median
+        let mut depths: Vec<f32> = indices.iter().map(|&i| all_depths[i]).collect();
         depths.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = depths[depths.len() / 2];
 
         // Remove points too far from the median
         for &idx in indices {
-            let d = (frame.x[idx] * frame.x[idx]
-                + frame.y[idx] * frame.y[idx]
-                + frame.z[idx] * frame.z[idx])
-                .sqrt();
-            if (d - median).abs() > MAX_INSTANCE_DEPTH_SPREAD {
+            if (all_depths[idx] - median).abs() > MAX_INSTANCE_DEPTH_SPREAD {
                 frame.vision_class[idx] = 0;
                 frame.instance_id[idx] = 0;
                 frame.track_id[idx] = 0;
@@ -1017,9 +1031,9 @@ fn boxed_mask_fusion_no_cluster(frame: &mut FusionFrame, prepared: &[PreparedBox
         }
         let u = frame.proj_u[i];
         let v = frame.proj_v[i];
-        for angle in (0..360).step_by(45) {
-            let nu = u + point_radius * (angle as f32).to_radians().sin();
-            let nv = v + point_radius * (angle as f32).to_radians().cos();
+        for &(sin_a, cos_a) in &EDGE_OFFSETS {
+            let nu = u + point_radius * sin_a;
+            let nv = v + point_radius * cos_a;
             if !check_in_bounds(&nu, &nv) {
                 continue;
             }
@@ -1396,9 +1410,9 @@ fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &Mask, point_radius: f3
         }
         let x = frame.proj_u[i];
         let y = frame.proj_v[i];
-        for angle in (0..360).step_by(45) {
-            let new_x = x + (point_radius * (angle as f32).to_radians().sin());
-            let new_y = y + (point_radius * (angle as f32).to_radians().cos());
+        for &(sin_a, cos_a) in &EDGE_OFFSETS {
+            let new_x = x + point_radius * sin_a;
+            let new_y = y + point_radius * cos_a;
             if !check_in_bounds(&new_x, &new_y) {
                 continue;
             }
@@ -1786,9 +1800,18 @@ fn get_occupied_cluster(
 }
 
 fn update_bins(frame: &FusionFrame, bins: &mut [Vec<Bin>], args: &Args) {
-    for ind in 0..frame.len {
-        let mut range = (frame.x[ind].powi(2) + frame.y[ind].powi(2) + frame.z[ind].powi(2)).sqrt();
-        let mut angle = frame.y[ind].atan2(frame.x[ind]).to_degrees();
+    let n = frame.len;
+
+    // Batch-compute range and angle using SIMD-accelerated functions
+    let mut ranges = vec![0.0f32; n];
+    let mut angles = vec![0.0f32; n];
+    simd::magnitude3_f32(&frame.x[..n], &frame.y[..n], &frame.z[..n], &mut ranges);
+    simd::atan2_f32(&frame.y[..n], &frame.x[..n], &mut angles);
+
+    // Convert radians to degrees and assign bins (scalar — involves Vec pushes)
+    for ind in 0..n {
+        let mut angle = angles[ind].to_degrees();
+        let mut range = ranges[ind];
 
         angle = angle.clamp(args.angle_bin_limit[0], args.angle_bin_limit[1] - 0.001);
         range = range.clamp(args.range_bin_limit[0], args.range_bin_limit[1] - 0.001);

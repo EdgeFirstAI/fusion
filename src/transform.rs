@@ -6,11 +6,7 @@
 // Modified by Au-Zone Technologies 2025
 
 use edgefirst_schemas::geometry_msgs::Transform;
-use nalgebra::{
-    self,
-    geometry::{Isometry3, Translation3, UnitQuaternion},
-    Matrix4xX,
-};
+use nalgebra::geometry::{Isometry3, Translation3, UnitQuaternion};
 use tracing::instrument;
 
 use crate::pcd::FusionFrame;
@@ -29,6 +25,33 @@ pub fn isometry_from_transform(tf: &Transform) -> Isometry3<f32> {
     ));
 
     Isometry3::from_parts(trans, rot)
+}
+
+/// Flat row-major 4x4 matrix for direct SIMD-friendly access.
+/// Element at (row, col) is stored at index `row * 4 + col`.
+struct Mat4([f32; 16]);
+
+impl Mat4 {
+    /// Convert from a nalgebra 4x4 column-major matrix.
+    fn from_nalgebra(m: &nalgebra::Matrix4<f32>) -> Self {
+        let mut out = [0.0f32; 16];
+        for r in 0..4 {
+            for c in 0..4 {
+                out[r * 4 + c] = m[(r, c)];
+            }
+        }
+        Self(out)
+    }
+
+    /// Transform a point (x, y, z, 1) returning (rx, ry, rz).
+    #[inline(always)]
+    fn transform_point(&self, x: f32, y: f32, z: f32) -> (f32, f32, f32) {
+        let m = &self.0;
+        let rx = m[0] * x + m[1] * y + m[2] * z + m[3];
+        let ry = m[4] * x + m[5] * y + m[6] * z + m[7];
+        let rz = m[8] * x + m[9] * y + m[10] * z + m[11];
+        (rx, ry, rz)
+    }
 }
 
 /// Transform points from their source frame to base_link (in-place), then
@@ -53,56 +76,173 @@ pub(crate) fn transform_and_project_points(
 ) {
     let n = frame.len;
 
-    // Step 1: Transform points from lidar frame to base_link frame (in-place)
+    // Pre-compose matrices once
     let t_base_lidar = isometry_from_transform(lidar_transform);
-    let base_mtx = t_base_lidar.to_matrix();
-
-    let mut xyz1 = Vec::with_capacity(n * 4);
-    for i in 0..n {
-        xyz1.push(frame.x[i]);
-        xyz1.push(frame.y[i]);
-        xyz1.push(frame.z[i]);
-        xyz1.push(1.0);
-    }
-
-    let xyz1 = Matrix4xX::from_vec(xyz1);
-    let base_pts = base_mtx * &xyz1;
-    for (i, col) in base_pts.column_iter().enumerate() {
-        frame.x[i] = col[0];
-        frame.y[i] = col[1];
-        frame.z[i] = col[2];
-    }
-
-    // Step 2: Compose lidar->camera: inv(T_base_cam) * T_base_lidar
     let t_base_cam = isometry_from_transform(cam_transform);
     let t_cam_lidar = t_base_cam.inverse() * t_base_lidar;
-    let cam_frame_mtx = t_cam_lidar.to_matrix();
 
-    // Transform original lidar points to camera optical frame (for projection only)
-    let cam_pts = cam_frame_mtx * xyz1;
+    let base_m = Mat4::from_nalgebra(&t_base_lidar.to_matrix());
+    let cam_m = Mat4::from_nalgebra(&t_cam_lidar.to_matrix());
 
-    // Step 3: Standard pinhole projection -> normalized [0,1] coordinates
     let fx = cam_mtx[0];
     let cx = cam_mtx[2];
     let fy = cam_mtx[4];
     let cy = cam_mtx[5];
     let (width, height) = image_dims;
 
-    frame.proj_u = Vec::with_capacity(n);
-    frame.proj_v = Vec::with_capacity(n);
-    for col in cam_pts.column_iter() {
-        let (x, y, z) = (col[0], col[1], col[2]);
-        if z <= 0.0 {
-            // Behind camera: return out-of-bounds coordinates
-            frame.proj_u.push(2.0);
-            frame.proj_v.push(2.0);
-        } else {
-            let u_px = fx * (x / z) + cx;
-            let v_px = fy * (y / z) + cy;
-            frame.proj_u.push(u_px / width);
-            frame.proj_v.push(v_px / height);
+    frame.proj_u.resize(n, 0.0);
+    frame.proj_v.resize(n, 0.0);
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let chunks = n / 4;
+        for c in 0..chunks {
+            let i = c * 4;
+            unsafe {
+                neon_transform_project_4(frame, i, &base_m, &cam_m, fx, fy, cx, cy, width, height);
+            }
+        }
+        // Scalar remainder
+        for i in (chunks * 4)..n {
+            scalar_transform_project(frame, i, &base_m, &cam_m, fx, fy, cx, cy, width, height);
         }
     }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for i in 0..n {
+            scalar_transform_project(frame, i, &base_m, &cam_m, fx, fy, cx, cy, width, height);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn scalar_transform_project(
+    frame: &mut FusionFrame,
+    i: usize,
+    base_m: &Mat4,
+    cam_m: &Mat4,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    width: f32,
+    height: f32,
+) {
+    let ox = frame.x[i];
+    let oy = frame.y[i];
+    let oz = frame.z[i];
+
+    // Transform to base_link
+    let (bx, by, bz) = base_m.transform_point(ox, oy, oz);
+    frame.x[i] = bx;
+    frame.y[i] = by;
+    frame.z[i] = bz;
+
+    // Transform to camera frame for projection
+    let (camx, camy, camz) = cam_m.transform_point(ox, oy, oz);
+
+    if camz <= 0.0 {
+        frame.proj_u[i] = 2.0;
+        frame.proj_v[i] = 2.0;
+    } else {
+        let inv_z = 1.0 / camz;
+        frame.proj_u[i] = (fx * camx * inv_z + cx) / width;
+        frame.proj_v[i] = (fy * camy * inv_z + cy) / height;
+    }
+}
+
+/// NEON: transform and project 4 points at once.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn neon_transform_project_4(
+    frame: &mut FusionFrame,
+    i: usize,
+    base_m: &Mat4,
+    cam_m: &Mat4,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    width: f32,
+    height: f32,
+) {
+    use std::arch::aarch64::*;
+
+    let bm = &base_m.0;
+    let cm = &cam_m.0;
+
+    // Load 4 points from SoA columns
+    let x4 = vld1q_f32(frame.x.as_ptr().add(i));
+    let y4 = vld1q_f32(frame.y.as_ptr().add(i));
+    let z4 = vld1q_f32(frame.z.as_ptr().add(i));
+
+    // Base-link transform: result = M * [x, y, z, 1]^T (row-major)
+    // row 0: bm[0]*x + bm[1]*y + bm[2]*z + bm[3]
+    let bx = vfmaq_n_f32(
+        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(bm[3]), x4, bm[0]), y4, bm[1]),
+        z4,
+        bm[2],
+    );
+    let by = vfmaq_n_f32(
+        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(bm[7]), x4, bm[4]), y4, bm[5]),
+        z4,
+        bm[6],
+    );
+    let bz = vfmaq_n_f32(
+        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(bm[11]), x4, bm[8]), y4, bm[9]),
+        z4,
+        bm[10],
+    );
+
+    // Store base_link coords
+    vst1q_f32(frame.x.as_mut_ptr().add(i), bx);
+    vst1q_f32(frame.y.as_mut_ptr().add(i), by);
+    vst1q_f32(frame.z.as_mut_ptr().add(i), bz);
+
+    // Camera-frame transform (from original lidar coords)
+    let cx4 = vfmaq_n_f32(
+        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(cm[3]), x4, cm[0]), y4, cm[1]),
+        z4,
+        cm[2],
+    );
+    let cy4 = vfmaq_n_f32(
+        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(cm[7]), x4, cm[4]), y4, cm[5]),
+        z4,
+        cm[6],
+    );
+    let cz4 = vfmaq_n_f32(
+        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(cm[11]), x4, cm[8]), y4, cm[9]),
+        z4,
+        cm[10],
+    );
+
+    // Pinhole projection with behind-camera handling
+    let zero = vdupq_n_f32(0.0);
+    let behind = vcleq_f32(cz4, zero);
+
+    // Reciprocal of z (Newton-Raphson refined)
+    let inv_z_est = vrecpeq_f32(cz4);
+    let inv_z = vmulq_f32(vrecpsq_f32(cz4, inv_z_est), inv_z_est);
+
+    // u = (fx * cx/cz + cx_intr) / width, v = (fy * cy/cz + cy_intr) / height
+    let u4 = vmulq_n_f32(
+        vfmaq_n_f32(vdupq_n_f32(cx), vmulq_f32(cx4, inv_z), fx),
+        1.0 / width,
+    );
+    let v4 = vmulq_n_f32(
+        vfmaq_n_f32(vdupq_n_f32(cy), vmulq_f32(cy4, inv_z), fy),
+        1.0 / height,
+    );
+
+    // Points behind camera get (2.0, 2.0)
+    let oob = vdupq_n_f32(2.0);
+    let u_out = vbslq_f32(behind, oob, u4);
+    let v_out = vbslq_f32(behind, oob, v4);
+
+    vst1q_f32(frame.proj_u.as_mut_ptr().add(i), u_out);
+    vst1q_f32(frame.proj_v.as_mut_ptr().add(i), v_out);
 }
 
 #[cfg(test)]
