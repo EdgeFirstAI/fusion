@@ -21,12 +21,12 @@ pub enum PCDSource {
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// radar input topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/radar/clusters")]
+    /// radar input topic. leave empty to disable radar fusion
+    #[arg(long, env, default_value = "")]
     pub radar_pcd_topic: String,
 
-    /// lidar input topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/lidar/clusters")]
+    /// lidar input topic. leave empty to disable lidar fusion
+    #[arg(long, env, default_value = "")]
     pub lidar_pcd_topic: String,
 
     /// lidar fusion output topic. leave empty to disable

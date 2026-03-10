@@ -141,6 +141,7 @@ edgefirst-fusion \
   --model model.rtm \
   --engine npu \
   --track \
+  --radar-pcd-topic rt/radar/clusters \
   --grid-src radar
 ```
 
@@ -148,6 +149,7 @@ edgefirst-fusion \
 
 ```bash
 edgefirst-fusion \
+  --lidar-pcd-topic rt/lidar/clusters \
   --bbox3d-src lidar \
   --grid-src lidar
 ```
@@ -159,7 +161,7 @@ edgefirst-fusion \
   --radar-pcd-topic rt/radar/clusters \
   --lidar-pcd-topic rt/lidar/clusters \
   --camera-topic rt/camera/dma \
-  --mask-topic rt/model/mask \
+  --vision-model-topic rt/model/output \
   --model model.rtm
 ```
 
@@ -175,18 +177,18 @@ edgefirst-fusion --help
 
 **Sensor Input Topics:**
 
-- `--radar-pcd-topic <TOPIC>` - Radar point cloud input (default: `rt/radar/clusters`)
-- `--lidar-pcd-topic <TOPIC>` - LiDAR point cloud input (default: `rt/lidar/clusters`)
+- `--radar-pcd-topic <TOPIC>` - Radar point cloud input (default: empty/disabled)
+- `--lidar-pcd-topic <TOPIC>` - LiDAR point cloud input (default: empty/disabled)
 - `--camera-topic <TOPIC>` - Camera DMA buffer input (default: `rt/camera/dma`)
 - `--radarcube-topic <TOPIC>` - Radar cube input (default: `rt/radar/cube`)
-- `--mask-topic <TOPIC>` - Segmentation mask input (default: `rt/model/mask`)
-- `--boxes2d-topic <TOPIC>` - 2D detection boxes input for instance-level fusion (default: `rt/model/boxes2d`). Set to empty to disable.
+- `--vision-model-topic <TOPIC>` - Unified vision model output (default: `rt/model/output`)
+- `--model-info-topic <TOPIC>` - Model info for label resolution (default: `rt/model/info`)
 - `--info-topic <TOPIC>` - Camera info input (default: `rt/camera/info`)
 
 **Output Topics:**
 
 - `--radar-output-topic <TOPIC>` - Enriched radar point cloud (default: `rt/fusion/radar`)
-- `--lidar-output-topic <TOPIC>` - Enriched LiDAR point cloud (default: empty/disabled)
+- `--lidar-output-topic <TOPIC>` - Enriched LiDAR point cloud (default: `rt/fusion/lidar`)
 - `--grid-topic <TOPIC>` - Occupancy grid output (default: `rt/fusion/occupancy`)
 - `--bbox3d-topic <TOPIC>` - 3D bounding boxes output (default: `rt/fusion/boxes3d`)
 - `--model-output-topic <TOPIC>` - Model predictions output (default: `rt/fusion/model_output`)
@@ -203,7 +205,7 @@ edgefirst-fusion --help
 
 **Vision & Instance Detection:**
 
-- `--max-mask-age <SECS>` - Maximum age in seconds for mask/boxes2d data before warning (default: `0.5`, 0 = disabled)
+- `--max-model-age <SECS>` - Maximum age in seconds for model output data before warning (default: `0.5`, 0 = disabled)
 
 **Tracking Configuration:**
 
@@ -300,6 +302,7 @@ fusion/
 │   ├── mask.rs            # Segmentation mask processing, flood fill
 │   ├── pcd.rs             # Point cloud parsing and serialization
 │   ├── transform.rs       # 3D-to-2D projection, coordinate transforms
+│   ├── simd.rs           # NEON SIMD kernels (aarch64) with scalar fallback
 │   ├── tracker.rs         # ByteTrack multi-object tracker
 │   └── kalman.rs          # Kalman filter for state estimation
 ├── tflitec-sys/           # TensorFlow Lite C API FFI bindings
@@ -326,8 +329,8 @@ fusion/
 # Check that the camera publishes CameraInfo
 zenoh-cli query "rt/camera/info"
 
-# Check that the vision model publishes segmentation masks
-zenoh-cli query "rt/model/mask"
+# Check that the vision model publishes model output
+zenoh-cli query "rt/model/output"
 ```
 
 **Problem: "Did not find transform from base_link" warning**

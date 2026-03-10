@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-03-10
+
+### Added
+
+- Dynamic projection using `tf_static` camera transform — camera extrinsics are now resolved from the TF tree instead of hardcoded
+- Deterministic FNV-1a `track_id` hash for stable cross-process track identification
+- SoA `FusionFrame` layout replacing `ParsedPoint` AoS for cache-friendly processing
+- NEON SIMD optimizations for aarch64: vectorized sincos, atan2, magnitude3, and transform+project kernels
+- Per-sensor output topics: `rt/fusion/lidar` and `rt/fusion/radar` replacing shared `rt/fusion/classes`
+- Dynamic `track_id(u32)` in late-fusion output — detected at runtime from model output, expands PCD layout from 16 to 20 bytes/point
+- Unified `--vision-model-topic` (`rt/model/output`) replacing separate `--mask-topic` and `--boxes2d-topic`
+- `--model-info-topic` for dynamic label resolution from model service
+- Conditional grid publisher — only created when fusion model is configured
+
+### Changed
+
+- Sensor input topics (`--lidar-pcd-topic`, `--radar-pcd-topic`) now default to empty (disabled); set to `rt/lidar/points`, `rt/lidar/clusters`, etc. to enable each fusion pipeline
+- Late-fusion output uses compact `vision_class(u16)` + `instance_id(u16)` layout (16 bytes/point, was 24 bytes/point with u8 + u8 + u32 + cluster_id) for natural alignment and reduced bandwidth
+- `--max-model-age` replaces `--max-mask-age` for unified vision model staleness check
+- Updated `fusion.default` with new topic names and parameters
+
+### Removed
+
+- `--mask-topic`, `--boxes2d-topic` CLI parameters (replaced by `--vision-model-topic`)
+- `--classes-topic`, `--tracks-topic` CLI parameters (replaced by per-sensor `--lidar-output-topic`, `--radar-output-topic`)
+- `serialize_tracks` output (tracking data now integrated into per-sensor output)
+
 ## [1.6.0] - 2026-02-26
 
 ### Added

@@ -30,11 +30,11 @@ graph TB
         RadarSub["rt/radar/clusters<br/>PointCloud2"]
         LidarSub["rt/lidar/clusters<br/>PointCloud2"]
         CameraSub["rt/camera/dma<br/>DmaBuffer"]
-        MaskSub["rt/model/mask<br/>Mask"]
+        ModelSub["rt/model/output<br/>Model"]
         InfoSub["rt/camera/info<br/>CameraInfo"]
         TFSub["rt/tf_static<br/>TransformStamped"]
         CubeSub["rt/radar/cube<br/>RadarCube"]
-        Boxes2dSub["rt/model/boxes2d<br/>Detect"]
+        ModelInfoSub["rt/model/info<br/>ModelInfo"]
     end
 
     subgraph "Main Thread (Tokio Async Runtime)"
@@ -51,7 +51,7 @@ graph TB
     end
 
     subgraph "Background Tasks"
-        MaskTask["Mask Handler<br/>Subscribes to mask topic<br/>Updates shared state"]
+        ModelTask["Model Output Handler<br/>Subscribes to model output<br/>Updates shared state"]
         TFTask["TF Static Publisher<br/>1 Hz broadcast"]
     end
 
@@ -67,8 +67,8 @@ graph TB
     LidarSub --> LidarThread
     CameraSub --> ModelThread
     CubeSub --> ModelThread
-    MaskSub --> MaskTask
-    Boxes2dSub --> Init
+    ModelSub --> ModelTask
+    ModelInfoSub --> Init
     InfoSub --> Init
     TFSub --> Init
 
@@ -80,19 +80,19 @@ graph TB
     LidarThread --> BBoxOut
     ModelThread --> ModelOut
 
-    MaskTask -.->|"shared state"| RadarThread
-    MaskTask -.->|"shared state"| LidarThread
+    ModelTask -.->|"shared state"| RadarThread
+    ModelTask -.->|"shared state"| LidarThread
     Init -.->|"shared state"| RadarThread
     Init -.->|"shared state"| LidarThread
     ModelThread -.->|"grid predictions"| RadarThread
     ModelThread -.->|"grid predictions"| LidarThread
-    Init -.->|"boxes2d shared state"| RadarThread
-    Init -.->|"boxes2d shared state"| LidarThread
+    Init -.->|"model info shared state"| RadarThread
+    Init -.->|"model info shared state"| LidarThread
 ```
 
 ### Key Architectural Properties
 
-- **Shared State via Mutex**: Camera info, segmentation masks, transforms, model predictions, and 2D detection boxes are shared between threads using `tokio::sync::Mutex`
+- **Shared State via Mutex**: Camera info, model output, transforms, model predictions, and model info are shared between threads using `tokio::sync::Mutex`
 - **Dedicated Fusion Threads**: Radar and LiDAR processing each run in their own thread with a dedicated single-threaded Tokio runtime
 - **Independent Model Thread**: ML inference runs independently, publishing predictions consumed by fusion threads
 - **Drain-on-Receive**: Fusion threads drain old messages and process only the latest, preventing queue buildup
@@ -109,7 +109,7 @@ graph TB
 - Initialize Zenoh session and declare all subscribers/publishers
 - Set up shared state (camera info, transforms, mask)
 - Spawn dedicated processing threads
-- Launch background tasks (TF static publisher, mask handler)
+- Launch background tasks (TF static publisher, model output handler)
 
 **Execution Model:**
 
@@ -119,7 +119,7 @@ The main thread runs within `#[tokio::main]` and coordinates startup:
 2. Initialize tracing (stdout, journald, Tracy)
 3. Open Zenoh session
 4. Set up shared state with `Arc<Mutex<_>>`
-5. Spawn mask handler thread
+5. Spawn model output handler thread
 6. Spawn fusion model thread
 7. Spawn radar and LiDAR fusion threads
 8. Wait for fusion threads to complete
@@ -187,13 +187,11 @@ graph TD
 
 ---
 
-### Mask Handler Thread
+### Model Output Handler
 
 **Responsibilities:**
 
-- Subscribe to segmentation mask topic
-- Deserialize and store latest mask in shared state
-- Compute argmax across mask channels
+Subscribes to unified vision model output topic. Deserializes detection boxes, instance segmentation masks, and semantic segmentation. Updates shared state for fusion threads.
 
 **Thread Count:** 1
 
@@ -214,10 +212,10 @@ Threads communicate through shared state protected by `tokio::sync::Mutex`:
 | State | Writer | Readers | Purpose |
 |-------|--------|---------|---------|
 | `CameraInfo` | Main thread (subscriber callback) | Fusion threads | Camera calibration matrix |
-| `Mask` | Mask handler thread | Fusion threads | Segmentation mask for late fusion |
+| `ModelOutput` | Model output handler | Fusion threads | Segmentation mask for late fusion |
 | `Transform` | Main thread (subscriber callback) | Fusion threads | Sensor-to-base_link transforms |
 | `Grid` | Model thread | Fusion threads | ML model occupancy predictions |
-| `Boxes2d` | `boxes2d_callback` (Zenoh cb) | Fusion threads | Detection boxes for instance-level identification |
+| `ModelInfo` | `model_info_callback` (Zenoh cb) | Fusion threads | Model info for dynamic label resolution |
 
 ### Drain-Receive Pattern
 
@@ -241,8 +239,8 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 | `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
 | `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame as DMA buffer |
 | `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
-| `rt/model/mask` | `edgefirst_msgs/Mask` | Vision model segmentation mask |
-| `rt/model/boxes2d` | `edgefirst_msgs/Detect` | 2D detection boxes for instance-level fusion |
+| `rt/model/output` | `edgefirst_msgs/Model` | Unified vision model output (boxes, masks, segmentation) |
+| `rt/model/info` | `edgefirst_msgs/ModelInfo` | Model info for dynamic label resolution |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
 | `rt/tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |
 
@@ -250,7 +248,8 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `rt/fusion/radar` | `sensor_msgs/PointCloud2` | Radar PCD with vision_class + fusion_class fields |
+| `rt/fusion/radar` | `sensor_msgs/PointCloud2` | Radar PCD with vision_class + instance_id fields |
+| `rt/fusion/lidar` | `sensor_msgs/PointCloud2` | LiDAR PCD with vision_class + instance_id fields |
 | `rt/fusion/occupancy` | `sensor_msgs/PointCloud2` | Occupancy grid as point cloud |
 | `rt/fusion/boxes3d` | `edgefirst_msgs/Detect` | 3D bounding boxes from clustered points |
 | `rt/fusion/model_output` | `edgefirst_msgs/Mask` | Raw ML model grid output |
@@ -262,10 +261,11 @@ The fusion output adds classification fields to input point clouds:
 | Field | Type | Description |
 |-------|------|-------------|
 | `x`, `y`, `z` | FLOAT32 | 3D coordinates (base_link frame) |
-| `cluster_id` | UINT32 | Cluster identifier (from input) |
-| `vision_class` | UINT8 | Class from camera mask projection or boxes2d detection |
-| `fusion_class` | UINT8 | Class from ML model grid prediction |
-| `instance_id` | UINT32 | Instance identifier from boxes2d detection track ID (0 = no instance) |
+| `vision_class` | UINT16 | Class from vision model projection |
+| `instance_id` | UINT16 | Instance identifier (0 = no instance) |
+| `track_id` | UINT32 | Track hash (only present when tracking detected, 0 = untracked) |
+
+> **Note:** When a fusion model is configured (early/mid fusion), the output uses a different layout with fusion_class(u8), vision_class(u8), and instance_id(u16).
 
 ---
 
@@ -347,7 +347,7 @@ Key instrumented functions use `#[instrument]` attributes:
 - `load_data` - Shared state acquisition timing
 - `fusion` - Core fusion pipeline timing
 - `publish` - Zenoh publishing timing
-- `publish_bbox3d`, `publish_pcd`, `publish_grid` - Individual output timing
+- `publish_bbox3d`, `publish_output`, `publish_grid` - Individual output timing
 
 Frame marks track the fusion loop iteration rate.
 
