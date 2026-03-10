@@ -16,41 +16,49 @@ RUST_LOG = "info"
 # Sensor Input Topics
 # ---------------------------------------------------------------------------
 
-# Radar point cloud input topic. Typically rt/radar/clusters for clustered
-# targets with better stability, or rt/radar/targets for raw detections.
-# Set to "" to disable radar fusion.
-RADAR_PCD_TOPIC = "rt/radar/clusters"
+# Radar point cloud input topic. Set to enable radar late-fusion pipeline.
+# Typical values: rt/radar/clusters (clustered targets with better stability)
+# or rt/radar/targets (raw detections). Leave empty to disable radar fusion.
+RADAR_PCD_TOPIC = ""
 
-# LiDAR point cloud input topic. Typically rt/lidar/clusters for clustered
-# points, or rt/lidar/points for raw unclustered points.
-# Set to "" to disable LiDAR fusion.
-LIDAR_PCD_TOPIC = "rt/lidar/clusters"
+# LiDAR point cloud input topic. Set to enable LiDAR late-fusion pipeline.
+# Typical values: rt/lidar/clusters (clustered points with cluster_id field)
+# or rt/lidar/points (raw unclustered points). Leave empty to disable LiDAR fusion.
+LIDAR_PCD_TOPIC = ""
 
-# Segmentation mask input topic. Used to classify projected sensor points.
-MASK_TOPIC = "rt/model/mask"
+# Unified vision model output topic. Subscribes to detection boxes, instance
+# segmentation masks, and semantic segmentation from the model service.
+# Set to "" to disable vision fusion.
+VISION_MODEL_TOPIC = "rt/model/output"
+
+# Model info topic for dynamic label resolution. Provides the class label
+# list from the model service so fusion can map label strings to class indices.
+# Set to "" to disable (labels default to numeric indices).
+MODEL_INFO_TOPIC = "rt/model/info"
 
 # Camera intrinsics topic. The camera matrix is used to project 3D sensor
-# points onto the 2D segmentation mask.
+# points onto the 2D image plane for vision fusion.
 INFO_TOPIC = "rt/camera/info"
 
-# 2D detection boxes input topic for instance-level identification. When
-# available, each detection box assigns an instance_id to sensor points that
-# project inside it. Set to "" to disable (segmentation-only mode).
-BOXES2D_TOPIC = "rt/model/boxes2d"
+# Note: The service also subscribes to rt/tf_static for camera extrinsics
+# (position and orientation relative to sensors). This topic follows the ROS
+# TF convention and is not configurable.
 
 # ---------------------------------------------------------------------------
 # Fusion Output Topics
 # ---------------------------------------------------------------------------
 
-# Radar fusion output topic. Publishes radar points annotated with vision_class,
-# fusion_class, and instance_id. Set to "" to disable.
+# Radar fusion output topic. Only active when RADAR_PCD_TOPIC is set.
+# Publishes radar points annotated with vision_class and instance_id
+# (plus track_id when tracking is detected). Late-fusion layout is
+# 16 bytes/point (20 with tracking). Set to "" to disable publishing.
 RADAR_OUTPUT_TOPIC = "rt/fusion/radar"
 
-# LiDAR fusion output topic. Publishes LiDAR points annotated with vision_class,
-# fusion_class, and instance_id. Enabling this has a performance cost due to the
-# large number of LiDAR points and will approximately halve the output rate of
-# any LiDAR-based outputs. Set to "" to disable.
-LIDAR_OUTPUT_TOPIC = ""
+# LiDAR fusion output topic. Only active when LIDAR_PCD_TOPIC is set.
+# Publishes LiDAR points annotated with vision_class and instance_id
+# (plus track_id when tracking is detected). Late-fusion layout is
+# 16 bytes/point (20 with tracking). Set to "" to disable publishing.
+LIDAR_OUTPUT_TOPIC = "rt/fusion/lidar"
 
 # 3D bounding box output topic.
 BBOX3D_TOPIC = "rt/fusion/boxes3d"
@@ -68,10 +76,10 @@ GRID_SRC = "radar"
 # Vision & Instance Detection
 # ---------------------------------------------------------------------------
 
-# Maximum age in seconds for mask and boxes2d data relative to the current
+# Maximum age in seconds for model output data relative to the current
 # point cloud frame. A warning is logged when stale data is used for fusion.
 # Set to 0 to disable the staleness check.
-MAX_MASK_AGE = "0.5"
+MAX_MODEL_AGE = "0.5"
 
 # ---------------------------------------------------------------------------
 # Radar Fusion Model
