@@ -137,10 +137,6 @@ pub fn parse_pcd(pcd: &PointCloud2) -> FusionFrame {
 /// vision_class(u8) instance_id(u16) = 16 bytes/point
 const CLASSES_POINT_STEP: u32 = 16;
 
-/// Tracks topic point layout: x(f32) y(f32) z(f32) track_id(u32)
-/// = 16 bytes/point
-const TRACKS_POINT_STEP: u32 = 16;
-
 /// Build the PointField descriptors for the classes topic.
 fn classes_fields() -> Vec<PointField> {
     vec![
@@ -183,8 +179,11 @@ fn classes_fields() -> Vec<PointField> {
     ]
 }
 
-/// Build the PointField descriptors for the tracks topic.
-fn tracks_fields() -> Vec<PointField> {
+/// Late-fusion point layout: x(f32) y(f32) z(f32) vision_class(u16)
+/// instance_id(u16) = 16 bytes/point
+const LATE_FUSION_POINT_STEP: u32 = 16;
+
+fn late_fusion_fields() -> Vec<PointField> {
     vec![
         PointField {
             name: "x".into(),
@@ -205,12 +204,51 @@ fn tracks_fields() -> Vec<PointField> {
             count: 1,
         },
         PointField {
-            name: TRACK_ID.into(),
+            name: "vision_class".into(),
             offset: 12,
-            datatype: point_field::UINT32,
+            datatype: point_field::UINT16,
+            count: 1,
+        },
+        PointField {
+            name: "instance_id".into(),
+            offset: 14,
+            datatype: point_field::UINT16,
             count: 1,
         },
     ]
+}
+
+/// Serialize late-fusion output: x y z vision_class(u16) instance_id(u16).
+/// Used when no fusion model is active (no fusion_class field).
+#[instrument(skip_all)]
+pub fn serialize_late_fusion(
+    frame: &FusionFrame,
+    header: &edgefirst_schemas::std_msgs::Header,
+) -> PointCloud2 {
+    let n = frame.len;
+    let step = LATE_FUSION_POINT_STEP as usize;
+    let mut data = vec![0u8; n * step];
+
+    for i in 0..n {
+        let base = i * step;
+        data[base..base + 4].copy_from_slice(&frame.x[i].to_le_bytes());
+        data[base + 4..base + 8].copy_from_slice(&frame.y[i].to_le_bytes());
+        data[base + 8..base + 12].copy_from_slice(&frame.z[i].to_le_bytes());
+        data[base + 12..base + 14].copy_from_slice(&(frame.vision_class[i] as u16).to_le_bytes());
+        data[base + 14..base + 16].copy_from_slice(&frame.instance_id[i].to_le_bytes());
+    }
+
+    PointCloud2 {
+        header: header.clone(),
+        height: 1,
+        width: n as u32,
+        fields: late_fusion_fields(),
+        is_bigendian: false,
+        point_step: LATE_FUSION_POINT_STEP,
+        row_step: data.len() as u32,
+        data,
+        is_dense: true,
+    }
 }
 
 /// Serialize xyzc (16 bytes/point) for rt/fusion/classes.
@@ -243,39 +281,6 @@ pub fn serialize_classes(
         fields: classes_fields(),
         is_bigendian: false,
         point_step: CLASSES_POINT_STEP,
-        row_step: data.len() as u32,
-        data,
-        is_dense: true,
-    }
-}
-
-/// Serialize xyzt (16 bytes/point) for rt/fusion/tracks.
-///
-/// Layout per point: x(f32) y(f32) z(f32) track_id(u32)
-#[instrument(skip_all)]
-pub fn serialize_tracks(
-    frame: &FusionFrame,
-    header: &edgefirst_schemas::std_msgs::Header,
-) -> PointCloud2 {
-    let n = frame.len;
-    let step = TRACKS_POINT_STEP as usize;
-    let mut data = vec![0u8; n * step];
-
-    for i in 0..n {
-        let base = i * step;
-        data[base..base + 4].copy_from_slice(&frame.x[i].to_le_bytes());
-        data[base + 4..base + 8].copy_from_slice(&frame.y[i].to_le_bytes());
-        data[base + 8..base + 12].copy_from_slice(&frame.z[i].to_le_bytes());
-        data[base + 12..base + 16].copy_from_slice(&frame.track_id[i].to_le_bytes());
-    }
-
-    PointCloud2 {
-        header: header.clone(),
-        height: 1,
-        width: n as u32,
-        fields: tracks_fields(),
-        is_bigendian: false,
-        point_step: TRACKS_POINT_STEP,
         row_step: data.len() as u32,
         data,
         is_dense: true,
@@ -510,28 +515,43 @@ mod tests {
     }
 
     #[test]
-    fn serialize_tracks_roundtrip() {
+    fn serialize_late_fusion_roundtrip() {
         let mut frame = FusionFrame::new(2);
         frame.x = vec![1.5, 4.0];
         frame.y = vec![2.5, 5.0];
         frame.z = vec![3.5, 6.0];
-        frame.track_id = vec![1000, 2000];
+        frame.vision_class = vec![5, 200];
+        frame.instance_id = vec![100, 99];
         frame.len = 2;
 
         let header = test_header();
-        let pcd = serialize_tracks(&frame, &header);
+        let pcd = serialize_late_fusion(&frame, &header);
 
         assert_eq!(pcd.point_step, 16);
         assert_eq!(pcd.width, 2);
         assert_eq!(pcd.data.len(), 32);
+        assert_eq!(pcd.fields.len(), 5);
+        assert_eq!(pcd.fields[3].name, "vision_class");
+        assert_eq!(pcd.fields[3].datatype, point_field::UINT16);
 
-        // Point 0: track_id at offset 12
-        let val = u32::from_le_bytes(pcd.data[12..16].try_into().unwrap());
-        assert_eq!(val, 1000);
+        // Point 0
+        assert_eq!(f32::from_le_bytes(pcd.data[0..4].try_into().unwrap()), 1.5);
+        assert_eq!(u16::from_le_bytes(pcd.data[12..14].try_into().unwrap()), 5);
+        assert_eq!(
+            u16::from_le_bytes(pcd.data[14..16].try_into().unwrap()),
+            100
+        );
 
-        // Point 1: track_id at offset 28
-        let val = u32::from_le_bytes(pcd.data[28..32].try_into().unwrap());
-        assert_eq!(val, 2000);
+        // Point 1
+        assert_eq!(
+            f32::from_le_bytes(pcd.data[16..20].try_into().unwrap()),
+            4.0
+        );
+        assert_eq!(
+            u16::from_le_bytes(pcd.data[28..30].try_into().unwrap()),
+            200
+        );
+        assert_eq!(u16::from_le_bytes(pcd.data[30..32].try_into().unwrap()), 99);
     }
 
     #[test]

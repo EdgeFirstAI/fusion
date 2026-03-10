@@ -14,7 +14,7 @@ use edgefirst_schemas::{
 use fusion_model::spawn_fusion_model_thread;
 use log::{error, trace, warn};
 use mask::{mask_instance, process_mask, resolve_box_label, Box2D};
-use pcd::{parse_pcd, serialize_classes, serialize_grid, serialize_tracks, FusionFrame};
+use pcd::{parse_pcd, serialize_classes, serialize_grid, serialize_late_fusion, FusionFrame};
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -172,42 +172,22 @@ async fn main() {
 
     let (radar_sub, lidar_sub, grid_publ, bbox_publ) = declare_sub_pub(&session, &args).await;
 
-    // Declare per-context publishers for the shared output topics.
+    // Declare per-context publishers for the per-sensor output topics.
     // Each fusion thread needs its own publisher instance.
-    let radar_classes_publ = if !args.classes_topic.is_empty() {
+    let radar_output_publ = if !args.radar_output_topic.is_empty() {
         Some(
             session
-                .declare_publisher(args.classes_topic.clone())
+                .declare_publisher(args.radar_output_topic.clone())
                 .await
                 .expect("Failed to declare Zenoh publisher"),
         )
     } else {
         None
     };
-    let radar_tracks_publ = if !args.tracks_topic.is_empty() {
+    let lidar_output_publ = if !args.lidar_output_topic.is_empty() {
         Some(
             session
-                .declare_publisher(args.tracks_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh publisher"),
-        )
-    } else {
-        None
-    };
-    let lidar_classes_publ = if !args.classes_topic.is_empty() {
-        Some(
-            session
-                .declare_publisher(args.classes_topic.clone())
-                .await
-                .expect("Failed to declare Zenoh publisher"),
-        )
-    } else {
-        None
-    };
-    let lidar_tracks_publ = if !args.tracks_topic.is_empty() {
-        Some(
-            session
-                .declare_publisher(args.tracks_topic.clone())
+                .declare_publisher(args.lidar_output_topic.clone())
                 .await
                 .expect("Failed to declare Zenoh publisher"),
         )
@@ -231,8 +211,7 @@ async fn main() {
     let mut zenoh_radar = ZenohCtx {
         session: session.clone(),
         pcd_sub: radar_sub,
-        classes_publ: radar_classes_publ,
-        tracks_publ: radar_tracks_publ,
+        output_publ: radar_output_publ,
         grid_publ: None,
         bbox_publ: None,
     };
@@ -240,8 +219,7 @@ async fn main() {
     let mut zenoh_lidar = ZenohCtx {
         session,
         pcd_sub: lidar_sub,
-        classes_publ: lidar_classes_publ,
-        tracks_publ: lidar_tracks_publ,
+        output_publ: lidar_output_publ,
         grid_publ: None,
         bbox_publ: None,
     };
@@ -261,10 +239,12 @@ async fn main() {
         model_info: model_labels,
     };
 
-    match args.grid_src {
-        PCDSource::Radar => zenoh_radar.grid_publ = Some(grid_publ),
-        PCDSource::Lidar => zenoh_lidar.grid_publ = Some(grid_publ),
-        _ => {}
+    if let Some(gp) = grid_publ {
+        match args.grid_src {
+            PCDSource::Radar => zenoh_radar.grid_publ = Some(gp),
+            PCDSource::Lidar => zenoh_lidar.grid_publ = Some(gp),
+            _ => {}
+        }
     }
 
     match args.bbox3d_src {
@@ -356,7 +336,7 @@ async fn declare_sub_pub(
 ) -> (
     Option<Subscriber<FifoChannelHandler<Sample>>>,
     Option<Subscriber<FifoChannelHandler<Sample>>>,
-    Publisher<'static>,
+    Option<Publisher<'static>>,
     Publisher<'static>,
 ) {
     let radar_sub = if !args.radar_pcd_topic.is_empty() {
@@ -381,10 +361,16 @@ async fn declare_sub_pub(
         None
     };
 
-    let grid_publ = session
-        .declare_publisher(args.grid_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh publisher");
+    let grid_publ = if args.has_fusion_model() && !args.grid_topic.is_empty() {
+        Some(
+            session
+                .declare_publisher(args.grid_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
 
     let bbox_publ = session
         .declare_publisher(args.bbox3d_topic.clone())
@@ -411,8 +397,7 @@ pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHa
 pub struct ZenohCtx {
     session: Session,
     pcd_sub: Option<Subscriber<FifoChannelHandler<Sample>>>,
-    classes_publ: Option<Publisher<'static>>,
-    tracks_publ: Option<Publisher<'static>>,
+    output_publ: Option<Publisher<'static>>,
     grid_publ: Option<Publisher<'static>>,
     bbox_publ: Option<Publisher<'static>>,
 }
@@ -576,8 +561,10 @@ async fn fusion(
     drop(model_labels_guard);
     drop(model_guard);
 
-    let fusion_predictions = get_fusion_predictions(track, tracker, grid, args, session).await;
-    get_fusion_class(frame, &fusion_predictions, &ids);
+    if args.has_fusion_model() {
+        let fusion_predictions = get_fusion_predictions(track, tracker, grid, args, session).await;
+        get_fusion_class(frame, &fusion_predictions, &ids);
+    }
 
     ids
 }
@@ -664,9 +651,12 @@ async fn publish(
 ) {
     let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), header, frame, ids);
 
-    let publ_classes = publish_classes(zenoh.classes_publ.as_ref(), frame, header);
-
-    let publ_tracks = publish_tracks(zenoh.tracks_publ.as_ref(), frame, header);
+    let publ_output = publish_output(
+        zenoh.output_publ.as_ref(),
+        frame,
+        header,
+        args.has_fusion_model(),
+    );
 
     let publ_grid = publish_grid(
         zenoh.grid_publ.as_ref(),
@@ -678,7 +668,7 @@ async fn publish(
         ids,
     );
 
-    join!(publ_bbox, publ_classes, publ_tracks, publ_grid);
+    join!(publ_bbox, publ_output, publ_grid);
 }
 
 /// Hash a track ID string to a u32 using FNV-1a.
@@ -1137,27 +1127,21 @@ async fn publish_bbox3d(
 }
 
 #[instrument(skip_all)]
-async fn publish_classes(publ: Option<&Publisher<'_>>, frame: &FusionFrame, header: &Header) {
+async fn publish_output(
+    publ: Option<&Publisher<'_>>,
+    frame: &FusionFrame,
+    header: &Header,
+    has_fusion_model: bool,
+) {
     let publ = match publ {
         Some(p) => p,
         None => return,
     };
-    let pcd = serialize_classes(frame, header);
-    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
-    let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
-    match publ.put(buf).encoding(enc).await {
-        Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
-        Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
-    }
-}
-
-#[instrument(skip_all)]
-async fn publish_tracks(publ: Option<&Publisher<'_>>, frame: &FusionFrame, header: &Header) {
-    let publ = match publ {
-        Some(p) => p,
-        None => return,
+    let pcd = if has_fusion_model {
+        serialize_classes(frame, header)
+    } else {
+        serialize_late_fusion(frame, header)
     };
-    let pcd = serialize_tracks(frame, header);
     let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
     match publ.put(buf).encoding(enc).await {

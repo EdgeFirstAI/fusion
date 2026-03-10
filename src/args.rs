@@ -29,13 +29,13 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/lidar/clusters")]
     pub lidar_pcd_topic: String,
 
-    /// classes output topic (xyzc). leave empty to disable
-    #[arg(long, env, default_value = "rt/fusion/classes")]
-    pub classes_topic: String,
+    /// lidar fusion output topic. leave empty to disable
+    #[arg(long, env, default_value = "rt/fusion/lidar")]
+    pub lidar_output_topic: String,
 
-    /// tracks output topic (xyzt). leave empty to disable
-    #[arg(long, env, default_value = "")]
-    pub tracks_topic: String,
+    /// radar fusion output topic. leave empty to disable
+    #[arg(long, env, default_value = "rt/fusion/radar")]
+    pub radar_output_topic: String,
 
     /// camera info input topic
     #[arg(long, env, default_value = "rt/camera/info")]
@@ -192,6 +192,11 @@ pub struct Args {
 }
 
 impl Args {
+    /// Returns true when a fusion model is configured (early/mid fusion mode).
+    pub fn has_fusion_model(&self) -> bool {
+        self.model.is_some()
+    }
+
     /// Normalize parsed arguments: convert empty strings to None for optional
     /// path parameters, and filter empty strings from endpoint lists. This
     /// allows setting `MODEL = ""` or `CONNECT = ""` in environment files to
