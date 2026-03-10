@@ -30,7 +30,7 @@ graph TB
         RadarSub["rt/radar/clusters<br/>PointCloud2"]
         LidarSub["rt/lidar/clusters<br/>PointCloud2"]
         CameraSub["rt/camera/dma<br/>DmaBuffer"]
-        ModelSub["rt/model/output<br/>Detect"]
+        ModelSub["rt/model/output<br/>Model"]
         InfoSub["rt/camera/info<br/>CameraInfo"]
         TFSub["rt/tf_static<br/>TransformStamped"]
         CubeSub["rt/radar/cube<br/>RadarCube"]
@@ -239,7 +239,7 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 | `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
 | `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame as DMA buffer |
 | `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
-| `rt/model/output` | `edgefirst_msgs/Detect` | Unified vision model output (boxes, masks, segmentation) |
+| `rt/model/output` | `edgefirst_msgs/Model` | Unified vision model output (boxes, masks, segmentation) |
 | `rt/model/info` | `edgefirst_msgs/ModelInfo` | Model info for dynamic label resolution |
 | `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
 | `rt/tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |

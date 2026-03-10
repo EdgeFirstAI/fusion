@@ -162,8 +162,6 @@ edgefirst-fusion \
   --lidar-pcd-topic rt/lidar/clusters \
   --camera-topic rt/camera/dma \
   --vision-model-topic rt/model/output \
-  --lidar-pcd-topic rt/lidar/clusters \
-  --radar-pcd-topic rt/radar/clusters \
   --model model.rtm
 ```
 
