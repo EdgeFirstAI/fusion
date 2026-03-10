@@ -439,7 +439,6 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
         };
         let frame = parse_pcd(&pcd);
         let header = pcd.header;
-        // frame_id will be overwritten below
         (header, frame)
     };
 
@@ -1263,7 +1262,7 @@ fn get_3d_bbox(
         boxes: bbox_3d,
         header: Header {
             stamp: header.stamp.clone(),
-            frame_id: format!("{BASE_LINK_FRAME_ID}_optical"),
+            frame_id: header.frame_id.clone(),
         },
     };
     let msg = ZBytes::from(serde_cdr::serialize(&new_msg).unwrap());

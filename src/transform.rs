@@ -54,16 +54,15 @@ impl Mat4 {
     }
 }
 
-/// Transform points from their source frame to base_link (in-place), then
-/// project them into normalized [0,1] image coordinates using the camera
-/// optical frame transform and intrinsics.
+/// Project points into normalized [0,1] image coordinates using the sensor
+/// and camera transforms combined with camera intrinsics.
 ///
-/// `lidar_transform`: tf_static base_link -> lidar (transforms lidar points to base_link)
+/// `lidar_transform`: tf_static base_link -> sensor (used to compose sensor-to-camera transform)
 /// `cam_transform`:   tf_static base_link -> camera_optical
 /// `cam_mtx`:         3x3 intrinsic matrix K (row-major: fx, 0, cx, 0, fy, cy, 0, 0, 1)
 /// `image_dims`:      (width, height) in pixels
 ///
-/// After this call, `frame.x/y/z` are in the base_link frame.
+/// Point XYZ coordinates are **not modified** — they remain in the original sensor frame.
 /// Projection results are stored in `frame.proj_u` and `frame.proj_v`.
 /// Points behind the camera get coordinates outside [0,1].
 #[instrument(skip_all)]
@@ -81,7 +80,6 @@ pub(crate) fn transform_and_project_points(
     let t_base_cam = isometry_from_transform(cam_transform);
     let t_cam_lidar = t_base_cam.inverse() * t_base_lidar;
 
-    let base_m = Mat4::from_nalgebra(&t_base_lidar.to_matrix());
     let cam_m = Mat4::from_nalgebra(&t_cam_lidar.to_matrix());
 
     let fx = cam_mtx[0];
@@ -99,19 +97,19 @@ pub(crate) fn transform_and_project_points(
         for c in 0..chunks {
             let i = c * 4;
             unsafe {
-                neon_transform_project_4(frame, i, &base_m, &cam_m, fx, fy, cx, cy, width, height);
+                neon_transform_project_4(frame, i, &cam_m, fx, fy, cx, cy, width, height);
             }
         }
         // Scalar remainder
         for i in (chunks * 4)..n {
-            scalar_transform_project(frame, i, &base_m, &cam_m, fx, fy, cx, cy, width, height);
+            scalar_transform_project(frame, i, &cam_m, fx, fy, cx, cy, width, height);
         }
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     {
         for i in 0..n {
-            scalar_transform_project(frame, i, &base_m, &cam_m, fx, fy, cx, cy, width, height);
+            scalar_transform_project(frame, i, &cam_m, fx, fy, cx, cy, width, height);
         }
     }
 }
@@ -121,7 +119,6 @@ pub(crate) fn transform_and_project_points(
 fn scalar_transform_project(
     frame: &mut FusionFrame,
     i: usize,
-    base_m: &Mat4,
     cam_m: &Mat4,
     fx: f32,
     fy: f32,
@@ -134,13 +131,7 @@ fn scalar_transform_project(
     let oy = frame.y[i];
     let oz = frame.z[i];
 
-    // Transform to base_link
-    let (bx, by, bz) = base_m.transform_point(ox, oy, oz);
-    frame.x[i] = bx;
-    frame.y[i] = by;
-    frame.z[i] = bz;
-
-    // Transform to camera frame for projection
+    // Transform to camera frame for projection (XYZ stays in sensor frame)
     let (camx, camy, camz) = cam_m.transform_point(ox, oy, oz);
 
     if camz <= 0.0 {
@@ -159,7 +150,6 @@ fn scalar_transform_project(
 unsafe fn neon_transform_project_4(
     frame: &mut FusionFrame,
     i: usize,
-    base_m: &Mat4,
     cam_m: &Mat4,
     fx: f32,
     fy: f32,
@@ -170,7 +160,6 @@ unsafe fn neon_transform_project_4(
 ) {
     use std::arch::aarch64::*;
 
-    let bm = &base_m.0;
     let cm = &cam_m.0;
 
     // Load 4 points from SoA columns
@@ -178,30 +167,7 @@ unsafe fn neon_transform_project_4(
     let y4 = vld1q_f32(frame.y.as_ptr().add(i));
     let z4 = vld1q_f32(frame.z.as_ptr().add(i));
 
-    // Base-link transform: result = M * [x, y, z, 1]^T (row-major)
-    // row 0: bm[0]*x + bm[1]*y + bm[2]*z + bm[3]
-    let bx = vfmaq_n_f32(
-        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(bm[3]), x4, bm[0]), y4, bm[1]),
-        z4,
-        bm[2],
-    );
-    let by = vfmaq_n_f32(
-        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(bm[7]), x4, bm[4]), y4, bm[5]),
-        z4,
-        bm[6],
-    );
-    let bz = vfmaq_n_f32(
-        vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(bm[11]), x4, bm[8]), y4, bm[9]),
-        z4,
-        bm[10],
-    );
-
-    // Store base_link coords
-    vst1q_f32(frame.x.as_mut_ptr().add(i), bx);
-    vst1q_f32(frame.y.as_mut_ptr().add(i), by);
-    vst1q_f32(frame.z.as_mut_ptr().add(i), bz);
-
-    // Camera-frame transform (from original lidar coords)
+    // Camera-frame transform for projection (XYZ stays in sensor frame)
     let cx4 = vfmaq_n_f32(
         vfmaq_n_f32(vfmaq_n_f32(vdupq_n_f32(cm[3]), x4, cm[0]), y4, cm[1]),
         z4,
@@ -368,7 +334,7 @@ mod projection_test {
             frame.proj_v[0]
         );
 
-        // frame.x/y/z should still be in base_link frame (unchanged since lidar_tf is identity)
+        // frame.x/y/z should be unchanged (remain in the original sensor frame)
         assert!((frame.x[0] - 10.0).abs() < 0.001);
         assert!((frame.y[0] - 0.0).abs() < 0.001);
         assert!((frame.z[0] - 0.0).abs() < 0.001);
