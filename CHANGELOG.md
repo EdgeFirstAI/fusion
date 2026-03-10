@@ -7,13 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-03-10
+
+### Fixed
+
+- Removed erroneous base_link transform that was modifying point XYZ coordinates — fusion output now preserves original sensor-frame coordinates unchanged
+- bbox3d output `frame_id` now uses the source sensor frame_id instead of `base_link_optical`
+
 ## [1.7.1] - 2026-03-10
 
 ### Fixed
 
 - Output `frame_id` on `rt/fusion/lidar` and `rt/fusion/radar` now preserves the source sensor frame_id instead of incorrectly using `base_link`
-- Removed erroneous base_link transform that was modifying point XYZ coordinates — fusion output now preserves original sensor-frame coordinates unchanged
-- bbox3d output `frame_id` now uses the source sensor frame_id instead of `base_link_optical`
 
 ### Changed
 
