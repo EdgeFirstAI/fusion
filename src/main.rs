@@ -577,6 +577,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     let mut bins = Vec::new();
     let mut frame_index = 0;
     let mut timeout = DrainRecvTimeoutSettings::default();
+    let mut tracking_detected = false;
 
     let mut tracker = ByteTrack::new_with_settings(ByteTrackSettings {
         track_high_conf: 0.5,
@@ -618,6 +619,13 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
         )
         .await;
 
+        // Detect tracking from model output: once any track_id is non-zero,
+        // enable tracked output layout for the rest of the session.
+        if !tracking_detected && frame.track_id.iter().any(|&t| t != 0) {
+            tracking_detected = true;
+            log::info!("Tracking detected in model output, enabling track_id in output topic");
+        }
+
         publish(
             &zenoh,
             args,
@@ -627,6 +635,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             &mut tracker,
             &mut bins,
             frame_index,
+            tracking_detected,
         )
         .await;
 
@@ -648,6 +657,7 @@ async fn publish(
     point_tracker: &mut ByteTrack,
     bins: &mut [Vec<Bin>],
     frame_index: u128,
+    tracking: bool,
 ) {
     let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), header, frame, ids);
 
@@ -656,6 +666,7 @@ async fn publish(
         frame,
         header,
         args.has_fusion_model(),
+        tracking,
     );
 
     let publ_grid = publish_grid(
@@ -1132,6 +1143,7 @@ async fn publish_output(
     frame: &FusionFrame,
     header: &Header,
     has_fusion_model: bool,
+    tracking: bool,
 ) {
     let publ = match publ {
         Some(p) => p,
@@ -1140,7 +1152,7 @@ async fn publish_output(
     let pcd = if has_fusion_model {
         serialize_classes(frame, header)
     } else {
-        serialize_late_fusion(frame, header)
+        serialize_late_fusion(frame, header, tracking)
     };
     let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");

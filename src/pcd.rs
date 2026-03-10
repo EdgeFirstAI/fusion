@@ -183,6 +183,10 @@ fn classes_fields() -> Vec<PointField> {
 /// instance_id(u16) = 16 bytes/point
 const LATE_FUSION_POINT_STEP: u32 = 16;
 
+/// Late-fusion point layout with tracking: x(f32) y(f32) z(f32)
+/// vision_class(u16) instance_id(u16) track_id(u32) = 20 bytes/point
+const LATE_FUSION_TRACKED_POINT_STEP: u32 = 20;
+
 fn late_fusion_fields() -> Vec<PointField> {
     vec![
         PointField {
@@ -204,13 +208,13 @@ fn late_fusion_fields() -> Vec<PointField> {
             count: 1,
         },
         PointField {
-            name: "vision_class".into(),
+            name: VISION_CLASS.into(),
             offset: 12,
             datatype: point_field::UINT16,
             count: 1,
         },
         PointField {
-            name: "instance_id".into(),
+            name: INSTANCE_ID.into(),
             offset: 14,
             datatype: point_field::UINT16,
             count: 1,
@@ -218,15 +222,33 @@ fn late_fusion_fields() -> Vec<PointField> {
     ]
 }
 
+fn late_fusion_tracked_fields() -> Vec<PointField> {
+    let mut fields = late_fusion_fields();
+    fields.push(PointField {
+        name: TRACK_ID.into(),
+        offset: 16,
+        datatype: point_field::UINT32,
+        count: 1,
+    });
+    fields
+}
+
 /// Serialize late-fusion output: x y z vision_class(u16) instance_id(u16).
+/// When `tracking` is true, appends track_id(u32) for 20 bytes/point.
 /// Used when no fusion model is active (no fusion_class field).
 #[instrument(skip_all)]
 pub fn serialize_late_fusion(
     frame: &FusionFrame,
     header: &edgefirst_schemas::std_msgs::Header,
+    tracking: bool,
 ) -> PointCloud2 {
     let n = frame.len;
-    let step = LATE_FUSION_POINT_STEP as usize;
+    let (point_step, fields) = if tracking {
+        (LATE_FUSION_TRACKED_POINT_STEP, late_fusion_tracked_fields())
+    } else {
+        (LATE_FUSION_POINT_STEP, late_fusion_fields())
+    };
+    let step = point_step as usize;
     let mut data = vec![0u8; n * step];
 
     for i in 0..n {
@@ -236,15 +258,18 @@ pub fn serialize_late_fusion(
         data[base + 8..base + 12].copy_from_slice(&frame.z[i].to_le_bytes());
         data[base + 12..base + 14].copy_from_slice(&(frame.vision_class[i] as u16).to_le_bytes());
         data[base + 14..base + 16].copy_from_slice(&frame.instance_id[i].to_le_bytes());
+        if tracking {
+            data[base + 16..base + 20].copy_from_slice(&frame.track_id[i].to_le_bytes());
+        }
     }
 
     PointCloud2 {
         header: header.clone(),
         height: 1,
         width: n as u32,
-        fields: late_fusion_fields(),
+        fields,
         is_bigendian: false,
-        point_step: LATE_FUSION_POINT_STEP,
+        point_step,
         row_step: data.len() as u32,
         data,
         is_dense: true,
@@ -525,7 +550,7 @@ mod tests {
         frame.len = 2;
 
         let header = test_header();
-        let pcd = serialize_late_fusion(&frame, &header);
+        let pcd = serialize_late_fusion(&frame, &header, false);
 
         assert_eq!(pcd.point_step, 16);
         assert_eq!(pcd.width, 2);
@@ -552,6 +577,53 @@ mod tests {
             200
         );
         assert_eq!(u16::from_le_bytes(pcd.data[30..32].try_into().unwrap()), 99);
+    }
+
+    #[test]
+    fn serialize_late_fusion_tracked_roundtrip() {
+        let mut frame = FusionFrame::new(2);
+        frame.x = vec![1.5, 4.0];
+        frame.y = vec![2.5, 5.0];
+        frame.z = vec![3.5, 6.0];
+        frame.vision_class = vec![5, 200];
+        frame.instance_id = vec![100, 99];
+        frame.track_id = vec![0xDEAD_BEEF, 42];
+        frame.len = 2;
+
+        let header = test_header();
+        let pcd = serialize_late_fusion(&frame, &header, true);
+
+        assert_eq!(pcd.point_step, 20);
+        assert_eq!(pcd.width, 2);
+        assert_eq!(pcd.data.len(), 40);
+        assert_eq!(pcd.fields.len(), 6);
+        assert_eq!(pcd.fields[5].name, "track_id");
+        assert_eq!(pcd.fields[5].datatype, point_field::UINT32);
+        assert_eq!(pcd.fields[5].offset, 16);
+
+        // Point 0
+        assert_eq!(f32::from_le_bytes(pcd.data[0..4].try_into().unwrap()), 1.5);
+        assert_eq!(u16::from_le_bytes(pcd.data[12..14].try_into().unwrap()), 5);
+        assert_eq!(
+            u16::from_le_bytes(pcd.data[14..16].try_into().unwrap()),
+            100
+        );
+        assert_eq!(
+            u32::from_le_bytes(pcd.data[16..20].try_into().unwrap()),
+            0xDEAD_BEEF
+        );
+
+        // Point 1
+        assert_eq!(
+            f32::from_le_bytes(pcd.data[20..24].try_into().unwrap()),
+            4.0
+        );
+        assert_eq!(
+            u16::from_le_bytes(pcd.data[32..34].try_into().unwrap()),
+            200
+        );
+        assert_eq!(u16::from_le_bytes(pcd.data[34..36].try_into().unwrap()), 99);
+        assert_eq!(u32::from_le_bytes(pcd.data[36..40].try_into().unwrap()), 42);
     }
 
     #[test]
