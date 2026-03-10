@@ -471,7 +471,7 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
         );
     let header = Header {
         stamp: header.stamp,
-        frame_id: BASE_LINK_FRAME_ID.to_string(),
+        frame_id: pcd_frame_id.clone(),
     };
 
     let cam_info = match data.info.lock().await {

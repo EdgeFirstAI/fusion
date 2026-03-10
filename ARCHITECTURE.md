@@ -145,7 +145,7 @@ graph TD
 
 1. **Receive**: Drain Zenoh subscription queue, process only the latest message. Includes exponential backoff timeout (2s → 1h) when no data arrives.
 2. **Load**: Acquire locks on shared camera info, transforms, and segmentation mask. Skip frame if any required data is unavailable.
-3. **Project**: Apply TF transform (sensor frame → base_link), then project 3D points to 2D camera coordinates using the camera intrinsic matrix.
+3. **Project**: Using the TF transform (base_link → sensor) and camera intrinsics, project 3D points to 2D camera coordinates. The original point XYZ values are **not modified** — the projection is used only to determine which pixel each point maps to for classification. The output retains the original sensor-frame coordinates and `frame_id`.
 4. **Late Fusion (Vision)**: For each projected point, sample the segmentation mask to assign a class label. Supports both clustered (per-cluster majority vote) and non-clustered (per-point) modes.
 5. **Model Fusion**: Apply ML model grid predictions to classify points based on spatial proximity to predicted occupancy cells.
 6. **Track**: ByteTrack tracker associates detections across frames using IoU matching and Kalman filtering. Maintains object persistence for configurable duration after disappearing.
@@ -260,7 +260,7 @@ The fusion output adds classification fields to input point clouds:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `x`, `y`, `z` | FLOAT32 | 3D coordinates (base_link frame) |
+| `x`, `y`, `z` | FLOAT32 | 3D coordinates (unchanged from source, in the original sensor frame) |
 | `vision_class` | UINT16 | Class from vision model projection |
 | `instance_id` | UINT16 | Instance identifier (0 = no instance) |
 | `track_id` | UINT32 | Track hash (only present when tracking detected, 0 = untracked) |

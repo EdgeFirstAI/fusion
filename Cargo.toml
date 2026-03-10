@@ -3,7 +3,7 @@ name = "edgefirst-fusion"
 description = "EdgeFirst Fusion"
 repository = "https://github.com/EdgeFirstAI/fusion"
 license = "Apache-2.0"
-version = "1.7.0"
+version = "1.7.1"
 edition = "2021"
 rust-version = "1.82"
 
