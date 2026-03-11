@@ -5,6 +5,7 @@ use edgefirst_schemas::sensor_msgs::{point_field, PointCloud2, PointField};
 use log::warn;
 use tracing::instrument;
 
+use crate::mask::UNCLASSIFIED;
 use crate::{FUSION_CLASS, INSTANCE_ID, TRACK_ID, VISION_CLASS};
 
 /// Structure-of-Arrays representation of a point cloud frame with fusion
@@ -38,8 +39,8 @@ impl FusionFrame {
             cluster_id: Vec::new(),
             proj_u: Vec::new(),
             proj_v: Vec::new(),
-            vision_class: vec![0; capacity],
-            fusion_class: vec![0; capacity],
+            vision_class: vec![UNCLASSIFIED; capacity],
+            fusion_class: vec![UNCLASSIFIED; capacity],
             instance_id: vec![0; capacity],
             track_id: vec![0; capacity],
         }
