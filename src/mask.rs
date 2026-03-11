@@ -5,9 +5,18 @@ use edgefirst_schemas::edgefirst_msgs::Mask;
 use itertools::Itertools;
 use tracing::instrument;
 
-// Finds the argmax of the slice. Panics if the slice is empty
+/// Sentinel value for points not classified by the vision model.
+/// Using u8::MAX (255) reserves it as a sentinel; valid class indices are 0..=254.
+pub const UNCLASSIFIED: u8 = u8::MAX;
+
+/// Finds the argmax of the slice. Panics if the slice is empty.
+/// Indices >= 255 are clamped to UNCLASSIFIED (out-of-range for valid classes).
 pub fn argmax_slice<T: Ord>(slice: &[T]) -> u8 {
-    slice.iter().position_max().unwrap() as u8
+    slice
+        .iter()
+        .position_max()
+        .unwrap()
+        .min(UNCLASSIFIED as usize) as u8
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -55,18 +64,26 @@ pub fn process_mask(mask: &mut Mask) -> usize {
 }
 
 /// Resolve a box label to a u8 class index using the labels list.
-/// Index 0 is background (matching the mask argmax convention).
-pub fn resolve_box_label(label: &str, labels: Option<&[String]>) -> u8 {
+/// Returns `None` if the label is unrecognized or resolves to the reserved
+/// UNCLASSIFIED sentinel (255). Valid class indices are 0..=254.
+pub fn resolve_box_label(label: &str, labels: Option<&[String]>) -> Option<u8> {
     if let Some(labels) = labels {
         if let Some(idx) = labels.iter().position(|l| l == label) {
-            return idx.min(255) as u8;
+            let cls = idx.min(254) as u8;
+            return Some(cls);
         }
     }
-    label.parse::<u8>().unwrap_or(0)
+    match label.parse::<u8>() {
+        Ok(v) if v != UNCLASSIFIED => Some(v),
+        _ => None,
+    }
 }
 
+/// Find connected regions of same-class pixels and return bounding boxes.
+/// If `skip` is Some(class), that class is excluded from instance detection
+/// (e.g., background in multi-channel argmaxed masks).
 #[instrument(skip_all)]
-pub fn mask_instance(mask: &[u8], width: usize) -> Vec<Box2D> {
+pub fn mask_instance(mask: &[u8], width: usize, skip: Option<u8>) -> Vec<Box2D> {
     let offsets = [-1, 1, -(width as isize), width as isize];
     let mut visited = vec![false; mask.len()];
     let mut boxes = Vec::new();
@@ -75,7 +92,7 @@ pub fn mask_instance(mask: &[u8], width: usize) -> Vec<Box2D> {
             continue;
         }
         let val = mask[ind];
-        if val == 0 {
+        if skip == Some(val) {
             continue;
         }
         boxes.push(flood_fill(mask, &mut visited, ind, &offsets, width));
@@ -124,9 +141,6 @@ fn get_valid_neighbours(
     width: usize,
 ) -> Vec<usize> {
     let r = mask[ind];
-    if r == 0 {
-        return Vec::new();
-    }
     let col = ind % width;
     offsets
         .iter()
@@ -154,4 +168,82 @@ fn get_valid_neighbours(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mask_instance_no_skip_includes_class_zero() {
+        // 3x3 mask: class 0 fills the top row, class 1 fills the bottom rows
+        #[rustfmt::skip]
+        let mask = vec![
+            0, 0, 0,
+            1, 1, 1,
+            1, 1, 1,
+        ];
+        let boxes = mask_instance(&mask, 3, None);
+        let labels: Vec<u8> = boxes.iter().map(|b| b.label).collect();
+        assert!(
+            labels.contains(&0),
+            "class 0 should be included when skip is None"
+        );
+        assert!(labels.contains(&1), "class 1 should be included");
+    }
+
+    #[test]
+    fn test_mask_instance_skip_class_zero() {
+        #[rustfmt::skip]
+        let mask = vec![
+            0, 0, 0,
+            1, 1, 1,
+            1, 1, 1,
+        ];
+        let boxes = mask_instance(&mask, 3, Some(0));
+        let labels: Vec<u8> = boxes.iter().map(|b| b.label).collect();
+        assert!(!labels.contains(&0), "class 0 should be skipped");
+        assert!(labels.contains(&1), "class 1 should still be included");
+    }
+
+    #[test]
+    fn test_mask_instance_skip_last_channel() {
+        // Simulates argmaxed 3-channel mask where channel 2 is background
+        #[rustfmt::skip]
+        let mask = vec![
+            2, 2, 2,
+            0, 0, 2,
+            1, 1, 2,
+        ];
+        let boxes = mask_instance(&mask, 3, Some(2));
+        let labels: Vec<u8> = boxes.iter().map(|b| b.label).collect();
+        assert!(!labels.contains(&2), "background channel should be skipped");
+        assert!(labels.contains(&0), "class 0 should be included");
+        assert!(labels.contains(&1), "class 1 should be included");
+    }
+
+    #[test]
+    fn test_argmax_slice_large_index() {
+        // Slice with 256 elements where the max is at index 255
+        let mut data = vec![0u8; 256];
+        data[255] = 1;
+        assert_eq!(
+            argmax_slice(&data),
+            255,
+            "index 255 should be returned as-is"
+        );
+    }
+
+    #[test]
+    fn test_argmax_slice_overflow_clamps() {
+        // Slice with 257 elements where the max is at index 256
+        // Without clamping this would wrap to 0 via `as u8`
+        let mut data = vec![0u8; 257];
+        data[256] = 1;
+        assert_eq!(
+            argmax_slice(&data),
+            UNCLASSIFIED,
+            "index >= 256 should clamp to UNCLASSIFIED"
+        );
+    }
 }

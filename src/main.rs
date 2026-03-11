@@ -13,7 +13,7 @@ use edgefirst_schemas::{
 };
 use fusion_model::spawn_fusion_model_thread;
 use log::{error, trace, warn};
-use mask::{mask_instance, process_mask, resolve_box_label, Box2D};
+use mask::{mask_instance, process_mask, resolve_box_label, Box2D, UNCLASSIFIED};
 use pcd::{parse_pcd, serialize_classes, serialize_grid, serialize_late_fusion, FusionFrame};
 use std::{
     collections::HashMap,
@@ -556,7 +556,7 @@ async fn fusion(
     let model_labels_guard = data.model_info.lock().await;
     let labels = model_labels_guard.as_deref();
 
-    get_vision_class_and_instance(frame, model_ref, &ids, labels);
+    get_vision_class_and_instance(frame, model_ref, &ids, labels, args.background_index);
     drop(model_labels_guard);
     drop(model_guard);
 
@@ -708,20 +708,13 @@ pub fn hash_track_id(track_id: &str) -> u32 {
 }
 
 /// Parse a detection box label string to u8 class index.
-///
-/// When a `labels` list is provided (from `ModelInfo`), the label is looked up
-/// by string and its index is returned (0 = background, matching the mask
-/// argmax convention). Falls back to numeric parsing, then to 0.
-fn parse_box_label(label: &str, labels: Option<&[String]>) -> u8 {
-    if let Some(labels) = labels {
-        if let Some(idx) = labels.iter().position(|l| l == label) {
-            return idx.min(255) as u8;
-        }
+/// Delegates to [`resolve_box_label`] and logs an error on failure.
+fn parse_box_label(label: &str, labels: Option<&[String]>) -> Option<u8> {
+    let cls = resolve_box_label(label, labels);
+    if cls.is_none() {
+        error!("Unrecognized box label '{}', skipping box", label);
     }
-    label.parse::<u8>().unwrap_or_else(|_| {
-        warn!("Unknown box label '{}', defaulting to 0", label);
-        0
-    })
+    cls
 }
 
 /// Assign each projected point to the detection box whose centre is nearest.
@@ -730,6 +723,16 @@ fn parse_box_label(label: &str, labels: Option<&[String]>) -> u8 {
 /// by iteration order (first box in `detect.boxes` wins), which is
 /// deterministic for a given detection frame.
 fn box_fusion_no_cluster(frame: &mut FusionFrame, boxes: &[DetectBox], labels: Option<&[String]>) {
+    // Pre-resolve labels once per box to avoid repeated parsing/logging per point
+    let resolved: Vec<Option<(u8, u16, u32)>> = boxes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            parse_box_label(&b.label, labels)
+                .map(|cls| (cls, (i + 1) as u16, hash_track_id(&b.track.id)))
+        })
+        .collect();
+
     let n = frame.len;
     for i in 0..n {
         let px = frame.proj_u[i];
@@ -738,26 +741,31 @@ fn box_fusion_no_cluster(frame: &mut FusionFrame, boxes: &[DetectBox], labels: O
             continue;
         }
         let mut best_dist2 = f32::MAX;
-        let mut best_class = 0u8;
+        let mut best_class: Option<u8> = None;
         let mut best_instance = 0u16;
         let mut best_track = 0u32;
 
         for (box_idx, b) in boxes.iter().enumerate() {
+            let Some((label, instance, track)) = resolved[box_idx] else {
+                continue;
+            };
             let half_w = b.width / 2.0;
             let half_h = b.height / 2.0;
             if (px - b.center_x).abs() <= half_w && (py - b.center_y).abs() <= half_h {
                 let dist2 = (px - b.center_x).powi(2) + (py - b.center_y).powi(2);
                 if dist2 < best_dist2 {
                     best_dist2 = dist2;
-                    best_class = parse_box_label(&b.label, labels);
-                    best_instance = (box_idx + 1) as u16;
-                    best_track = hash_track_id(&b.track.id);
+                    best_class = Some(label);
+                    best_instance = instance;
+                    best_track = track;
                 }
             }
         }
-        frame.vision_class[i] = best_class;
-        frame.instance_id[i] = best_instance;
-        frame.track_id[i] = best_track;
+        if let Some(cls) = best_class {
+            frame.vision_class[i] = cls;
+            frame.instance_id[i] = best_instance;
+            frame.track_id[i] = best_track;
+        }
     }
 }
 
@@ -773,7 +781,9 @@ fn box_fusion_clustered(
     for (box_idx, b) in boxes.iter().enumerate() {
         let half_w = b.width / 2.0;
         let half_h = b.height / 2.0;
-        let label = parse_box_label(&b.label, labels);
+        let Some(label) = parse_box_label(&b.label, labels) else {
+            continue;
+        };
         let instance = (box_idx + 1) as u16;
         let track = hash_track_id(&b.track.id);
 
@@ -797,7 +807,7 @@ fn box_fusion_clustered(
         {
             let entry = cluster_assignment
                 .entry(best_cluster)
-                .or_insert((0, 0, 0, 0));
+                .or_insert((UNCLASSIFIED, 0, 0, 0));
             if best_count > entry.3 {
                 *entry = (label, instance, track, best_count);
             }
@@ -820,6 +830,7 @@ fn get_vision_class_and_instance(
     model: Option<&Model>,
     ids: &HashMap<u32, Vec<usize>>,
     labels: Option<&[String]>,
+    background_index: i16,
 ) {
     let model = match model {
         Some(m) => m,
@@ -835,11 +846,14 @@ fn get_vision_class_and_instance(
         } else {
             // Semantic segmentation: process full-frame mask
             let mut mask = first_mask.clone();
-            process_mask(&mut mask);
+            let channels = process_mask(&mut mask);
+            if mask.mask.is_empty() || mask.width == 0 || mask.height == 0 {
+                return;
+            }
             if frame.has_clusters() {
-                late_fusion_clustered(frame, &mask, ids);
+                late_fusion_clustered(frame, &mask, ids, channels, background_index);
             } else {
-                late_fusion_no_cluster(frame, &mask, 0.02);
+                late_fusion_no_cluster(frame, &mask);
             }
             return;
         }
@@ -863,7 +877,7 @@ struct PreparedBoxMask {
     class_idx: u8,
     instance_id: u16,
     track_id: u32,
-    /// True if the mask went through argmax (values are class indices, 0=bg)
+    /// True if the mask went through argmax (values are class indices)
     argmaxed: bool,
     /// Box bounds in normalized [0,1] image coordinates
     x0: f32,
@@ -873,6 +887,9 @@ struct PreparedBoxMask {
 }
 
 /// Prepare per-box masks: decompress/argmax, resolve labels, compute box bounds.
+/// For single-channel confidence masks, an unresolved label skips the box.
+/// For argmaxed masks (channels > 1), the class comes from the pixel value
+/// so label resolution is not required.
 fn prepare_box_masks(
     masks: &[Mask],
     boxes: &[DetectBox],
@@ -890,11 +907,14 @@ fn prepare_box_masks(
             if w == 0 || h == 0 || m.mask.len() != w * h {
                 return None;
             }
-            let class_idx = resolve_box_label(&det_box.label, labels);
-            if class_idx == 0 {
-                return None;
-            }
             let argmaxed = channels > 1;
+            // For argmaxed masks the pixel value is the class; label is only
+            // needed for single-channel confidence masks.
+            let class_idx = if argmaxed {
+                parse_box_label(&det_box.label, labels).unwrap_or(0)
+            } else {
+                parse_box_label(&det_box.label, labels)?
+            };
             let half_w = det_box.width / 2.0;
             let half_h = det_box.height / 2.0;
             Some(PreparedBoxMask {
@@ -926,7 +946,7 @@ const MAX_INSTANCE_DEPTH_SPREAD: f32 = 1.0;
 /// in normalized image coordinates. Returns (class, instance, track).
 fn lookup_point_in_masks(u: f32, v: f32, prepared: &[PreparedBoxMask]) -> (u8, u16, u32) {
     let mut best_score = 0u8;
-    let mut best = (0u8, 0u16, 0u32);
+    let mut best = (UNCLASSIFIED, 0u16, 0u32);
     for bm in prepared {
         if u < bm.x0 || u > bm.x1 || v < bm.y0 || v > bm.y1 {
             continue;
@@ -938,10 +958,11 @@ fn lookup_point_in_masks(u: f32, v: f32, prepared: &[PreparedBoxMask]) -> (u8, u
         let my = (rel_y * bm.height as f32) as usize;
         let val = bm.mask[my * bm.width + mx];
         if bm.argmaxed {
-            // Argmaxed: val is a class index (0=background). First hit wins.
-            if val > 0 {
-                return (bm.class_idx, bm.instance_id, bm.track_id);
+            // Argmaxed: val is a class index. First hit wins.
+            if val != UNCLASSIFIED {
+                return (val, bm.instance_id, bm.track_id);
             }
+            continue;
         } else {
             // Single-channel confidence: pick highest above threshold.
             if val >= MASK_THRESHOLD && val > best_score {
@@ -954,7 +975,7 @@ fn lookup_point_in_masks(u: f32, v: f32, prepared: &[PreparedBoxMask]) -> (u8, u
 }
 
 /// Remove outlier points from each instance based on depth. Points farther
-/// than MAX_INSTANCE_DEPTH_SPREAD from the median depth are reset to 0.
+/// than MAX_INSTANCE_DEPTH_SPREAD from the median depth are reset to unclassified.
 fn filter_depth_outliers(frame: &mut FusionFrame) {
     let n = frame.len;
 
@@ -982,7 +1003,7 @@ fn filter_depth_outliers(frame: &mut FusionFrame) {
         // Remove points too far from the median
         for &idx in indices {
             if (all_depths[idx] - median).abs() > MAX_INSTANCE_DEPTH_SPREAD {
-                frame.vision_class[idx] = 0;
+                frame.vision_class[idx] = UNCLASSIFIED;
                 frame.instance_id[idx] = 0;
                 frame.track_id[idx] = 0;
             }
@@ -1018,15 +1039,17 @@ fn boxed_mask_fusion_no_cluster(frame: &mut FusionFrame, prepared: &[PreparedBox
             continue;
         }
         let (cls, inst, trk) = lookup_point_in_masks(u, v, prepared);
-        frame.vision_class[i] = cls;
-        frame.instance_id[i] = inst;
-        frame.track_id[i] = trk;
+        if cls != UNCLASSIFIED {
+            frame.vision_class[i] = cls;
+            frame.instance_id[i] = inst;
+            frame.track_id[i] = trk;
+        }
     }
 
     // Edge tolerance: check 8 surrounding points for unclassified pixels
     let point_radius = 0.02f32;
     for i in 0..n {
-        if frame.vision_class[i] != 0 {
+        if frame.vision_class[i] != UNCLASSIFIED {
             continue;
         }
         let u = frame.proj_u[i];
@@ -1038,7 +1061,7 @@ fn boxed_mask_fusion_no_cluster(frame: &mut FusionFrame, prepared: &[PreparedBox
                 continue;
             }
             let (cls, inst, trk) = lookup_point_in_masks(nu, nv, prepared);
-            if cls != 0 {
+            if cls != UNCLASSIFIED {
                 frame.vision_class[i] = cls;
                 frame.instance_id[i] = inst;
                 frame.track_id[i] = trk;
@@ -1065,7 +1088,7 @@ fn boxed_mask_fusion_clustered(
                 continue;
             }
             let (cls, inst, trk) = lookup_point_in_masks(u, v, prepared);
-            if cls > 0 {
+            if cls != UNCLASSIFIED {
                 let entry = votes.entry(inst).or_insert((cls, trk, 0));
                 entry.2 += 1;
             }
@@ -1188,9 +1211,9 @@ async fn publish_grid(
     }
 }
 
-// Gets 3D bounding boxes from the PCD points. Any clusters that have class > 0
-// will get a 3D bounding box generated. It is assumed that all points in the
-// same cluster ID will have the same class.
+// Gets 3D bounding boxes from the PCD points. Any classified cluster
+// (vision_class != UNCLASSIFIED) will get a 3D bounding box generated.
+// It is assumed that all points in the same cluster ID will have the same class.
 fn get_3d_bbox(
     header: &Header,
     frame: &FusionFrame,
@@ -1204,7 +1227,7 @@ fn get_3d_bbox(
 
         // assumes that all points with the same class ID has the same class
         let class = frame.vision_class[inds[0]];
-        if class == 0 {
+        if class == UNCLASSIFIED {
             continue;
         }
 
@@ -1371,13 +1394,15 @@ fn grid_nearest_cluster(
 }
 
 /// For each point, get the class of the point using the projection onto the
-/// mask. If point_radius > 0, then also checks 8 points in a circle around the
-/// projection, and uses the first non-zero class found as the class of
-/// the point.
+/// semantic segmentation mask (already argmax'd by `process_mask`).
+/// The mask pixel value is used directly as the class index, including
+/// background — fusion does not interpret classes.
 ///
-/// Assumes that the mask is already argmax'd
+/// Note: edge-tolerance (checking surrounding pixels for unclassified points)
+/// was removed because it relied on class 0 meaning "background". With the
+/// UNCLASSIFIED sentinel, all argmax results are valid classes.
 #[instrument(skip_all)]
-fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &Mask, point_radius: f32) {
+fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &Mask) {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
     let index_mask = |x: f32, y: f32| -> u8 {
@@ -1394,30 +1419,6 @@ fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &Mask, point_radius: f3
         }
         frame.vision_class[i] = index_mask(x, y);
     }
-
-    if point_radius <= 0.0 {
-        return;
-    }
-
-    for i in 0..frame.len {
-        if frame.vision_class[i] != 0 {
-            continue;
-        }
-        let x = frame.proj_u[i];
-        let y = frame.proj_v[i];
-        for &(sin_a, cos_a) in &EDGE_OFFSETS {
-            let new_x = x + point_radius * sin_a;
-            let new_y = y + point_radius * cos_a;
-            if !check_in_bounds(&new_x, &new_y) {
-                continue;
-            }
-            let argmax = index_mask(new_x, new_y);
-            if argmax != 0 {
-                frame.vision_class[i] = argmax;
-                break;
-            }
-        }
-    }
 }
 
 fn check_in_bounds(x: &f32, y: &f32) -> bool {
@@ -1433,6 +1434,8 @@ fn late_fusion_clustered(
     frame: &mut FusionFrame,
     mask: &Mask,
     clusters: &HashMap<u32, Vec<usize>>,
+    channels: usize,
+    background_index: i16,
 ) {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
@@ -1442,7 +1445,26 @@ fn late_fusion_clustered(
         mask.mask[y * mask_width + x]
     };
 
-    let bbox_2d = mask_instance(&mask.mask, mask_width);
+    // Determine which class to skip during instance detection so background
+    // doesn't form one giant blob claiming all clusters.
+    // Guard against selecting UNCLASSIFIED as a skip class (sentinel collision).
+    let skip_class = match background_index {
+        i if i < 0 && channels > 1 && (channels - 1) < UNCLASSIFIED as usize => {
+            Some((channels - 1) as u8)
+        }
+        i if i >= 0 && (i as usize) < channels && i as u8 != UNCLASSIFIED => Some(i as u8),
+        i => {
+            if channels > 1 {
+                warn!(
+                    "background_index {} invalid for {channels} channels; \
+                     instance detection will include background",
+                    i
+                );
+            }
+            None
+        }
+    };
+    let bbox_2d = mask_instance(&mask.mask, mask_width, skip_class);
     let mut bbox_id = Vec::new();
     for b in &bbox_2d {
         let mut bbox_cluster_ids = Vec::new();
@@ -1696,7 +1718,9 @@ fn centroids_update_tracker_classes(
             xmax: centroid.x[ind] + 0.5,
             ymin: centroid.y[ind] - 0.5,
             ymax: centroid.y[ind] + 0.5,
-            score: if centroid.vision_class[ind] > 0 || centroid.fusion_class[ind] > 0 {
+            score: if centroid.vision_class[ind] != UNCLASSIFIED
+                || centroid.fusion_class[ind] != UNCLASSIFIED
+            {
                 1.0
             } else {
                 0.3
@@ -1720,11 +1744,15 @@ fn centroids_update_tracker_classes(
         {
             continue;
         }
-        if boxes[i].vision_class == 0 {
-            centroid.vision_class[i] = point_tracker.uuid_map_vision_class[&uuid];
+        if boxes[i].vision_class == UNCLASSIFIED {
+            if let Some(hist) = point_tracker.uuid_class_histogram.get(&uuid) {
+                centroid.vision_class[i] = hist.majority_vision();
+            }
         }
-        if boxes[i].fusion_class == 0 {
-            centroid.fusion_class[i] = point_tracker.uuid_map_fusion_class[&uuid];
+        if boxes[i].fusion_class == UNCLASSIFIED {
+            if let Some(hist) = point_tracker.uuid_class_histogram.get(&uuid) {
+                centroid.fusion_class[i] = hist.majority_fusion();
+            }
         }
     }
 }
@@ -1753,18 +1781,17 @@ fn centroids_add_tracks(centroid: &mut FusionFrame, point_tracker: &mut ByteTrac
         centroid.z.push(0.0);
         centroid.cluster_id.push(0);
         // Extend annotation arrays
+        let hist = point_tracker.uuid_class_histogram.get(&i.id);
+        let vc = hist.map_or(UNCLASSIFIED, |h| h.majority_vision());
+        let fc = hist.map_or(UNCLASSIFIED, |h| h.majority_fusion());
         if centroid.len >= centroid.vision_class.len() {
-            centroid
-                .vision_class
-                .push(point_tracker.uuid_map_vision_class[&i.id]);
-            centroid
-                .fusion_class
-                .push(point_tracker.uuid_map_fusion_class[&i.id]);
+            centroid.vision_class.push(vc);
+            centroid.fusion_class.push(fc);
             centroid.instance_id.push(0);
             centroid.track_id.push(0);
         } else {
-            centroid.vision_class[centroid.len] = point_tracker.uuid_map_vision_class[&i.id];
-            centroid.fusion_class[centroid.len] = point_tracker.uuid_map_fusion_class[&i.id];
+            centroid.vision_class[centroid.len] = vc;
+            centroid.fusion_class[centroid.len] = fc;
             centroid.instance_id[centroid.len] = 0;
             centroid.track_id[centroid.len] = 0;
         }
@@ -1773,8 +1800,8 @@ fn centroids_add_tracks(centroid: &mut FusionFrame, point_tracker: &mut ByteTrac
     }
 }
 
-/// Returns the centroid of clusters that have non-zero class_id. All points in
-/// a class should have the same class_id
+/// Returns the centroid of classified clusters. All points in a cluster should
+/// have the same class.
 fn get_occupied_cluster(
     header: &Header,
     frame: &FusionFrame,
@@ -1782,7 +1809,6 @@ fn get_occupied_cluster(
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
     let mut centroid = centroids_get_class(cluster_ids, frame);
-    // want to track points that have class != 0
     let timestamp = header.stamp.to_nanos();
     centroids_update_tracker_classes(&mut centroid, point_tracker, timestamp);
     centroids_add_tracks(&mut centroid, point_tracker, timestamp);
@@ -1814,12 +1840,12 @@ fn update_bins(frame: &FusionFrame, bins: &mut [Vec<Bin>], args: &Args) {
         let i = ((angle - args.angle_bin_limit[0]) / args.angle_bin_width).floor() as usize;
         let j = ((range - args.range_bin_limit[0]) / args.range_bin_width).floor() as usize;
         let vision_class = frame.vision_class[ind];
-        if vision_class > 0 {
+        if vision_class != UNCLASSIFIED {
             bins[i][j].vision_classes.push(vision_class);
         }
 
         let fusion_class = frame.fusion_class[ind];
-        if fusion_class > 0 {
+        if fusion_class != UNCLASSIFIED {
             bins[i][j].fusion_classes.push(fusion_class);
         }
     }
@@ -2038,8 +2064,8 @@ fn mark_grid(bin: &mut Bin, curr: u128) {
 }
 
 fn draw_point(bins: &[Vec<Bin>], i: usize, j: usize, args: &Args) -> (f32, f32, u8, u8) {
-    let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&0);
-    let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&0);
+    let vision_class = *mode_slice(bins[i][j].vision_classes.as_slice()).unwrap_or(&UNCLASSIFIED);
+    let fusion_class = *mode_slice(bins[i][j].fusion_classes.as_slice()).unwrap_or(&UNCLASSIFIED);
 
     let angle = args.angle_bin_width * (i as f32 + 0.5) + args.angle_bin_limit[0];
     let range = args.range_bin_width * (j as f32 + 0.5) + args.range_bin_limit[0];
@@ -2185,8 +2211,8 @@ mod tests {
             "tracked box should have non-zero track_id"
         );
         assert_eq!(
-            frame.vision_class[1], 0,
-            "point outside box should get class 0"
+            frame.vision_class[1], UNCLASSIFIED,
+            "point outside box should stay unclassified"
         );
         assert_eq!(
             frame.instance_id[1], 0,
@@ -2250,7 +2276,7 @@ mod tests {
             "all points in cluster get same track_id"
         );
         assert_eq!(
-            frame.vision_class[2], 0,
+            frame.vision_class[2], UNCLASSIFIED,
             "losing cluster should not get class"
         );
         assert_eq!(
@@ -2267,8 +2293,8 @@ mod tests {
         box_fusion_no_cluster(&mut frame, &boxes, None);
 
         assert!(
-            frame.vision_class.iter().all(|&c| c == 0),
-            "all classes should be 0"
+            frame.vision_class.iter().all(|&c| c == UNCLASSIFIED),
+            "all classes should be unclassified"
         );
         assert!(
             frame.instance_id.iter().all(|&i| i == 0),
@@ -2299,43 +2325,40 @@ mod tests {
 
     #[test]
     fn test_parse_box_label_valid() {
-        assert_eq!(parse_box_label("0", None), 0);
-        assert_eq!(parse_box_label("1", None), 1);
-        assert_eq!(parse_box_label("255", None), 255);
+        assert_eq!(parse_box_label("0", None), Some(0));
+        assert_eq!(parse_box_label("1", None), Some(1));
+        assert_eq!(parse_box_label("254", None), Some(254));
+        // 255 is the UNCLASSIFIED sentinel, not a valid class
+        assert_eq!(parse_box_label("255", None), None);
     }
 
     #[test]
-    fn test_parse_box_label_empty_defaults_to_zero() {
-        assert_eq!(parse_box_label("", None), 0);
+    fn test_parse_box_label_empty_returns_none() {
+        assert_eq!(parse_box_label("", None), None);
     }
 
     #[test]
-    fn test_parse_box_label_non_numeric_defaults_to_zero() {
-        assert_eq!(parse_box_label("abc", None), 0);
+    fn test_parse_box_label_non_numeric_returns_none() {
+        assert_eq!(parse_box_label("abc", None), None);
     }
 
     #[test]
-    fn test_parse_box_label_out_of_range_defaults_to_zero() {
-        assert_eq!(parse_box_label("300", None), 0);
+    fn test_parse_box_label_out_of_range_returns_none() {
+        assert_eq!(parse_box_label("300", None), None);
     }
 
     #[test]
     fn test_parse_box_label_with_labels_list() {
-        let labels = vec![
-            "background".to_string(),
-            "person".to_string(),
-            "car".to_string(),
-        ];
-        assert_eq!(parse_box_label("person", Some(&labels)), 1);
-        assert_eq!(parse_box_label("car", Some(&labels)), 2);
-        assert_eq!(parse_box_label("background", Some(&labels)), 0);
+        let labels = vec!["person".to_string(), "car".to_string()];
+        assert_eq!(parse_box_label("person", Some(&labels)), Some(0));
+        assert_eq!(parse_box_label("car", Some(&labels)), Some(1));
     }
 
     #[test]
     fn test_parse_box_label_unknown_label_with_list() {
         let labels = vec!["person".to_string(), "car".to_string()];
-        assert_eq!(parse_box_label("truck", Some(&labels)), 0);
-        assert_eq!(parse_box_label("5", Some(&labels)), 5);
+        assert_eq!(parse_box_label("truck", Some(&labels)), None);
+        assert_eq!(parse_box_label("5", Some(&labels)), Some(5));
     }
 
     #[test]
@@ -2427,7 +2450,7 @@ mod tests {
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
 
-        get_vision_class_and_instance(&mut frame, Some(&model), &ids, None);
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, None, -1);
         assert_eq!(frame.vision_class[0], 2);
         assert_ne!(frame.instance_id[0], 0);
         assert_ne!(
@@ -2453,7 +2476,7 @@ mod tests {
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
 
-        get_vision_class_and_instance(&mut frame, Some(&model), &ids, None);
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, None, -1);
         assert_eq!(frame.vision_class[0], 3);
         assert_eq!(
             frame.instance_id[0], 0,
@@ -2485,10 +2508,10 @@ mod tests {
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (5.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
 
-        get_vision_class_and_instance(&mut frame, Some(&model), &ids, Some(&labels));
-        assert_ne!(
-            frame.vision_class[0], 0,
-            "point inside instance mask should get class"
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, Some(&labels), -1);
+        assert_eq!(
+            frame.vision_class[0], 1,
+            "point inside instance mask should get class 1 (person)"
         );
         assert_ne!(
             frame.instance_id[0], 0,
@@ -2499,8 +2522,8 @@ mod tests {
             "point inside instance mask should get track_id"
         );
         assert_eq!(
-            frame.vision_class[1], 0,
-            "point outside instance mask should be background"
+            frame.vision_class[1], UNCLASSIFIED,
+            "point outside instance mask should be unclassified"
         );
     }
 
@@ -2581,8 +2604,67 @@ mod tests {
         );
         assert_ne!(frame.track_id[1], 0, "point in box 2 should have track_id");
         assert_eq!(
-            frame.vision_class[2], 0,
-            "point outside boxes should be background"
+            frame.vision_class[2], UNCLASSIFIED,
+            "point outside boxes should be unclassified"
+        );
+    }
+
+    #[test]
+    fn test_box_fusion_class_zero_is_valid() {
+        // Class 0 (e.g., "person" at index 0) must be assigned, not treated as unclassified
+        let labels = vec!["person".to_string(), "car".to_string()];
+        let boxes = vec![make_box(0.5, 0.5, 0.2, 0.2, "person", "track-p")];
+        let proj = vec![[0.5, 0.5], [0.05, 0.05]];
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], None, &proj);
+        box_fusion_no_cluster(&mut frame, &boxes, Some(&labels));
+
+        assert_eq!(
+            frame.vision_class[0], 0,
+            "point inside box should get class 0 (person)"
+        );
+        assert_ne!(
+            frame.vision_class[0], UNCLASSIFIED,
+            "class 0 must not be confused with UNCLASSIFIED"
+        );
+        assert_eq!(frame.instance_id[0], 1);
+        assert_eq!(
+            frame.vision_class[1], UNCLASSIFIED,
+            "point outside box should stay unclassified"
+        );
+    }
+
+    #[test]
+    fn test_argmaxed_boxed_mask_returns_pixel_class() {
+        // 2-channel raw mask: process_mask will argmax it into class indices
+        // For a 2x2 mask with 2 channels, raw data is 8 bytes (interleaved per pixel)
+        // Pixel 0: [10, 5] → argmax = 0 (class 0)
+        // Pixel 1: [3, 8]  → argmax = 1 (class 1)
+        // Pixel 2: [3, 9]  → argmax = 1 (class 1)
+        // Pixel 3: [2, 7]  → argmax = 1 (class 1)
+        let labels = vec!["cat".to_string(), "dog".to_string()];
+        let mask = Mask {
+            width: 2,
+            height: 2,
+            length: 2,
+            encoding: String::new(),
+            mask: vec![10, 5, 3, 8, 3, 9, 2, 7],
+            boxed: true,
+        };
+        let det_box = make_box(0.5, 0.5, 1.0, 1.0, "cat", "track-am");
+        let model = make_model(vec![det_box], vec![mask]);
+        // Point 0 projects to top-left (class 0), point 1 to bottom-right (class 1)
+        let proj = vec![[0.1, 0.1], [0.9, 0.9]];
+        let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], None, &proj);
+        let ids = HashMap::new();
+
+        get_vision_class_and_instance(&mut frame, Some(&model), &ids, Some(&labels), -1);
+        assert_eq!(
+            frame.vision_class[0], 0,
+            "argmaxed mask pixel class 0 should be assigned directly"
+        );
+        assert_eq!(
+            frame.vision_class[1], 1,
+            "argmaxed mask pixel class 1 should be assigned directly"
         );
     }
 

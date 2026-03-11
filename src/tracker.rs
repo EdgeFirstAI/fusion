@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::kalman::ConstantVelocityXYAHModel2;
+use crate::mask::UNCLASSIFIED;
 use lapjv::{lapjv, Matrix};
 use log::{debug, trace};
 use nalgebra::{Dyn, OMatrix, U4};
@@ -14,6 +15,53 @@ pub struct ByteTrackSettings {
     pub track_iou: f32,
     pub track_update: f32,
 }
+
+pub struct ClassHistogram {
+    pub vision: HashMap<u8, u32>,
+    pub fusion: HashMap<u8, u32>,
+}
+
+/// Return the class with the highest count. Ties are broken by preferring
+/// the smaller class index for deterministic results across runs.
+fn majority_class(map: &HashMap<u8, u32>) -> u8 {
+    map.iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+        .map(|(&cls, _)| cls)
+        .unwrap_or(UNCLASSIFIED)
+}
+
+impl ClassHistogram {
+    fn new() -> Self {
+        Self {
+            vision: HashMap::new(),
+            fusion: HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, vision_class: u8, fusion_class: u8) {
+        if vision_class != UNCLASSIFIED {
+            *self.vision.entry(vision_class).or_insert(0) += 1;
+        }
+        if fusion_class != UNCLASSIFIED {
+            *self.fusion.entry(fusion_class).or_insert(0) += 1;
+        }
+    }
+
+    pub fn majority_vision(&self) -> u8 {
+        majority_class(&self.vision)
+    }
+
+    pub fn majority_fusion(&self) -> u8 {
+        majority_class(&self.fusion)
+    }
+}
+
+impl Default for ClassHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 pub struct ByteTrack {
     // tracklets;
@@ -22,8 +70,7 @@ pub struct ByteTrack {
     pub removed_tracks: Vec<Tracklet>,
     pub frame_count: i32,
     pub timestamp: u64,
-    pub uuid_map_vision_class: HashMap<Uuid, u8>,
-    pub uuid_map_fusion_class: HashMap<Uuid, u8>,
+    pub uuid_class_histogram: HashMap<Uuid, ClassHistogram>,
     pub settings: ByteTrackSettings,
 }
 #[derive(Debug, Clone)]
@@ -172,9 +219,7 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
-            uuid_map_vision_class: HashMap::new(),
-
-            uuid_map_fusion_class: HashMap::new(),
+            uuid_class_histogram: HashMap::new(),
             settings: ByteTrackSettings {
                 track_extra_lifespan: 0.5,
                 track_high_conf: 0.5,
@@ -191,8 +236,7 @@ impl ByteTrack {
             removed_tracks: vec![],
             frame_count: 0,
             timestamp: 0,
-            uuid_map_vision_class: HashMap::new(),
-            uuid_map_fusion_class: HashMap::new(),
+            uuid_class_histogram: HashMap::new(),
             settings,
         }
     }
@@ -292,10 +336,7 @@ impl ByteTrack {
         for i in (0..self.tracklets.len()).rev() {
             if self.tracklets[i].expiry < timestamp {
                 debug!("Tracklet removed: {:?}", self.tracklets[i].id);
-                self.uuid_map_vision_class
-                    .remove_entry(&self.tracklets[i].id);
-
-                self.uuid_map_fusion_class
+                self.uuid_class_histogram
                     .remove_entry(&self.tracklets[i].id);
                 let _ = self.tracklets.swap_remove(i);
             }
@@ -331,9 +372,10 @@ impl ByteTrack {
                     count: 1,
                     created: timestamp,
                 });
-                self.uuid_map_vision_class.insert(id, boxes[i].vision_class);
-
-                self.uuid_map_fusion_class.insert(id, boxes[i].fusion_class);
+                self.uuid_class_histogram
+                    .entry(id)
+                    .or_default()
+                    .record(boxes[i].vision_class, boxes[i].fusion_class);
             }
         }
     }
@@ -387,11 +429,10 @@ impl ByteTrack {
 
                 let predicted_xyah = self.tracklets[x].filter.mean.as_slice();
                 xyah_to_vaalbox(predicted_xyah, &mut boxes[i]);
-                self.uuid_map_vision_class
-                    .insert(self.tracklets[x].id, boxes[i].vision_class);
-
-                self.uuid_map_fusion_class
-                    .insert(self.tracklets[x].id, boxes[i].fusion_class);
+                self.uuid_class_histogram
+                    .entry(self.tracklets[x].id)
+                    .or_default()
+                    .record(boxes[i].vision_class, boxes[i].fusion_class);
                 self.tracklets[x].update(&observed_box, &self.settings, timestamp);
             }
         }

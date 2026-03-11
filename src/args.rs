@@ -170,6 +170,11 @@ pub struct Args {
     #[arg(long, env, default_value = "3")]
     pub bin_delay: u128,
 
+    /// Background class index for semantic segmentation instance detection.
+    /// -1 = last channel (default), 0..N = explicit index.
+    #[arg(long, env, default_value = "-1", allow_hyphen_values = true)]
+    pub background_index: i16,
+
     /// Enable Tracy profiler broadcast
     #[arg(long, env)]
     pub tracy: bool,
