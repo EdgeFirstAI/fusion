@@ -49,9 +49,57 @@ pub struct Args {
     #[arg(long, env, default_value = "rt/model/info")]
     pub model_info_topic: String,
 
-    /// Maximum age in seconds for model output data before warning. 0 = disabled
+    /// Maximum age in seconds for model output data. At 50% of this threshold
+    /// an info-level warning is logged. At 100% the model output is dropped
+    /// and a warning is logged. 0 = disabled.
     #[arg(long, env, default_value = "0.5")]
     pub max_model_age: f32,
+
+    /// Buffer size for model output messages (ring buffer depth)
+    #[arg(long, env, default_value = "5")]
+    pub model_buffer_size: usize,
+
+    /// Maximum temporal delta in seconds between paired PCD and model inputs.
+    /// Pairs exceeding this threshold are skipped with a warning. This is a
+    /// stricter per-frame pairing gate than max_model_age; when both are
+    /// enabled the lower of the two is the effective limit. 0 = disabled.
+    #[arg(long, env, default_value = "0.1")]
+    pub max_temporal_delta: f32,
+
+    /// Interval in seconds for logging per-topic latency statistics. 0 = disabled.
+    #[arg(long, env, default_value = "10.0")]
+    pub stats_interval: f32,
+
+    /// Enable depth-buffer occlusion rejection during projection.
+    /// Points occluded by closer geometry (from the camera's perspective) will
+    /// not receive a camera-derived class label.
+    #[arg(long, env, default_value_t = true)]
+    pub occlusion_filter: bool,
+
+    /// Depth difference threshold in meters for occlusion rejection.
+    /// A point is occluded if its depth exceeds the nearest geometry by more
+    /// than this value. Higher values are more permissive.
+    #[arg(long, env, default_value = "1.0")]
+    pub occlusion_threshold: f32,
+
+    /// Resolution divisor for the occlusion depth buffer relative to the camera
+    /// image. 4 means the depth buffer is 1/4 the camera resolution in each
+    /// dimension. Higher values use less memory but reduce occlusion precision.
+    #[arg(long, env, default_value = "4")]
+    pub occlusion_resolution_divisor: u32,
+
+    /// Distance in meters beyond which classification confidence begins to decay.
+    /// Currently used only as a precursor to the hard cutoff at
+    /// confidence_decay_max. Reserved for future soft-decay implementation.
+    /// 0 = distance filtering disabled entirely.
+    #[arg(long, env, default_value = "30.0")]
+    pub confidence_decay_onset: f32,
+
+    /// Maximum classification distance in meters. Points beyond this distance
+    /// are excluded from camera-based classification (proj coords set to
+    /// PROJ_SKIP). Must be greater than confidence_decay_onset.
+    #[arg(long, env, default_value = "50.0")]
+    pub confidence_decay_max: f32,
 
     /// bbox3d output topic
     #[arg(long, env, default_value = "rt/fusion/boxes3d")]

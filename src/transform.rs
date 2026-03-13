@@ -11,6 +11,11 @@ use tracing::instrument;
 
 use crate::pcd::FusionFrame;
 
+/// Out-of-bounds sentinel for rejected projections (behind camera, occluded,
+/// or beyond distance decay range). All classification paths check
+/// `check_in_bounds` which rejects anything outside [0, 1).
+pub(crate) const PROJ_SKIP: f32 = 2.0;
+
 pub fn isometry_from_transform(tf: &Transform) -> Isometry3<f32> {
     let trans = Translation3::new(
         tf.translation.x as f32,
@@ -90,6 +95,7 @@ pub(crate) fn transform_and_project_points(
 
     frame.proj_u.resize(n, 0.0);
     frame.proj_v.resize(n, 0.0);
+    frame.cam_z.resize(n, 0.0);
 
     #[cfg(target_arch = "aarch64")]
     {
@@ -134,9 +140,11 @@ fn scalar_transform_project(
     // Transform to camera frame for projection (XYZ stays in sensor frame)
     let (camx, camy, camz) = cam_m.transform_point(ox, oy, oz);
 
+    frame.cam_z[i] = camz;
+
     if camz <= 0.0 {
-        frame.proj_u[i] = 2.0;
-        frame.proj_v[i] = 2.0;
+        frame.proj_u[i] = PROJ_SKIP;
+        frame.proj_v[i] = PROJ_SKIP;
     } else {
         let inv_z = 1.0 / camz;
         frame.proj_u[i] = (fx * camx * inv_z + cx) / width;
@@ -203,12 +211,16 @@ unsafe fn neon_transform_project_4(
     );
 
     // Points behind camera get (2.0, 2.0)
-    let oob = vdupq_n_f32(2.0);
+    let oob = vdupq_n_f32(PROJ_SKIP);
     let u_out = vbslq_f32(behind, oob, u4);
     let v_out = vbslq_f32(behind, oob, v4);
 
     vst1q_f32(frame.proj_u.as_mut_ptr().add(i), u_out);
     vst1q_f32(frame.proj_v.as_mut_ptr().add(i), v_out);
+    // Zero out cam_z for behind-camera points so consumers see a consistent
+    // sentinel (cam_z <= 0) regardless of scalar vs NEON path.
+    let cz_out = vbslq_f32(behind, zero, cz4);
+    vst1q_f32(frame.cam_z.as_mut_ptr().add(i), cz_out);
 }
 
 #[cfg(test)]
@@ -258,6 +270,11 @@ mod projection_test {
             (frame.proj_v[0] - 0.5).abs() < 0.001,
             "center v={}",
             frame.proj_v[0]
+        );
+        assert!(
+            (frame.cam_z[0] - 10.0).abs() < 0.001,
+            "cam_z={} expected 10.0",
+            frame.cam_z[0]
         );
     }
 
