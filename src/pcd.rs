@@ -21,6 +21,9 @@ pub struct FusionFrame {
     // Projection results (filled by transform_and_project_points)
     pub proj_u: Vec<f32>,
     pub proj_v: Vec<f32>,
+    /// Camera-space Z depth for each point (populated during projection).
+    /// Used for occlusion detection. Points behind the camera have depth <= 0.
+    pub cam_z: Vec<f32>,
     // Fusion results (filled by fusion algorithms)
     pub vision_class: Vec<u8>,
     pub fusion_class: Vec<u8>,
@@ -39,6 +42,7 @@ impl FusionFrame {
             cluster_id: Vec::new(),
             proj_u: Vec::new(),
             proj_v: Vec::new(),
+            cam_z: Vec::new(),
             vision_class: vec![UNCLASSIFIED; capacity],
             fusion_class: vec![UNCLASSIFIED; capacity],
             instance_id: vec![0; capacity],

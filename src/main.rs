@@ -12,7 +12,7 @@ use edgefirst_schemas::{
     std_msgs::Header,
 };
 use fusion_model::spawn_fusion_model_thread;
-use log::{error, trace, warn};
+use log::{error, info, trace, warn};
 use mask::{mask_instance, process_mask, resolve_box_label, Box2D, UNCLASSIFIED};
 use pcd::{parse_pcd, serialize_classes, serialize_grid, serialize_late_fusion, FusionFrame};
 use std::{
@@ -27,7 +27,7 @@ use tracing::{instrument, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
 use tracker::{ByteTrack, ByteTrackSettings, TrackerBox};
 use tracy_client::frame_mark;
-use transform::transform_and_project_points;
+use transform::{transform_and_project_points, PROJ_SKIP};
 use zenoh::{
     bytes::{Encoding, ZBytes},
     handlers::FifoChannelHandler,
@@ -37,6 +37,7 @@ use zenoh::{
 };
 
 mod args;
+mod depth_buffer;
 mod fusion_model;
 mod image;
 mod kalman;
@@ -45,6 +46,7 @@ mod pcd;
 #[cfg(feature = "deepviewrt")]
 mod rtm_model;
 mod simd;
+mod sync;
 mod tflite_model;
 mod tracker;
 mod transform;
@@ -130,7 +132,9 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let model_output: Arc<Mutex<Option<(Model, std::time::Instant)>>> = Arc::new(Mutex::new(None));
+    let model_output: Arc<Mutex<sync::TimestampedBuffer<Model>>> = Arc::new(Mutex::new(
+        sync::TimestampedBuffer::new(args.model_buffer_size),
+    ));
     let _model_output_sub = if !args.vision_model_topic.is_empty() {
         let cb = model_output_callback(model_output.clone());
         Some(
@@ -276,9 +280,7 @@ fn model_info_callback(info: Arc<Mutex<Option<CameraInfo>>>) -> impl FnMut(zenoh
     }
 }
 
-fn model_output_callback(
-    model: Arc<Mutex<Option<(Model, std::time::Instant)>>>,
-) -> impl FnMut(Sample) {
+fn model_output_callback(model: Arc<Mutex<sync::TimestampedBuffer<Model>>>) -> impl FnMut(Sample) {
     move |s: Sample| {
         let new_model: Model = match serde_cdr::deserialize(&s.payload().to_bytes()) {
             Ok(v) => v,
@@ -288,7 +290,10 @@ fn model_output_callback(
             }
         };
         if let Ok(mut guard) = model.try_lock() {
-            *guard = Some((new_model, std::time::Instant::now()));
+            let stamp = new_model.header.stamp.clone();
+            guard.push(stamp, new_model);
+        } else {
+            trace!("model_output buffer lock contention, dropping model message");
         }
     }
 }
@@ -404,7 +409,7 @@ pub struct ZenohCtx {
 
 #[derive(Debug, Clone)]
 pub struct Mutexes {
-    model_output: Arc<Mutex<Option<(Model, std::time::Instant)>>>,
+    model_output: Arc<Mutex<sync::TimestampedBuffer<Model>>>,
     info: Arc<Mutex<Option<CameraInfo>>>,
     tf_static: Arc<Mutex<HashMap<(String, String), Transform>>>,
     grid: Arc<Mutex<Option<Grid>>>,
@@ -516,6 +521,7 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
 #[allow(clippy::too_many_arguments)]
 async fn fusion(
     frame: &mut FusionFrame,
+    header: &Header,
     transform: Transform,
     cam_transform: Transform,
     cam_info: &CameraInfo,
@@ -525,6 +531,7 @@ async fn fusion(
     args: &Args,
     session: &Session,
     data: &Mutexes,
+    depth_buf: &mut Option<depth_buffer::DepthBuffer>,
 ) -> HashMap<u32, Vec<usize>> {
     let cam_mtx = cam_info.k.map(|v| v as f32);
     transform_and_project_points(
@@ -535,23 +542,111 @@ async fn fusion(
         (cam_info.width as f32, cam_info.height as f32),
     );
 
-    let ids = get_cluster_ids(frame);
+    // Lazy-init depth buffer on first frame with known camera dimensions.
+    // Reuse across frames to avoid per-frame heap allocation (~507KB at 1080p/4).
+    if args.occlusion_filter {
+        let db = depth_buf.get_or_insert_with(|| {
+            depth_buffer::DepthBuffer::new(
+                cam_info.width,
+                cam_info.height,
+                args.occlusion_resolution_divisor,
+                args.occlusion_threshold,
+            )
+        });
+        // Guard against CameraInfo resolution changes mid-session
+        debug_assert_eq!(
+            db.dimensions(),
+            (
+                (cam_info.width / args.occlusion_resolution_divisor).max(1) as usize,
+                (cam_info.height / args.occlusion_resolution_divisor).max(1) as usize,
+            ),
+            "CameraInfo dimensions changed mid-session; depth buffer is stale"
+        );
+        db.clear();
 
-    // Lock model output and check age
-    let model_guard = data.model_output.lock().await;
-    if args.max_model_age > 0.0 {
-        if let Some((_, received)) = model_guard.as_ref() {
-            let age = received.elapsed();
-            if age.as_secs_f32() > args.max_model_age {
-                warn!(
-                    "Model output is {:.0}ms old (limit: {:.0}ms)",
-                    age.as_millis(),
-                    args.max_model_age * 1000.0
-                );
+        // Pass 1: record all valid point depths
+        for i in 0..frame.len {
+            if frame.cam_z[i] > 0.0 {
+                db.record(frame.proj_u[i], frame.proj_v[i], frame.cam_z[i]);
             }
         }
     }
-    let model_ref = model_guard.as_ref().map(|(m, _)| m);
+
+    // Rejection pass: occlusion + max classification distance
+    let check_occlusion = args.occlusion_filter && depth_buf.is_some();
+    let check_distance = args.confidence_decay_onset > 0.0;
+
+    if check_occlusion || check_distance {
+        // SAFETY: check_occlusion guarantees depth_buf.is_some()
+        let db = if check_occlusion {
+            Some(depth_buf.as_ref().unwrap())
+        } else {
+            None
+        };
+        for i in 0..frame.len {
+            if let Some(db) = db {
+                if frame.cam_z[i] > 0.0
+                    && db.is_occluded(frame.proj_u[i], frame.proj_v[i], frame.cam_z[i])
+                {
+                    frame.proj_u[i] = PROJ_SKIP;
+                    frame.proj_v[i] = PROJ_SKIP;
+                    continue;
+                }
+            }
+
+            if check_distance {
+                let dist_sq = frame.x[i].powi(2) + frame.y[i].powi(2) + frame.z[i].powi(2);
+                if dist_sq >= args.confidence_decay_max.powi(2) {
+                    frame.proj_u[i] = PROJ_SKIP;
+                    frame.proj_v[i] = PROJ_SKIP;
+                }
+            }
+        }
+    }
+
+    let ids = get_cluster_ids(frame);
+
+    // Find the temporally closest model output to this PCD frame
+    let model_guard = data.model_output.lock().await;
+    let model_ref = model_guard.closest(&header.stamp).and_then(|s| {
+        let delta_secs = sync::time_delta_secs(&header.stamp, &s.data.header.stamp);
+
+        // max_model_age: info at 50%, warn+drop at 100%
+        if args.max_model_age > 0.0 {
+            let half = args.max_model_age as f64 * 0.5;
+            if delta_secs > args.max_model_age as f64 {
+                warn!(
+                    "Dropping model output: {:.0}ms old (limit: {:.0}ms), \
+                     PCD stamp: {}.{:09}, model stamp: {}.{:09}",
+                    delta_secs * 1000.0,
+                    args.max_model_age as f64 * 1000.0,
+                    header.stamp.sec,
+                    header.stamp.nanosec,
+                    s.data.header.stamp.sec,
+                    s.data.header.stamp.nanosec,
+                );
+                return None;
+            } else if delta_secs > half {
+                info!(
+                    "Model output age {:.0}ms is >50% of limit ({:.0}ms)",
+                    delta_secs * 1000.0,
+                    args.max_model_age as f64 * 1000.0,
+                );
+            }
+        }
+
+        // max_temporal_delta: warn+drop (stricter pairing check)
+        if args.max_temporal_delta > 0.0 && delta_secs > args.max_temporal_delta as f64 {
+            warn!(
+                "PCD-model temporal delta {:.1}ms exceeds limit {:.1}ms, skipping model",
+                delta_secs * 1000.0,
+                args.max_temporal_delta as f64 * 1000.0,
+            );
+            return None;
+        }
+
+        Some(&s.data)
+    });
 
     let model_labels_guard = data.model_info.lock().await;
     let labels = model_labels_guard.as_deref();
@@ -587,6 +682,10 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
 
     setup_bins(&mut bins, args);
 
+    let mut pcd_stats = sync::TopicStats::new("pcd", 100);
+    let mut last_stats_log = std::time::Instant::now();
+    let mut depth_buf: Option<depth_buffer::DepthBuffer> = None;
+
     loop {
         let msg = match drain_recv(zenoh.pcd_sub.as_ref().unwrap(), &mut timeout).await {
             Some(v) => v,
@@ -604,8 +703,18 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
                 }
             };
 
+        pcd_stats.record(&header.stamp);
+
+        // Periodic latency stats logging
+        if args.stats_interval > 0.0 && last_stats_log.elapsed().as_secs_f32() > args.stats_interval
+        {
+            pcd_stats.log_summary();
+            last_stats_log = std::time::Instant::now();
+        }
+
         let ids = fusion(
             &mut frame,
+            &header,
             transform,
             cam_transform,
             &cam_info,
@@ -615,6 +724,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             args,
             &zenoh.session,
             &data,
+            &mut depth_buf,
         )
         .await;
 
