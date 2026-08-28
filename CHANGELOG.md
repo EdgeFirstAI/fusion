@@ -15,8 +15,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `track_created` on `DetectBoxView`).
 - Camera ingest uses `edgefirst_msgs/CameraFrame` tensors (plane 0 handle + pidfd import)
   instead of `DmaBuffer`. Default `--camera-topic` is `camera/frame`.
-- Crate bumps: zenoh 1.10, clap 4.6, tokio 1.53, ndarray 0.17, nalgebra 0.35,
-  tracing-tracy 0.12, tracy-client 0.19, g2d-sys 1.3.1. Package version 1.8.0.
 
 ## [1.7.2] - 2026-03-10
 

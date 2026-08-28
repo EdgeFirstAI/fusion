@@ -223,27 +223,58 @@ impl TryFrom<&Image> for G2DSurface {
     }
 }
 
+fn camera_frame_invalid(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn camera_frame_u32(name: &str, value: u64) -> io::Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        camera_frame_invalid(format!(
+            "CameraFrame tensor {name} {value} does not fit in u32"
+        ))
+    })
+}
+
+fn camera_frame_nonzero_u32(name: &str, value: u64) -> io::Result<u32> {
+    let dim = camera_frame_u32(name, value)?;
+    if dim == 0 {
+        return Err(camera_frame_invalid(format!(
+            "CameraFrame tensor {name} is 0"
+        )));
+    }
+    Ok(dim)
+}
+
 /// Import a [`CameraFrame`] tensor plane 0 as an [`Image`] via pidfd + getfd.
 pub fn image_from_camera_frame(frame: &CameraFrame<Vec<u8>>) -> Result<Image, io::Error> {
     let t = frame.tensor();
     let plane = t
         .plane_at(0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CameraFrame has no planes"))?;
-    let pidfd: PidFd = PidFd::from_pid(t.pid() as i32)?;
+        .ok_or_else(|| camera_frame_invalid("CameraFrame tensor has no plane 0"))?;
+    let pid = t.pid();
+    let pid_i32 = i32::try_from(pid)
+        .map_err(|_| camera_frame_invalid(format!("CameraFrame tensor pid {pid} exceeds i32")))?;
+    let pidfd: PidFd = PidFd::from_pid(pid_i32)?;
     let target_fd = i32::try_from(plane.handle).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("CameraFrame plane handle {} exceeds i32", plane.handle),
-        )
+        camera_frame_invalid(format!(
+            "CameraFrame plane handle {} exceeds i32",
+            plane.handle
+        ))
     })?;
     let fd = get_file_from_pidfd(pidfd.as_raw_fd(), target_fd, GetFdFlags::empty())?;
+    let height = t
+        .shape_at(0)
+        .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing height (shape[0])"))?;
+    let width = t
+        .shape_at(1)
+        .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing width (shape[1])"))?;
     let format = t.format();
     let fourcc = FourCharCode::from_str(format)
         .map_err(|e| io::Error::other(format!("invalid fourcc {format}: {e}")))?;
     Ok(Image {
         fd: fd.into(),
-        width: u32::try_from(t.shape_at(1).unwrap_or(0)).unwrap_or(u32::MAX),
-        height: u32::try_from(t.shape_at(0).unwrap_or(0)).unwrap_or(u32::MAX),
+        width: camera_frame_nonzero_u32("width", width)?,
+        height: camera_frame_nonzero_u32("height", height)?,
         format: fourcc,
     })
 }

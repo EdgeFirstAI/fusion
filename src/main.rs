@@ -206,7 +206,7 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let tf_session = session.clone();
-    let tf_msg = build_tf_msg();
+    let tf_msg = build_tf_msg().expect("static base_link optical TransformStamped");
     let tf_msg = ZBytes::from(tf_msg.into_cdr());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     tokio::spawn(async move {
@@ -481,11 +481,15 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
             |v| *v,
         );
 
-    let cam_info = match data.info.lock().await.as_ref() {
-        Some(v) => CameraInfo::from_cdr(v.to_cdr())
-            .map_err(|e| format!("Failed to clone CameraInfo: {e:?}"))?,
-        None => return Err("No Camera Info".to_string()),
+    let cam_info_cdr = {
+        let guard = data.info.lock().await;
+        match guard.as_ref() {
+            Some(v) => v.to_cdr(),
+            None => return Err("No Camera Info".to_string()),
+        }
     };
+    let cam_info = CameraInfo::from_cdr(cam_info_cdr)
+        .map_err(|e| format!("Failed to clone CameraInfo: {e:?}"))?;
 
     let cam_frame_id = cam_info.frame_id().to_string();
 
@@ -1331,7 +1335,7 @@ async fn tf_static(
     }
 }
 
-fn build_tf_msg() -> TransformStamped<Vec<u8>> {
+fn build_tf_msg() -> Result<TransformStamped<Vec<u8>>, edgefirst_schemas::cdr::CdrError> {
     TransformStamped::builder()
         .stamp(Time { sec: 0, nanosec: 0 })
         .frame_id(BASE_LINK_FRAME_ID)
@@ -1352,7 +1356,6 @@ fn build_tf_msg() -> TransformStamped<Vec<u8>> {
             },
         })
         .build()
-        .unwrap()
 }
 
 #[instrument(skip_all)]
