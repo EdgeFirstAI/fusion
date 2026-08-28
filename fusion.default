@@ -97,8 +97,8 @@ MODEL = ""
 # Set to "" to disable.
 MODEL_DECODER = ""
 
-# Camera DMA buffer input topic for the radar fusion model.
-CAMERA_TOPIC = "rt/camera/dma"
+# CameraFrame input topic for the radar fusion model.
+CAMERA_TOPIC = "camera/frame"
 
 # Radar cube input topic for the radar fusion model.
 RADARCUBE_TOPIC = "rt/radar/cube"

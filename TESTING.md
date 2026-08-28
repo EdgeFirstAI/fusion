@@ -33,7 +33,7 @@ Fusion is a pub/sub service that requires live sensor data or recorded Zenoh top
 |-------|------|-------------|
 | `rt/radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud |
 | `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud |
-| `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame (DMA buffer) |
+| `camera/frame` | `edgefirst_msgs/CameraFrame` | Camera frame (tensor + DMA-BUF planes) |
 | `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model |
 | `rt/model/mask` | `edgefirst_msgs/Mask` | Segmentation mask |
 | `rt/model/boxes2d` | `edgefirst_msgs/Detect` | 2D detection boxes (optional, for instance-level fusion) |

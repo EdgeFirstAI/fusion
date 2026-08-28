@@ -7,10 +7,7 @@ use deepviewrt::{
     model,
     tensor::{Tensor, TensorType},
 };
-use edgefirst_schemas::{
-    edgefirst_msgs::{DmaBuffer, Mask, RadarCube},
-    serde_cdr,
-};
+use edgefirst_schemas::edgefirst_msgs::{CameraFrame, Mask, RadarCube};
 use log::{debug, error, info, trace};
 use std::{fs::read, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -193,7 +190,7 @@ pub async fn run_rtm_fusion_model(
             .declare_subscriber(&args.camera_topic)
             .await
             .unwrap();
-        info!("Declared subscriber on {:?}", &args.camera_topic);
+        info!("Declared subscriber on {:?}", args.camera_topic);
         let _ = sub_camera.insert(s);
     }
 
@@ -205,7 +202,7 @@ pub async fn run_rtm_fusion_model(
         Err(e) => {
             error!(
                 "Error while declaring detection publisher {}: {:?}",
-                &args.model_output_topic, e
+                args.model_output_topic, e
             );
             return Err(e.to_string().into());
         }
@@ -224,15 +221,14 @@ pub async fn run_rtm_fusion_model(
             None => continue,
         };
 
-        let radarcube = info_span!("cube_deserialize").in_scope(|| {
-            serde_cdr::deserialize::<RadarCube>(&sample.payload().to_bytes()).unwrap()
-        });
+        let radarcube = info_span!("cube_deserialize")
+            .in_scope(|| RadarCube::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
         let cube_shape = radarcube
-            .shape
+            .shape()
             .iter()
             .map(|v| *v as usize)
             .collect::<Vec<_>>();
-        let cube = preprocess_cube(&radarcube.cube, &cube_shape, &radar_input_shape);
+        let cube = preprocess_cube(radarcube.cube(), &cube_shape, &radar_input_shape);
 
         load_cube(&mut backbone, &input_tensor_index, radar_input_index, &cube);
 
@@ -262,7 +258,7 @@ pub async fn run_rtm_fusion_model(
         let (mask, output_shape) = get_model_output(output_ctx, args.logits);
 
         let (buf, enc) = info_span!("model_publish").in_scope(|| {
-            let mask = mask
+            let bytes: Vec<u8> = mask
                 .iter()
                 .flat_map(|v| {
                     [
@@ -271,15 +267,16 @@ pub async fn run_rtm_fusion_model(
                     ]
                 })
                 .collect();
-            let msg = Mask {
-                height: output_shape[1],
-                width: output_shape[2],
-                length: 1,
-                encoding: "".to_string(),
-                mask,
-                boxed: false,
-            };
-            let buf = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+            let msg = Mask::builder()
+                .height(output_shape[1])
+                .width(output_shape[2])
+                .length(1)
+                .encoding("")
+                .mask(&bytes)
+                .boxed(false)
+                .build()
+                .expect("valid Mask");
+            let buf = ZBytes::from(msg.into_cdr());
             let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
             (buf, enc)
@@ -288,8 +285,7 @@ pub async fn run_rtm_fusion_model(
         publ_mask.put(buf).encoding(enc).await.unwrap();
 
         let occupied = build_occupancy_grid(&mask, &output_shape);
-        let timestamp = radarcube.header.stamp.nanosec as u64
-            + radarcube.header.stamp.sec as u64 * 1_000_000_000;
+        let timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
         let mut guard = grid.lock().await;
         *guard = Some((occupied, timestamp));
     }
@@ -364,15 +360,15 @@ async fn load_camera_frame(
         None => return,
     };
 
-    let cam_buffer = info_span!("camera_deserialize")
-        .in_scope(|| serde_cdr::deserialize::<DmaBuffer>(&sample.payload().to_bytes()).unwrap());
+    let cam_frame = info_span!("camera_deserialize")
+        .in_scope(|| CameraFrame::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
 
     match info_span!("camera_load").in_scope(|| {
         load_frame_dmabuf(
             camera_input_tensor,
             img_mgr,
             dest,
-            &cam_buffer,
+            &cam_frame,
             Preprocessing::UnsignedNorm,
         )
     }) {
@@ -497,7 +493,7 @@ fn load_frame_dmabuf(
     tensor: &mut Tensor,
     img_mgr: &ImageManager,
     dest: &mut Image,
-    dma_buf: &DmaBuffer,
+    dma_buf: &CameraFrame<Vec<u8>>,
     preprocess: Preprocessing,
 ) -> Result<(), FusionError> {
     if dest.height() as i32 != tensor.shape()[1] {
@@ -515,7 +511,7 @@ fn load_frame_dmabuf(
     }
     const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
 
-    let input = dma_buf.try_into()?;
+    let input = Image::try_from(dma_buf)?;
     match img_mgr.convert(&input, dest, None, Rotation::Rotation0) {
         Ok(_) => {}
         Err(e) => {

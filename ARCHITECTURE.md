@@ -29,7 +29,7 @@ graph TB
     subgraph "Zenoh Subscriptions"
         RadarSub["rt/radar/clusters<br/>PointCloud2"]
         LidarSub["rt/lidar/clusters<br/>PointCloud2"]
-        CameraSub["rt/camera/dma<br/>DmaBuffer"]
+        CameraSub["camera/frame<br/>CameraFrame"]
         ModelSub["rt/model/output<br/>Model"]
         InfoSub["rt/camera/info<br/>CameraInfo"]
         TFSub["rt/tf_static<br/>TransformStamped"]
@@ -47,7 +47,7 @@ graph TB
     end
 
     subgraph "Model Thread"
-        ModelThread["Fusion Model Thread<br/>1. Receive camera DMA<br/>2. Receive radar cube<br/>3. Run ML inference<br/>4. Publish grid predictions"]
+        ModelThread["Fusion Model Thread<br/>1. Receive camera frames<br/>2. Receive radar cube<br/>3. Run ML inference<br/>4. Publish grid predictions"]
     end
 
     subgraph "Background Tasks"
@@ -159,7 +159,7 @@ graph TD
 
 **Responsibilities:**
 
-- Subscribe to camera DMA buffers and radar cubes
+- Subscribe to camera frames and radar cubes
 - Pre-process inputs (image scaling via G2D, radar cube formatting)
 - Run ML inference (TFLite or DeepView RT)
 - Publish grid predictions to shared state
@@ -237,7 +237,7 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 |-------|------|-------------|
 | `rt/radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud with optional cluster_id |
 | `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
-| `rt/camera/dma` | `edgefirst_msgs/DmaBuffer` | Camera frame as DMA buffer |
+| `camera/frame` | `edgefirst_msgs/CameraFrame` | Camera frame tensor (dma-buf planes) |
 | `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
 | `rt/model/output` | `edgefirst_msgs/Model` | Unified vision model output (boxes, masks, segmentation) |
 | `rt/model/info` | `edgefirst_msgs/ModelInfo` | Model info for dynamic label resolution |
@@ -298,23 +298,24 @@ Au-Zone's inference runtime (`deepviewrt` crate), **feature-gated** behind `--fe
 
 - Native NPU acceleration on NXP i.MX8M Plus
 - Loads `.rtm` model files
-- DMA buffer input for zero-copy inference
+- DMA-BUF plane import for zero-copy inference
 - Requires `libdeepview-rt.so` installed on the target system
 
 Build with DeepView RT support: `cargo build --release --features deepviewrt`
 
 See `src/rtm_model.rs` for model loading.
 
-### DMA Buffer Handling
+### CameraFrame Handling
 
-Camera frames are received as DMA buffer file descriptors:
+Camera frames are received as `edgefirst_msgs/CameraFrame` tensors with DMA-BUF planes:
 
-1. Extract file descriptor from Zenoh message using `pidfd_getfd`
-2. Memory-map the DMA buffer with `mmap(MAP_SHARED)`
-3. Pass to G2D for hardware-accelerated format conversion
-4. Use converted buffer as ML model input
+1. Decode `CameraFrame` from CDR and read plane 0 (`handle`, `offset`, `stride`)
+2. Import the file descriptor with `pidfd_getfd` using the tensor `pid`
+3. Memory-map the buffer with `mmap(MAP_SHARED)`
+4. Pass to G2D for hardware-accelerated format conversion
+5. Use converted buffer as ML model input
 
-See `src/image.rs` for DMA buffer lifecycle management.
+See `src/image.rs` for CameraFrame import and DMA-BUF lifecycle management.
 
 ---
 
@@ -362,7 +363,7 @@ Frame marks track the fusion loop iteration rate.
 - Result serialization and publishing
 
 **Model Thread:**
-- Camera DMA buffer reception
+- CameraFrame reception
 - Image preprocessing (G2D)
 - Model inference timing
 - Grid extraction and publishing

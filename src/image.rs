@@ -5,7 +5,7 @@ use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
-use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
+use edgefirst_schemas::edgefirst_msgs::CameraFrame;
 use four_char_code::{four_char_code, FourCharCode};
 use g2d_sys::{
     g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270,
@@ -223,20 +223,36 @@ impl TryFrom<&Image> for G2DSurface {
     }
 }
 
-impl TryFrom<&DmaBufMsg> for Image {
+/// Import a [`CameraFrame`] tensor plane 0 as an [`Image`] via pidfd + getfd.
+pub fn image_from_camera_frame(frame: &CameraFrame<Vec<u8>>) -> Result<Image, io::Error> {
+    let t = frame.tensor();
+    let plane = t
+        .plane_at(0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "CameraFrame has no planes"))?;
+    let pidfd: PidFd = PidFd::from_pid(t.pid() as i32)?;
+    let target_fd = i32::try_from(plane.handle).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("CameraFrame plane handle {} exceeds i32", plane.handle),
+        )
+    })?;
+    let fd = get_file_from_pidfd(pidfd.as_raw_fd(), target_fd, GetFdFlags::empty())?;
+    let format = t.format();
+    let fourcc = FourCharCode::from_str(format)
+        .map_err(|e| io::Error::other(format!("invalid fourcc {format}: {e}")))?;
+    Ok(Image {
+        fd: fd.into(),
+        width: u32::try_from(t.shape_at(1).unwrap_or(0)).unwrap_or(u32::MAX),
+        height: u32::try_from(t.shape_at(0).unwrap_or(0)).unwrap_or(u32::MAX),
+        format: fourcc,
+    })
+}
+
+impl TryFrom<&CameraFrame<Vec<u8>>> for Image {
     type Error = io::Error;
 
-    fn try_from(dma_buf: &DmaBufMsg) -> Result<Self, io::Error> {
-        let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
-        let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
-        let fourcc = FourCharCode::new(dma_buf.fourcc)
-            .map_err(|e| io::Error::other(format!("invalid fourcc: {e}")))?;
-        Ok(Image {
-            fd: fd.into(),
-            width: dma_buf.width,
-            height: dma_buf.height,
-            format: fourcc,
-        })
+    fn try_from(frame: &CameraFrame<Vec<u8>>) -> Result<Self, io::Error> {
+        image_from_camera_frame(frame)
     }
 }
 
