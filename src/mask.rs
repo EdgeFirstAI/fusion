@@ -1,9 +1,32 @@
 // Copyright 2025 Au-Zone Technologies Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use edgefirst_schemas::edgefirst_msgs::Mask;
+use edgefirst_schemas::edgefirst_msgs::MaskView;
 use itertools::Itertools;
 use tracing::instrument;
+
+/// Owned mask after copying out of a CDR [`MaskView`].
+///
+/// CDR views are immutable, so decompression and argmax run on this owned copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessedMask {
+    pub encoding: String,
+    pub mask: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ProcessedMask {
+    /// Copy encoding, mask bytes, and dimensions out of a CDR view.
+    pub fn from_view(v: &MaskView<'_>) -> Self {
+        Self {
+            encoding: v.encoding.to_string(),
+            mask: v.mask.to_vec(),
+            width: v.width,
+            height: v.height,
+        }
+    }
+}
 
 /// Sentinel value for points not classified by the vision model.
 /// Using u8::MAX (255) reserves it as a sentinel; valid class indices are 0..=254.
@@ -31,7 +54,7 @@ pub struct Box2D {
 /// Decompress (if zstd) and argmax a multi-channel mask into a single-channel
 /// class-index mask. Modifies the mask in-place. Returns the number of
 /// channels detected (1 if single-channel or invalid, >1 if argmax was applied).
-pub fn process_mask(mask: &mut Mask) -> usize {
+pub fn process_mask(mask: &mut ProcessedMask) -> usize {
     if mask.encoding == "zstd" {
         match zstd::decode_all(mask.mask.as_slice()) {
             Ok(decoded) => {

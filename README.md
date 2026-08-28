@@ -72,7 +72,7 @@ graph LR
 
 **What Fusion Does:**
 
-- **Subscribes** to camera DMA buffers, radar/LiDAR point clouds, and segmentation masks
+- **Subscribes** to camera frames, radar/LiDAR point clouds, and segmentation masks
 - **Projects** 3D sensor points onto 2D camera masks using calibration transforms
 - **Classifies** each point based on the vision model's segmentation output
 - **Runs** ML models on radar cubes and camera frames for occupancy prediction
@@ -160,7 +160,7 @@ edgefirst-fusion \
 edgefirst-fusion \
   --radar-pcd-topic rt/radar/clusters \
   --lidar-pcd-topic rt/lidar/clusters \
-  --camera-topic rt/camera/dma \
+  --camera-topic camera/frame \
   --vision-model-topic rt/model/output \
   --model model.rtm
 ```
@@ -179,7 +179,7 @@ edgefirst-fusion --help
 
 - `--radar-pcd-topic <TOPIC>` - Radar point cloud input (default: empty/disabled)
 - `--lidar-pcd-topic <TOPIC>` - LiDAR point cloud input (default: empty/disabled)
-- `--camera-topic <TOPIC>` - Camera DMA buffer input (default: `rt/camera/dma`)
+- `--camera-topic <TOPIC>` - CameraFrame input (default: `camera/frame`)
 - `--radarcube-topic <TOPIC>` - Radar cube input (default: `rt/radar/cube`)
 - `--vision-model-topic <TOPIC>` - Unified vision model output (default: `rt/model/output`)
 - `--model-info-topic <TOPIC>` - Model info for label resolution (default: `rt/model/info`)
@@ -265,7 +265,7 @@ edgefirst-fusion  # Uses environment configuration
 
 **LiDAR:** Any sensor publishing `sensor_msgs/PointCloud2` to Zenoh (e.g., Ouster OS1)
 
-**Camera:** EdgeFirst Camera service providing DMA buffers and segmentation masks
+**Camera:** EdgeFirst Camera service providing CameraFrame tensors and segmentation masks
 
 ---
 
@@ -295,7 +295,7 @@ fusion/
 ├── src/
 │   ├── main.rs          # Main loop, Zenoh pub/sub, thread coordination
 │   ├── args.rs           # CLI argument parsing (clap derive)
-│   ├── image.rs          # DMA buffer handling, G2D image conversion
+│   ├── image.rs          # CameraFrame import, G2D image conversion
 │   ├── fusion_model.rs   # ML model thread (TFLite/DeepView RT inference)
 │   ├── tflite_model.rs   # TFLite model loading and inference
 │   ├── rtm_model.rs      # DeepView RT model loading and inference

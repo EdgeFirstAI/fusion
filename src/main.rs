@@ -5,16 +5,16 @@ use args::{Args, PCDSource};
 use clap::Parser;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{Box as DetectBox, Detect, Mask, Model, ModelInfo, Track},
+    edgefirst_msgs::{Detect, DetectBoxView, Mask, MaskView, Model, ModelInfo},
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, PointCloud2},
-    serde_cdr,
-    std_msgs::Header,
 };
 use fusion_model::spawn_fusion_model_thread;
 use log::{error, trace, warn};
-use mask::{mask_instance, process_mask, resolve_box_label, Box2D, UNCLASSIFIED};
-use pcd::{parse_pcd, serialize_classes, serialize_grid, serialize_late_fusion, FusionFrame};
+use mask::{mask_instance, process_mask, resolve_box_label, Box2D, ProcessedMask, UNCLASSIFIED};
+use pcd::{
+    parse_pcd, serialize_classes, serialize_grid, serialize_late_fusion, CloudHeader, FusionFrame,
+};
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -52,10 +52,17 @@ mod transform;
 const BASE_LINK_FRAME_ID: &str = "base_link";
 
 type Grid = (Vec<Vec<f32>>, u64);
+type SharedModelOutput = Arc<Mutex<Option<(Model<Vec<u8>>, std::time::Instant)>>>;
 
 /// Data loaded from a single point cloud frame: the cloud header, parsed frame,
 /// sensor-to-base transform, camera-to-base transform, and camera intrinsics.
-type LoadedFrame = (Header, FusionFrame, Transform, Transform, CameraInfo);
+type LoadedFrame = (
+    CloudHeader,
+    FusionFrame,
+    Transform,
+    Transform,
+    CameraInfo<Vec<u8>>,
+);
 
 const FUSION_CLASS: &str = "fusion_class";
 const INSTANCE_ID: &str = "instance_id";
@@ -130,7 +137,7 @@ async fn main() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let model_output: Arc<Mutex<Option<(Model, std::time::Instant)>>> = Arc::new(Mutex::new(None));
+    let model_output: SharedModelOutput = Arc::new(Mutex::new(None));
     let _model_output_sub = if !args.vision_model_topic.is_empty() {
         let cb = model_output_callback(model_output.clone());
         Some(
@@ -199,8 +206,8 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let tf_session = session.clone();
-    let tf_msg = build_tf_msg();
-    let tf_msg = ZBytes::from(serde_cdr::serialize(&tf_msg).unwrap());
+    let tf_msg = build_tf_msg().expect("static base_link optical TransformStamped");
+    let tf_msg = ZBytes::from(tf_msg.into_cdr());
     let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     tokio::spawn(async move {
         if let Err(e) = tf_static(tf_session, tf_msg, tf_enc).await {
@@ -260,9 +267,11 @@ async fn main() {
     let _ = fusion_model_handle.join();
 }
 
-fn model_info_callback(info: Arc<Mutex<Option<CameraInfo>>>) -> impl FnMut(zenoh::sample::Sample) {
+fn model_info_callback(
+    info: Arc<Mutex<Option<CameraInfo<Vec<u8>>>>>,
+) -> impl FnMut(zenoh::sample::Sample) {
     move |s: Sample| {
-        let new_info: CameraInfo = match serde_cdr::deserialize(&s.payload().to_bytes()) {
+        let new_info = match CameraInfo::from_cdr(s.payload().to_bytes().to_vec()) {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to deserialize message: {e:?}");
@@ -276,11 +285,9 @@ fn model_info_callback(info: Arc<Mutex<Option<CameraInfo>>>) -> impl FnMut(zenoh
     }
 }
 
-fn model_output_callback(
-    model: Arc<Mutex<Option<(Model, std::time::Instant)>>>,
-) -> impl FnMut(Sample) {
+fn model_output_callback(model: SharedModelOutput) -> impl FnMut(Sample) {
     move |s: Sample| {
-        let new_model: Model = match serde_cdr::deserialize(&s.payload().to_bytes()) {
+        let new_model = match Model::from_cdr(s.payload().to_bytes().to_vec()) {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to deserialize Model: {e:?}");
@@ -295,7 +302,7 @@ fn model_output_callback(
 
 fn model_labels_callback(labels: Arc<Mutex<Option<Vec<String>>>>) -> impl FnMut(Sample) {
     move |s: Sample| {
-        let info: ModelInfo = match serde_cdr::deserialize(&s.payload().to_bytes()) {
+        let info = match ModelInfo::from_cdr(s.payload().to_bytes().to_vec()) {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to deserialize ModelInfo: {e:?}");
@@ -303,7 +310,7 @@ fn model_labels_callback(labels: Arc<Mutex<Option<Vec<String>>>>) -> impl FnMut(
             }
         };
         if let Ok(mut guard) = labels.try_lock() {
-            *guard = Some(info.labels);
+            *guard = Some(info.labels().into_iter().map(str::to_string).collect());
         }
     }
 }
@@ -312,8 +319,7 @@ fn tf_static_callback(
     transform: Arc<Mutex<HashMap<(String, String), Transform>>>,
 ) -> impl FnMut(zenoh::sample::Sample) {
     move |s: Sample| {
-        let new_transform: TransformStamped = match serde_cdr::deserialize(&s.payload().to_bytes())
-        {
+        let new_transform = match TransformStamped::from_cdr(s.payload().to_bytes().to_vec()) {
             Ok(v) => v,
             Err(e) => {
                 error!("Failed to deserialize message: {e:?}");
@@ -323,8 +329,11 @@ fn tf_static_callback(
 
         if let Ok(mut guard) = transform.try_lock() {
             guard.insert(
-                (new_transform.header.frame_id, new_transform.child_frame_id),
-                new_transform.transform,
+                (
+                    new_transform.frame_id().to_string(),
+                    new_transform.child_frame_id().to_string(),
+                ),
+                new_transform.transform(),
             );
         }
     }
@@ -402,10 +411,10 @@ pub struct ZenohCtx {
     bbox_publ: Option<Publisher<'static>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Mutexes {
-    model_output: Arc<Mutex<Option<(Model, std::time::Instant)>>>,
-    info: Arc<Mutex<Option<CameraInfo>>>,
+    model_output: SharedModelOutput,
+    info: Arc<Mutex<Option<CameraInfo<Vec<u8>>>>>,
     tf_static: Arc<Mutex<HashMap<(String, String), Transform>>>,
     grid: Arc<Mutex<Option<Grid>>>,
     model_info: Arc<Mutex<Option<Vec<String>>>>,
@@ -433,12 +442,15 @@ fn setup_bins(bins: &mut Vec<Vec<Bin>>, args: &Args) {
 #[instrument(skip_all)]
 async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> {
     let (header, frame) = {
-        let pcd: PointCloud2 = match serde_cdr::deserialize(&msg.payload().to_bytes()) {
+        let pcd = match PointCloud2::from_cdr(msg.payload().to_bytes().to_vec()) {
             Ok(v) => v,
             Err(e) => return Err(format!("Failed to deserialize PCD: {e:?}")),
         };
         let frame = parse_pcd(&pcd);
-        let header = pcd.header;
+        let header = CloudHeader {
+            stamp: pcd.stamp(),
+            frame_id: pcd.frame_id().to_string(),
+        };
         (header, frame)
     };
 
@@ -468,30 +480,27 @@ async fn load_data(msg: &Sample, data: &Mutexes) -> Result<LoadedFrame, String> 
             },
             |v| *v,
         );
-    let header = Header {
-        stamp: header.stamp,
-        frame_id: pcd_frame_id.clone(),
-    };
 
-    let cam_info = match data.info.lock().await {
-        v if v.is_some() => v.as_ref().unwrap().clone(),
-        _ => return Err("No Camera Info".to_string()),
+    let cam_info_cdr = {
+        let guard = data.info.lock().await;
+        match guard.as_ref() {
+            Some(v) => v.to_cdr(),
+            None => return Err("No Camera Info".to_string()),
+        }
     };
+    let cam_info = CameraInfo::from_cdr(cam_info_cdr)
+        .map_err(|e| format!("Failed to clone CameraInfo: {e:?}"))?;
+
+    let cam_frame_id = cam_info.frame_id().to_string();
 
     let cam_transform = data
         .tf_static
         .lock()
         .await
-        .get(&(
-            BASE_LINK_FRAME_ID.to_owned(),
-            cam_info.header.frame_id.clone(),
-        ))
+        .get(&(BASE_LINK_FRAME_ID.to_owned(), cam_frame_id.clone()))
         .map_or_else(
             || {
-                warn!(
-                    "Did not find transform from base_link to {}",
-                    cam_info.header.frame_id
-                );
+                warn!("Did not find transform from base_link to {cam_frame_id}");
                 Transform {
                     translation: Vector3 {
                         x: 0.0,
@@ -518,7 +527,7 @@ async fn fusion(
     frame: &mut FusionFrame,
     transform: Transform,
     cam_transform: Transform,
-    cam_info: &CameraInfo,
+    cam_info: &CameraInfo<Vec<u8>>,
     track: bool,
     tracker: &mut ByteTrack,
     grid: &Arc<Mutex<Option<Grid>>>,
@@ -526,13 +535,13 @@ async fn fusion(
     session: &Session,
     data: &Mutexes,
 ) -> HashMap<u32, Vec<usize>> {
-    let cam_mtx = cam_info.k.map(|v| v as f32);
+    let cam_mtx = cam_info.k().map(|v| v as f32);
     transform_and_project_points(
         frame,
         &transform,
         &cam_transform,
         &cam_mtx,
-        (cam_info.width as f32, cam_info.height as f32),
+        (cam_info.width() as f32, cam_info.height() as f32),
     );
 
     let ids = get_cluster_ids(frame);
@@ -650,7 +659,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
 async fn publish(
     zenoh: &ZenohCtx,
     args: &Args,
-    header: &Header,
+    header: &CloudHeader,
     frame: &FusionFrame,
     ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
@@ -722,14 +731,18 @@ fn parse_box_label(label: &str, labels: Option<&[String]>) -> Option<u8> {
 /// smallest squared distance to the point wins.  Equal distances are broken
 /// by iteration order (first box in `detect.boxes` wins), which is
 /// deterministic for a given detection frame.
-fn box_fusion_no_cluster(frame: &mut FusionFrame, boxes: &[DetectBox], labels: Option<&[String]>) {
+fn box_fusion_no_cluster(
+    frame: &mut FusionFrame,
+    boxes: &[DetectBoxView],
+    labels: Option<&[String]>,
+) {
     // Pre-resolve labels once per box to avoid repeated parsing/logging per point
     let resolved: Vec<Option<(u8, u16, u32)>> = boxes
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            parse_box_label(&b.label, labels)
-                .map(|cls| (cls, (i + 1) as u16, hash_track_id(&b.track.id)))
+            parse_box_label(b.label, labels)
+                .map(|cls| (cls, (i + 1) as u16, hash_track_id(b.track_id)))
         })
         .collect();
 
@@ -771,7 +784,7 @@ fn box_fusion_no_cluster(frame: &mut FusionFrame, boxes: &[DetectBox], labels: O
 
 fn box_fusion_clustered(
     frame: &mut FusionFrame,
-    boxes: &[DetectBox],
+    boxes: &[DetectBoxView],
     clusters: &HashMap<u32, Vec<usize>>,
     labels: Option<&[String]>,
 ) {
@@ -781,11 +794,11 @@ fn box_fusion_clustered(
     for (box_idx, b) in boxes.iter().enumerate() {
         let half_w = b.width / 2.0;
         let half_h = b.height / 2.0;
-        let Some(label) = parse_box_label(&b.label, labels) else {
+        let Some(label) = parse_box_label(b.label, labels) else {
             continue;
         };
         let instance = (box_idx + 1) as u16;
-        let track = hash_track_id(&b.track.id);
+        let track = hash_track_id(b.track_id);
 
         let mut cluster_counts: HashMap<u32, usize> = HashMap::new();
         for i in 0..frame.len {
@@ -827,7 +840,7 @@ fn box_fusion_clustered(
 
 fn get_vision_class_and_instance(
     frame: &mut FusionFrame,
-    model: Option<&Model>,
+    model: Option<&Model<Vec<u8>>>,
     ids: &HashMap<u32, Vec<usize>>,
     labels: Option<&[String]>,
     background_index: i16,
@@ -837,15 +850,18 @@ fn get_vision_class_and_instance(
         None => return,
     };
 
+    let masks = model.masks();
+    let boxes = model.boxes();
+
     // PREFER masks when available (more precise)
-    if let Some(first_mask) = model.masks.first() {
-        if first_mask.boxed && !model.boxes.is_empty() {
+    if let Some(first_mask) = masks.first() {
+        if first_mask.boxed && !boxes.is_empty() {
             // Instance segmentation: per-box masks placed at box coordinates
-            boxed_mask_fusion(frame, &model.masks, &model.boxes, labels, ids);
+            boxed_mask_fusion(frame, &masks, &boxes, labels, ids);
             return;
         } else {
             // Semantic segmentation: process full-frame mask
-            let mut mask = first_mask.clone();
+            let mut mask = ProcessedMask::from_view(first_mask);
             let channels = process_mask(&mut mask);
             if mask.mask.is_empty() || mask.width == 0 || mask.height == 0 {
                 return;
@@ -860,11 +876,11 @@ fn get_vision_class_and_instance(
     }
 
     // Fallback: detection only (boxes, no masks)
-    if !model.boxes.is_empty() {
+    if !boxes.is_empty() {
         if frame.has_clusters() {
-            box_fusion_clustered(frame, &model.boxes, ids, labels);
+            box_fusion_clustered(frame, &boxes, ids, labels);
         } else {
-            box_fusion_no_cluster(frame, &model.boxes, labels);
+            box_fusion_no_cluster(frame, &boxes, labels);
         }
     }
 }
@@ -891,8 +907,8 @@ struct PreparedBoxMask {
 /// For argmaxed masks (channels > 1), the class comes from the pixel value
 /// so label resolution is not required.
 fn prepare_box_masks(
-    masks: &[Mask],
-    boxes: &[DetectBox],
+    masks: &[MaskView],
+    boxes: &[DetectBoxView],
     labels: Option<&[String]>,
 ) -> Vec<PreparedBoxMask> {
     masks
@@ -900,7 +916,7 @@ fn prepare_box_masks(
         .zip(boxes.iter())
         .enumerate()
         .filter_map(|(i, (mask, det_box))| {
-            let mut m = mask.clone();
+            let mut m = ProcessedMask::from_view(mask);
             let channels = process_mask(&mut m);
             let w = m.width as usize;
             let h = m.height as usize;
@@ -911,9 +927,9 @@ fn prepare_box_masks(
             // For argmaxed masks the pixel value is the class; label is only
             // needed for single-channel confidence masks.
             let class_idx = if argmaxed {
-                parse_box_label(&det_box.label, labels).unwrap_or(0)
+                parse_box_label(det_box.label, labels).unwrap_or(0)
             } else {
-                parse_box_label(&det_box.label, labels)?
+                parse_box_label(det_box.label, labels)?
             };
             let half_w = det_box.width / 2.0;
             let half_h = det_box.height / 2.0;
@@ -923,7 +939,7 @@ fn prepare_box_masks(
                 height: h,
                 class_idx,
                 instance_id: (i + 1) as u16,
-                track_id: hash_track_id(&det_box.track.id),
+                track_id: hash_track_id(det_box.track_id),
                 argmaxed,
                 x0: det_box.center_x - half_w,
                 y0: det_box.center_y - half_h,
@@ -1015,8 +1031,8 @@ fn filter_depth_outliers(frame: &mut FusionFrame) {
 /// Each per-box mask is placed at its detection box coordinates in image space.
 fn boxed_mask_fusion(
     frame: &mut FusionFrame,
-    masks: &[Mask],
-    boxes: &[DetectBox],
+    masks: &[MaskView],
+    boxes: &[DetectBoxView],
     labels: Option<&[String]>,
     ids: &HashMap<u32, Vec<usize>>,
 ) {
@@ -1137,7 +1153,7 @@ async fn get_fusion_predictions(
 #[instrument(skip_all)]
 async fn publish_bbox3d(
     bbox_publ: Option<&Publisher<'_>>,
-    header: &Header,
+    header: &CloudHeader,
     frame: &FusionFrame,
     ids: &HashMap<u32, Vec<usize>>,
 ) {
@@ -1163,7 +1179,7 @@ async fn publish_bbox3d(
 async fn publish_output(
     publ: Option<&Publisher<'_>>,
     frame: &FusionFrame,
-    header: &Header,
+    header: &CloudHeader,
     has_fusion_model: bool,
     tracking: bool,
 ) {
@@ -1176,7 +1192,7 @@ async fn publish_output(
     } else {
         serialize_late_fusion(frame, header, tracking)
     };
-    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
+    let buf = ZBytes::from(pcd.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
     match publ.put(buf).encoding(enc).await {
         Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
@@ -1188,7 +1204,7 @@ async fn publish_output(
 #[allow(clippy::too_many_arguments)]
 async fn publish_grid(
     grid_publ: Option<&Publisher<'_>>,
-    header: &Header,
+    header: &CloudHeader,
     frame: &FusionFrame,
     point_tracker: &mut ByteTrack,
     bins_data: (&mut [Vec<Bin>], u128),
@@ -1215,11 +1231,11 @@ async fn publish_grid(
 // (vision_class != UNCLASSIFIED) will get a 3D bounding box generated.
 // It is assumed that all points in the same cluster ID will have the same class.
 fn get_3d_bbox(
-    header: &Header,
+    header: &CloudHeader,
     frame: &FusionFrame,
     cluster_ids: &HashMap<u32, Vec<usize>>,
 ) -> (ZBytes, Encoding) {
-    let mut bbox_3d = Vec::new();
+    let mut bbox_owned: Vec<(f32, f32, f32, f32, f32, String, String)> = Vec::new();
     for inds in cluster_ids.values() {
         if inds.is_empty() {
             continue;
@@ -1258,37 +1274,46 @@ fn get_3d_bbox(
         // Add a 3D box using the max and min x,y,z values
         // TODO: Add 3D tracking to improve smoothness
         let inst = frame.instance_id[inds[0]];
-        bbox_3d.push(DetectBox {
-            center_x: -(y_max + y_min) / 2.0, // we use an optical frame, so positive X is right
-            center_y: -(z_max + z_min) / 2.0, // we use an optical frame, so positive Y is down
-            width: (y_max - y_min),
-            height: (z_max - z_min),
-            distance: (x_max + x_min) / 2.0,
-            label: class.to_string(),
-            score: 1.0,
-            speed: 0.0,
-            track: Track {
-                id: if inst > 0 {
-                    inst.to_string()
-                } else {
-                    "".to_string()
-                },
-                lifetime: 0,
-                created: header.stamp.clone(),
+        bbox_owned.push((
+            -(y_max + y_min) / 2.0, // optical frame: positive X is right
+            -(z_max + z_min) / 2.0, // optical frame: positive Y is down
+            y_max - y_min,
+            z_max - z_min,
+            (x_max + x_min) / 2.0,
+            class.to_string(),
+            if inst > 0 {
+                inst.to_string()
+            } else {
+                String::new()
             },
-        });
+        ));
     }
-    let new_msg = Detect {
-        input_timestamp: header.stamp.clone(),
-        model_time: Time { sec: 0, nanosec: 0 },
-        output_time: header.stamp.clone(),
-        boxes: bbox_3d,
-        header: Header {
-            stamp: header.stamp.clone(),
-            frame_id: header.frame_id.clone(),
-        },
-    };
-    let msg = ZBytes::from(serde_cdr::serialize(&new_msg).unwrap());
+    let bbox_3d: Vec<DetectBoxView> = bbox_owned
+        .iter()
+        .map(|(cx, cy, w, h, dist, label, track_id)| DetectBoxView {
+            center_x: *cx,
+            center_y: *cy,
+            width: *w,
+            height: *h,
+            label,
+            score: 1.0,
+            distance: *dist,
+            speed: 0.0,
+            track_id,
+            track_lifetime: 0,
+            track_created: header.stamp,
+        })
+        .collect();
+    let new_msg = Detect::builder()
+        .stamp(header.stamp)
+        .frame_id(header.frame_id.as_str())
+        .input_timestamp(header.stamp)
+        .model_time(Time { sec: 0, nanosec: 0 })
+        .output_time(header.stamp)
+        .boxes(&bbox_3d)
+        .build()
+        .expect("valid Detect");
+    let msg = ZBytes::from(new_msg.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Detect");
     (msg, enc)
 }
@@ -1310,14 +1335,12 @@ async fn tf_static(
     }
 }
 
-fn build_tf_msg() -> TransformStamped {
-    TransformStamped {
-        header: Header {
-            frame_id: BASE_LINK_FRAME_ID.to_string(),
-            stamp: Time { sec: 0, nanosec: 0 },
-        },
-        child_frame_id: format!("{BASE_LINK_FRAME_ID}_optical"),
-        transform: Transform {
+fn build_tf_msg() -> Result<TransformStamped<Vec<u8>>, edgefirst_schemas::cdr::CdrError> {
+    TransformStamped::builder()
+        .stamp(Time { sec: 0, nanosec: 0 })
+        .frame_id(BASE_LINK_FRAME_ID)
+        .child_frame_id(format!("{BASE_LINK_FRAME_ID}_optical"))
+        .transform(Transform {
             translation: Vector3 {
                 x: 0.0,
                 y: 0.0,
@@ -1331,8 +1354,8 @@ fn build_tf_msg() -> TransformStamped {
                 z: -1.0,
                 w: 1.0,
             },
-        },
-    }
+        })
+        .build()
 }
 
 #[instrument(skip_all)]
@@ -1402,7 +1425,7 @@ fn grid_nearest_cluster(
 /// was removed because it relied on class 0 meaning "background". With the
 /// UNCLASSIFIED sentinel, all argmax results are valid classes.
 #[instrument(skip_all)]
-fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &Mask) {
+fn late_fusion_no_cluster(frame: &mut FusionFrame, mask: &ProcessedMask) {
     let mask_height = mask.height as usize;
     let mask_width = mask.width as usize;
     let index_mask = |x: f32, y: f32| -> u8 {
@@ -1432,7 +1455,7 @@ fn check_in_bounds(x: &f32, y: &f32) -> bool {
 #[instrument(skip_all)]
 fn late_fusion_clustered(
     frame: &mut FusionFrame,
-    mask: &Mask,
+    mask: &ProcessedMask,
     clusters: &HashMap<u32, Vec<usize>>,
     channels: usize,
     background_index: i16,
@@ -1597,21 +1620,22 @@ async fn grid_radar_update_tracker(
             tracked_g[i as usize][j as usize] = 1.0
         }
 
-        let mask = tracked_g
+        let mask: Vec<u8> = tracked_g
             .iter()
             .flatten()
             .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
             .collect();
-        let msg = Mask {
-            height: height as u32,
-            width: width as u32,
-            length: 1,
-            encoding: "".to_string(),
-            mask,
-            boxed: false,
-        };
+        let msg = Mask::builder()
+            .height(height as u32)
+            .width(width as u32)
+            .length(1)
+            .encoding("")
+            .mask(&mask)
+            .boxed(false)
+            .build()
+            .expect("valid Mask");
 
-        let buf = ZBytes::from(serde_cdr::serialize(&msg).unwrap());
+        let buf = ZBytes::from(msg.into_cdr());
         let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
 
         session
@@ -1803,18 +1827,18 @@ fn centroids_add_tracks(centroid: &mut FusionFrame, point_tracker: &mut ByteTrac
 /// Returns the centroid of classified clusters. All points in a cluster should
 /// have the same class.
 fn get_occupied_cluster(
-    header: &Header,
+    header: &CloudHeader,
     frame: &FusionFrame,
     cluster_ids: &HashMap<u32, Vec<usize>>,
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
     let mut centroid = centroids_get_class(cluster_ids, frame);
-    let timestamp = header.stamp.to_nanos();
+    let timestamp = header.stamp.to_nanos().unwrap_or(0);
     centroids_update_tracker_classes(&mut centroid, point_tracker, timestamp);
     centroids_add_tracks(&mut centroid, point_tracker, timestamp);
 
     let pcd = serialize_grid(&centroid, header);
-    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
+    let buf = ZBytes::from(pcd.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
 
     (buf, enc)
@@ -1987,7 +2011,7 @@ fn find_marked_bins(bins: &[Vec<Bin>], frame_index: u128, args: &Args) -> Fusion
 
 /// Do a grid and highlight the grid based on point classes
 fn get_occupied_no_cluster(
-    header: &Header,
+    header: &CloudHeader,
     frame: &FusionFrame,
     bins: &mut [Vec<Bin>],
     frame_index: u128,
@@ -2001,7 +2025,7 @@ fn get_occupied_no_cluster(
 
     let grid_frame = find_marked_bins(bins, frame_index, args);
     let pcd = serialize_grid(&grid_frame, header);
-    let buf = ZBytes::from(serde_cdr::serialize(&pcd).unwrap());
+    let buf = ZBytes::from(pcd.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
 
     (buf, enc)
@@ -2137,38 +2161,53 @@ async fn drain_recv(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edgefirst_schemas::builtin_interfaces::Duration;
 
-    fn make_box(cx: f32, cy: f32, w: f32, h: f32, label: &str, track_id: &str) -> DetectBox {
-        DetectBox {
+    fn make_box<'a>(
+        cx: f32,
+        cy: f32,
+        w: f32,
+        h: f32,
+        label: &'a str,
+        track_id: &'a str,
+    ) -> DetectBoxView<'a> {
+        DetectBoxView {
             center_x: cx,
             center_y: cy,
             width: w,
             height: h,
-            label: label.to_string(),
+            label,
             score: 1.0,
             distance: 0.0,
             speed: 0.0,
-            track: Track {
-                id: track_id.to_string(),
-                lifetime: 0,
-                created: Time { sec: 0, nanosec: 0 },
-            },
+            track_id,
+            track_lifetime: 0,
+            track_created: Time { sec: 0, nanosec: 0 },
         }
     }
 
-    fn make_model(boxes: Vec<DetectBox>, masks: Vec<Mask>) -> Model {
-        Model {
-            header: Header {
-                stamp: Time { sec: 0, nanosec: 0 },
-                frame_id: String::new(),
-            },
-            input_time: Duration { sec: 0, nanosec: 0 },
-            model_time: Duration { sec: 0, nanosec: 0 },
-            output_time: Duration { sec: 0, nanosec: 0 },
-            decode_time: Duration { sec: 0, nanosec: 0 },
-            boxes,
-            masks,
+    fn make_model(boxes: &[DetectBoxView], masks: &[MaskView]) -> Model<Vec<u8>> {
+        Model::builder()
+            .boxes(boxes)
+            .masks(masks)
+            .build()
+            .expect("valid Model")
+    }
+
+    fn mask_view<'a>(
+        width: u32,
+        height: u32,
+        length: u32,
+        encoding: &'a str,
+        mask: &'a [u8],
+        boxed: bool,
+    ) -> MaskView<'a> {
+        MaskView {
+            height,
+            width,
+            length,
+            encoding,
+            mask,
+            boxed,
         }
     }
 
@@ -2287,7 +2326,7 @@ mod tests {
 
     #[test]
     fn test_box_fusion_empty_boxes_returns_zeros() {
-        let boxes: Vec<DetectBox> = vec![];
+        let boxes: Vec<DetectBoxView> = vec![];
         let proj = vec![[0.5, 0.5], [0.3, 0.7]];
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], None, &proj);
         box_fusion_no_cluster(&mut frame, &boxes, None);
@@ -2391,10 +2430,9 @@ mod tests {
     #[test]
     fn test_process_mask_argmax() {
         // 2x2 mask with 3 channels: pixel scores determine class via argmax
-        let mut mask = Mask {
+        let mut mask = ProcessedMask {
             width: 2,
             height: 2,
-            length: 1,
             encoding: String::new(),
             mask: vec![
                 10, 20, 5, // pixel (0,0): channel 1 wins -> class 1
@@ -2402,7 +2440,6 @@ mod tests {
                 5, 5, 40, // pixel (0,1): channel 2 wins -> class 2
                 2, 1, 1, // pixel (1,1): channel 0 wins -> class 0
             ],
-            boxed: false,
         };
         process_mask(&mut mask);
         assert_eq!(mask.mask, vec![1, 0, 2, 0]);
@@ -2411,13 +2448,11 @@ mod tests {
     #[test]
     fn test_process_mask_single_channel() {
         // Single channel: mask passes through unchanged
-        let mut mask = Mask {
+        let mut mask = ProcessedMask {
             width: 2,
             height: 2,
-            length: 1,
             encoding: String::new(),
             mask: vec![0, 1, 2, 3],
-            boxed: false,
         };
         process_mask(&mut mask);
         assert_eq!(mask.mask, vec![0, 1, 2, 3]);
@@ -2428,13 +2463,11 @@ mod tests {
         // Compress a known mask and verify decompression works
         let original = vec![0u8, 1, 2, 3];
         let compressed = zstd::encode_all(original.as_slice(), 3).unwrap();
-        let mut mask = Mask {
+        let mut mask = ProcessedMask {
             width: 2,
             height: 2,
-            length: 1,
             encoding: "zstd".to_string(),
             mask: compressed,
-            boxed: false,
         };
         process_mask(&mut mask);
         assert_eq!(mask.encoding, "");
@@ -2445,7 +2478,7 @@ mod tests {
     fn test_get_vision_class_and_instance_detection_only() {
         // Model with boxes only, no masks
         let boxes = vec![make_box(0.5, 0.5, 0.4, 0.4, "2", "det-track")];
-        let model = make_model(boxes, vec![]);
+        let model = make_model(&boxes, &[]);
         let proj = vec![[0.5, 0.5]];
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
         let ids = HashMap::new();
@@ -2462,15 +2495,9 @@ mod tests {
     #[test]
     fn test_get_vision_class_and_instance_semantic() {
         // Model with semantic mask (not boxed), no boxes
-        let mask = Mask {
-            width: 2,
-            height: 2,
-            length: 1,
-            encoding: String::new(),
-            mask: vec![0, 1, 2, 3],
-            boxed: false,
-        };
-        let model = make_model(vec![], vec![mask]);
+        let mask_bytes = vec![0, 1, 2, 3];
+        let mask = mask_view(2, 2, 1, "", &mask_bytes, false);
+        let model = make_model(&[], &[mask]);
         // Project to pixel (1,1) in normalized coords -> (0.75, 0.75) -> mask[1*2+1] = 3
         let proj = vec![[0.75, 0.75]];
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0)], None, &proj);
@@ -2492,17 +2519,10 @@ mod tests {
     fn test_get_vision_class_and_instance_instance_seg() {
         // Model with boxed instance masks
         let labels = vec!["bg".to_string(), "person".to_string()];
-        let mask = Mask {
-            width: 4,
-            height: 4,
-            length: 1,
-            encoding: String::new(),
-            // Single-channel confidence mask: high confidence in upper-left quadrant
-            mask: vec![255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            boxed: true,
-        };
+        let mask_bytes = vec![255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mask = mask_view(4, 4, 1, "", &mask_bytes, true);
         let det_box = make_box(0.25, 0.25, 0.5, 0.5, "person", "track-1");
-        let model = make_model(vec![det_box], vec![mask]);
+        let model = make_model(&[det_box], &[mask]);
         // First point projects into the mask, second projects outside
         let proj = vec![[0.1, 0.1], [0.9, 0.9]];
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (5.0, 0.0, 0.0)], None, &proj);
@@ -2531,55 +2551,15 @@ mod tests {
     fn test_instance_mask_fusion_no_cluster() {
         // Box 1: centered at (0.25, 0.25), size 0.5x0.5 -> covers [0.0, 0.0] to [0.5, 0.5]
         // Box 2: centered at (0.75, 0.75), size 0.5x0.5 -> covers [0.5, 0.5] to [1.0, 1.0]
-        let masks = vec![
-            Mask {
-                width: 2,
-                height: 2,
-                length: 1,
-                encoding: String::new(),
-                mask: vec![255, 255, 255, 255], // all foreground
-                boxed: true,
-            },
-            Mask {
-                width: 2,
-                height: 2,
-                length: 1,
-                encoding: String::new(),
-                mask: vec![255, 255, 255, 255],
-                boxed: true,
-            },
+        let mask_a = [255u8, 255, 255, 255];
+        let mask_b = [255u8, 255, 255, 255];
+        let masks = [
+            mask_view(2, 2, 1, "", &mask_a, true),
+            mask_view(2, 2, 1, "", &mask_b, true),
         ];
-        let boxes = vec![
-            DetectBox {
-                center_x: 0.25,
-                center_y: 0.25,
-                width: 0.5,
-                height: 0.5,
-                label: "1".to_string(),
-                score: 0.9,
-                distance: 0.0,
-                speed: 0.0,
-                track: Track {
-                    id: "track-a".to_string(),
-                    lifetime: 0,
-                    created: Time { sec: 0, nanosec: 0 },
-                },
-            },
-            DetectBox {
-                center_x: 0.75,
-                center_y: 0.75,
-                width: 0.5,
-                height: 0.5,
-                label: "2".to_string(),
-                score: 0.9,
-                distance: 0.0,
-                speed: 0.0,
-                track: Track {
-                    id: "track-b".to_string(),
-                    lifetime: 0,
-                    created: Time { sec: 0, nanosec: 0 },
-                },
-            },
+        let boxes = [
+            make_box(0.25, 0.25, 0.5, 0.5, "1", "track-a"),
+            make_box(0.75, 0.75, 0.5, 0.5, "2", "track-b"),
         ];
         let ids: HashMap<u32, Vec<usize>> = HashMap::new();
         // Point in box 1, point in box 2, point well outside both boxes (beyond edge tolerance)
@@ -2642,16 +2622,10 @@ mod tests {
         // Pixel 2: [3, 9]  → argmax = 1 (class 1)
         // Pixel 3: [2, 7]  → argmax = 1 (class 1)
         let labels = vec!["cat".to_string(), "dog".to_string()];
-        let mask = Mask {
-            width: 2,
-            height: 2,
-            length: 2,
-            encoding: String::new(),
-            mask: vec![10, 5, 3, 8, 3, 9, 2, 7],
-            boxed: true,
-        };
+        let mask_bytes = vec![10, 5, 3, 8, 3, 9, 2, 7];
+        let mask = mask_view(2, 2, 2, "", &mask_bytes, true);
         let det_box = make_box(0.5, 0.5, 1.0, 1.0, "cat", "track-am");
-        let model = make_model(vec![det_box], vec![mask]);
+        let model = make_model(&[det_box], &[mask]);
         // Point 0 projects to top-left (class 0), point 1 to bottom-right (class 1)
         let proj = vec![[0.1, 0.1], [0.9, 0.9]];
         let mut frame = make_frame_with_proj(&[(1.0, 0.0, 0.0), (2.0, 0.0, 0.0)], None, &proj);
@@ -2671,29 +2645,9 @@ mod tests {
     #[test]
     fn test_instance_mask_fusion_clustered() {
         // Box centered at (0.25, 0.25), covering [0.0, 0.0] to [0.5, 0.5]
-        let masks = vec![Mask {
-            width: 2,
-            height: 2,
-            length: 1,
-            encoding: String::new(),
-            mask: vec![255, 255, 255, 255],
-            boxed: true,
-        }];
-        let boxes = vec![DetectBox {
-            center_x: 0.25,
-            center_y: 0.25,
-            width: 0.5,
-            height: 0.5,
-            label: "1".to_string(),
-            score: 0.9,
-            distance: 0.0,
-            speed: 0.0,
-            track: Track {
-                id: "track-a".to_string(),
-                lifetime: 0,
-                created: Time { sec: 0, nanosec: 0 },
-            },
-        }];
+        let mask_bytes = [255u8, 255, 255, 255];
+        let masks = [mask_view(2, 2, 1, "", &mask_bytes, true)];
+        let boxes = [make_box(0.25, 0.25, 0.5, 0.5, "1", "track-a")];
         // Both points in cluster 5 project into box region
         let proj = vec![[0.1, 0.1], [0.2, 0.2]];
         let mut frame =

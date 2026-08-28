@@ -5,7 +5,7 @@ use async_pidfd::PidFd;
 use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
-use edgefirst_schemas::edgefirst_msgs::DmaBuffer as DmaBufMsg;
+use edgefirst_schemas::edgefirst_msgs::CameraFrame;
 use four_char_code::{four_char_code, FourCharCode};
 use g2d_sys::{
     g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270,
@@ -223,20 +223,67 @@ impl TryFrom<&Image> for G2DSurface {
     }
 }
 
-impl TryFrom<&DmaBufMsg> for Image {
+fn camera_frame_invalid(msg: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+fn camera_frame_u32(name: &str, value: u64) -> io::Result<u32> {
+    u32::try_from(value).map_err(|_| {
+        camera_frame_invalid(format!(
+            "CameraFrame tensor {name} {value} does not fit in u32"
+        ))
+    })
+}
+
+fn camera_frame_nonzero_u32(name: &str, value: u64) -> io::Result<u32> {
+    let dim = camera_frame_u32(name, value)?;
+    if dim == 0 {
+        return Err(camera_frame_invalid(format!(
+            "CameraFrame tensor {name} is 0"
+        )));
+    }
+    Ok(dim)
+}
+
+/// Import a [`CameraFrame`] tensor plane 0 as an [`Image`] via pidfd + getfd.
+pub fn image_from_camera_frame(frame: &CameraFrame<Vec<u8>>) -> Result<Image, io::Error> {
+    let t = frame.tensor();
+    let plane = t
+        .plane_at(0)
+        .ok_or_else(|| camera_frame_invalid("CameraFrame tensor has no plane 0"))?;
+    let pid = t.pid();
+    let pid_i32 = i32::try_from(pid)
+        .map_err(|_| camera_frame_invalid(format!("CameraFrame tensor pid {pid} exceeds i32")))?;
+    let pidfd: PidFd = PidFd::from_pid(pid_i32)?;
+    let target_fd = i32::try_from(plane.handle).map_err(|_| {
+        camera_frame_invalid(format!(
+            "CameraFrame plane handle {} exceeds i32",
+            plane.handle
+        ))
+    })?;
+    let fd = get_file_from_pidfd(pidfd.as_raw_fd(), target_fd, GetFdFlags::empty())?;
+    let height = t
+        .shape_at(0)
+        .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing height (shape[0])"))?;
+    let width = t
+        .shape_at(1)
+        .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing width (shape[1])"))?;
+    let format = t.format();
+    let fourcc = FourCharCode::from_str(format)
+        .map_err(|e| io::Error::other(format!("invalid fourcc {format}: {e}")))?;
+    Ok(Image {
+        fd: fd.into(),
+        width: camera_frame_nonzero_u32("width", width)?,
+        height: camera_frame_nonzero_u32("height", height)?,
+        format: fourcc,
+    })
+}
+
+impl TryFrom<&CameraFrame<Vec<u8>>> for Image {
     type Error = io::Error;
 
-    fn try_from(dma_buf: &DmaBufMsg) -> Result<Self, io::Error> {
-        let pidfd: PidFd = PidFd::from_pid(dma_buf.pid as i32)?;
-        let fd = get_file_from_pidfd(pidfd.as_raw_fd(), dma_buf.fd, GetFdFlags::empty())?;
-        let fourcc = FourCharCode::new(dma_buf.fourcc)
-            .map_err(|e| io::Error::other(format!("invalid fourcc: {e}")))?;
-        Ok(Image {
-            fd: fd.into(),
-            width: dma_buf.width,
-            height: dma_buf.height,
-            format: fourcc,
-        })
+    fn try_from(frame: &CameraFrame<Vec<u8>>) -> Result<Self, io::Error> {
+        image_from_camera_frame(frame)
     }
 }
 

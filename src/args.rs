@@ -61,8 +61,8 @@ pub struct Args {
     #[arg(long, env, default_value = "lidar")]
     pub bbox3d_src: PCDSource,
 
-    /// camera DMA buffers input topic
-    #[arg(long, env, default_value = "rt/camera/dma")]
+    /// camera frame input topic (`CameraFrame`)
+    #[arg(long, env, default_value = "camera/frame")]
     pub camera_topic: String,
 
     /// radarcube input topic

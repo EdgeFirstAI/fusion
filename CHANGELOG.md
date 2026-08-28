@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated to `edgefirst-schemas` 4.0.0: messages are immutable CDR views constructed with
+  `Type::from_cdr` / `Type::builder()...build()?.into_cdr()`. Removed `serde_cdr` and
+  `DmaBuffer`; DetectBox/Track fields are flattened (`track_id`, `track_lifetime`,
+  `track_created` on `DetectBoxView`).
+- Camera ingest uses `edgefirst_msgs/CameraFrame` tensors (plane 0 handle + pidfd import)
+  instead of `DmaBuffer`. Default `--camera-topic` is `camera/frame`.
+
 ## [1.7.2] - 2026-03-10
 
 ### Fixed
