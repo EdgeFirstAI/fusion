@@ -667,10 +667,11 @@ async fn publish(
     frame_index: u128,
     tracking: bool,
 ) {
-    let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), header, frame, ids);
+    let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), &zenoh.session, header, frame, ids);
 
     let publ_output = publish_output(
         zenoh.output_publ.as_ref(),
+        &zenoh.session,
         frame,
         header,
         args.has_fusion_model(),
@@ -679,6 +680,7 @@ async fn publish(
 
     let publ_grid = publish_grid(
         zenoh.grid_publ.as_ref(),
+        &zenoh.session,
         header,
         frame,
         point_tracker,
@@ -1153,6 +1155,7 @@ async fn get_fusion_predictions(
 #[instrument(skip_all)]
 async fn publish_bbox3d(
     bbox_publ: Option<&Publisher<'_>>,
+    session: &Session,
     header: &CloudHeader,
     frame: &FusionFrame,
     ids: &HashMap<u32, Vec<usize>>,
@@ -1169,7 +1172,12 @@ async fn publish_bbox3d(
     let bbox_publ = bbox_publ.unwrap();
     let (buf_bbox, enc_bbox) = get_3d_bbox(header, frame, ids);
 
-    match bbox_publ.put(buf_bbox).encoding(enc_bbox).await {
+    match bbox_publ
+        .put(buf_bbox)
+        .encoding(enc_bbox)
+        .timestamp(session.new_timestamp())
+        .await
+    {
         Ok(_) => trace!("Message Sent on {:?}", bbox_publ.key_expr()),
         Err(e) => error!("Message Error on {:?}: {:?}", bbox_publ.key_expr(), e),
     }
@@ -1178,6 +1186,7 @@ async fn publish_bbox3d(
 #[instrument(skip_all)]
 async fn publish_output(
     publ: Option<&Publisher<'_>>,
+    session: &Session,
     frame: &FusionFrame,
     header: &CloudHeader,
     has_fusion_model: bool,
@@ -1194,7 +1203,12 @@ async fn publish_output(
     };
     let buf = ZBytes::from(pcd.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
-    match publ.put(buf).encoding(enc).await {
+    match publ
+        .put(buf)
+        .encoding(enc)
+        .timestamp(session.new_timestamp())
+        .await
+    {
         Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
         Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
     }
@@ -1204,6 +1218,7 @@ async fn publish_output(
 #[allow(clippy::too_many_arguments)]
 async fn publish_grid(
     grid_publ: Option<&Publisher<'_>>,
+    session: &Session,
     header: &CloudHeader,
     frame: &FusionFrame,
     point_tracker: &mut ByteTrack,
@@ -1221,7 +1236,12 @@ async fn publish_grid(
         let (bins, frame_index) = bins_data;
         get_occupied_no_cluster(header, frame, bins, frame_index, args)
     };
-    match grid_publ.put(buf_grid).encoding(enc_grid).await {
+    match grid_publ
+        .put(buf_grid)
+        .encoding(enc_grid)
+        .timestamp(session.new_timestamp())
+        .await
+    {
         Ok(_) => trace!("Message Sent on {:?}", grid_publ.key_expr()),
         Err(e) => error!("Message Error on {:?}: {:?}", grid_publ.key_expr(), e),
     }
@@ -1331,6 +1351,7 @@ async fn tf_static(
         session
             .put(&topic, msg.clone())
             .encoding(enc.clone())
+            .timestamp(session.new_timestamp())
             .await?;
     }
 }
@@ -1641,6 +1662,7 @@ async fn grid_radar_update_tracker(
         session
             .put(format!("{}/tracked", args.model_output_topic), buf)
             .encoding(enc)
+            .timestamp(session.new_timestamp())
             .await
             .unwrap();
     }

@@ -289,24 +289,49 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    #[test]
-    fn zenoh_config_sets_namespace() {
-        let args = Args::parse_from(["edgefirst-fusion"]);
-        let cfg = Config::from(args);
-        let ns: String = serde_json::from_str(&cfg.to_string())
-            .ok()
-            .and_then(|v: serde_json::Value| {
-                v.pointer("/namespace")
-                    .and_then(|n| n.as_str().map(String::from))
-            })
-            .expect("namespace should be set in config");
-        assert!(!ns.is_empty(), "namespace should be non-empty");
-        assert!(!ns.contains('/'), "namespace must not contain '/'");
+    fn parse_cli() -> Args {
+        Args::parse_from([
+            "edgefirst-fusion",
+            "--mode",
+            "peer",
+            "--lidar-output-topic",
+            "fusion/lidar",
+            "--radar-output-topic",
+            "fusion/radar",
+            "--info-topic",
+            "camera/info",
+            "--vision-model-topic",
+            "model/output",
+            "--model-info-topic",
+            "model/info",
+            "--bbox3d-topic",
+            "fusion/boxes3d",
+            "--radarcube-topic",
+            "radar/cube",
+            "--model-output-topic",
+            "fusion/model_output",
+            "--grid-topic",
+            "fusion/occupancy",
+            "--camera-topic",
+            "camera/frame",
+        ])
     }
 
     #[test]
-    fn default_topics_have_no_rt_prefix() {
-        let args = Args::parse_from(["edgefirst-fusion"]);
+    fn zenoh_config_sets_namespace() {
+        let ns = zenoh_namespace();
+        assert!(!ns.is_empty(), "namespace should be non-empty");
+        assert!(!ns.contains('/'), "namespace must not contain '/'");
+        let rendered = Config::from(parse_cli()).to_string();
+        assert!(
+            rendered.contains(&ns),
+            "config should include namespace {ns}: {rendered}"
+        );
+    }
+
+    #[test]
+    fn cli_topics_have_no_rt_prefix() {
+        let args = parse_cli();
         assert_eq!(args.lidar_output_topic, "fusion/lidar");
         assert_eq!(args.radar_output_topic, "fusion/radar");
         assert_eq!(args.info_topic, "camera/info");
