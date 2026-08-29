@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Set the Zenoh session namespace to the system hostname and drop the `rt/`
+  prefix from default key expressions. Wire keys are `{hostname}/fusion/…`
+  and `{hostname}/tf_static` (EDGEAI-1396).
 - Migrated to `edgefirst-schemas` 4.0.0: messages are immutable CDR views constructed with
   `Type::from_cdr` / `Type::builder()...build()?.into_cdr()`. Removed `serde_cdr` and
   `DmaBuffer`; DetectBox/Track fields are flattened (`track_id`, `track_lifetime`,

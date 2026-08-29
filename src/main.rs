@@ -168,7 +168,7 @@ async fn main() {
     let transform = Arc::new(Mutex::new(HashMap::<(String, String), Transform>::new()));
     let tf_static_cb = tf_static_callback(transform.clone());
     let _transform_sub = session
-        .declare_subscriber("rt/tf_static")
+        .declare_subscriber("tf_static")
         .callback_mut(tf_static_cb)
         .await
         .expect("Failed to declare Zenoh subscriber");
@@ -1323,7 +1323,7 @@ async fn tf_static(
     msg: ZBytes,
     enc: Encoding,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let topic = "rt/tf_static".to_string();
+    let topic = "tf_static".to_string();
     let mut interval = tokio::time::interval(Duration::from_secs(1));
 
     loop {

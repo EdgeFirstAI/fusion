@@ -254,7 +254,7 @@ pub fn serialize_late_fusion(
     build_pcd(header, n as u32, fields, point_step, &data)
 }
 
-/// Serialize xyzc (16 bytes/point) for rt/fusion/classes.
+/// Serialize xyzc (16 bytes/point) for fusion/classes.
 ///
 /// Layout per point: x(f32) y(f32) z(f32) fusion_class(u8) vision_class(u8)
 /// instance_id(u16)

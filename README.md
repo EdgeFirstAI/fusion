@@ -141,7 +141,7 @@ edgefirst-fusion \
   --model model.rtm \
   --engine npu \
   --track \
-  --radar-pcd-topic rt/radar/clusters \
+  --radar-pcd-topic radar/clusters \
   --grid-src radar
 ```
 
@@ -149,7 +149,7 @@ edgefirst-fusion \
 
 ```bash
 edgefirst-fusion \
-  --lidar-pcd-topic rt/lidar/clusters \
+  --lidar-pcd-topic lidar/clusters \
   --bbox3d-src lidar \
   --grid-src lidar
 ```
@@ -158,10 +158,10 @@ edgefirst-fusion \
 
 ```bash
 edgefirst-fusion \
-  --radar-pcd-topic rt/radar/clusters \
-  --lidar-pcd-topic rt/lidar/clusters \
+  --radar-pcd-topic radar/clusters \
+  --lidar-pcd-topic lidar/clusters \
   --camera-topic camera/frame \
-  --vision-model-topic rt/model/output \
+  --vision-model-topic model/output \
   --model model.rtm
 ```
 
@@ -180,18 +180,18 @@ edgefirst-fusion --help
 - `--radar-pcd-topic <TOPIC>` - Radar point cloud input (default: empty/disabled)
 - `--lidar-pcd-topic <TOPIC>` - LiDAR point cloud input (default: empty/disabled)
 - `--camera-topic <TOPIC>` - CameraFrame input (default: `camera/frame`)
-- `--radarcube-topic <TOPIC>` - Radar cube input (default: `rt/radar/cube`)
-- `--vision-model-topic <TOPIC>` - Unified vision model output (default: `rt/model/output`)
-- `--model-info-topic <TOPIC>` - Model info for label resolution (default: `rt/model/info`)
-- `--info-topic <TOPIC>` - Camera info input (default: `rt/camera/info`)
+- `--radarcube-topic <TOPIC>` - Radar cube input (default: `radar/cube`)
+- `--vision-model-topic <TOPIC>` - Unified vision model output (default: `model/output`)
+- `--model-info-topic <TOPIC>` - Model info for label resolution (default: `model/info`)
+- `--info-topic <TOPIC>` - Camera info input (default: `camera/info`)
 
 **Output Topics:**
 
-- `--radar-output-topic <TOPIC>` - Enriched radar point cloud (default: `rt/fusion/radar`)
-- `--lidar-output-topic <TOPIC>` - Enriched LiDAR point cloud (default: `rt/fusion/lidar`)
-- `--grid-topic <TOPIC>` - Occupancy grid output (default: `rt/fusion/occupancy`)
-- `--bbox3d-topic <TOPIC>` - 3D bounding boxes output (default: `rt/fusion/boxes3d`)
-- `--model-output-topic <TOPIC>` - Model predictions output (default: `rt/fusion/model_output`)
+- `--radar-output-topic <TOPIC>` - Enriched radar point cloud (default: `fusion/radar`)
+- `--lidar-output-topic <TOPIC>` - Enriched LiDAR point cloud (default: `fusion/lidar`)
+- `--grid-topic <TOPIC>` - Occupancy grid output (default: `fusion/occupancy`)
+- `--bbox3d-topic <TOPIC>` - 3D bounding boxes output (default: `fusion/boxes3d`)
+- `--model-output-topic <TOPIC>` - Model predictions output (default: `fusion/model_output`)
 
 **ML Model Configuration:**
 
@@ -327,10 +327,10 @@ fusion/
 ```bash
 # Ensure camera and vision model services are running
 # Check that the camera publishes CameraInfo
-zenoh-cli query "rt/camera/info"
+zenoh-cli query "camera/info"
 
 # Check that the vision model publishes model output
-zenoh-cli query "rt/model/output"
+zenoh-cli query "model/output"
 ```
 
 **Problem: "Did not find transform from base_link" warning**
@@ -338,7 +338,7 @@ zenoh-cli query "rt/model/output"
 ```bash
 # Ensure tf_static transforms are published for your sensor frame IDs
 # Fusion waits 2 seconds at startup for transforms
-zenoh-cli query "rt/tf_static"
+zenoh-cli query "tf_static"
 ```
 
 **Problem: Model inference not running**
