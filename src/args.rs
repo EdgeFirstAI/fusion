@@ -30,23 +30,23 @@ pub struct Args {
     pub lidar_pcd_topic: String,
 
     /// lidar fusion output topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/fusion/lidar")]
+    #[arg(long, env, default_value = "fusion/lidar")]
     pub lidar_output_topic: String,
 
     /// radar fusion output topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/fusion/radar")]
+    #[arg(long, env, default_value = "fusion/radar")]
     pub radar_output_topic: String,
 
     /// camera info input topic
-    #[arg(long, env, default_value = "rt/camera/info")]
+    #[arg(long, env, default_value = "camera/info")]
     pub info_topic: String,
 
     /// unified vision model output topic. leave empty to disable
-    #[arg(long, env, default_value = "rt/model/output")]
+    #[arg(long, env, default_value = "model/output")]
     pub vision_model_topic: String,
 
     /// model info topic for label resolution. leave empty to disable
-    #[arg(long, env, default_value = "rt/model/info")]
+    #[arg(long, env, default_value = "model/info")]
     pub model_info_topic: String,
 
     /// Maximum age in seconds for model output data before warning. 0 = disabled
@@ -54,7 +54,7 @@ pub struct Args {
     pub max_model_age: f32,
 
     /// bbox3d output topic
-    #[arg(long, env, default_value = "rt/fusion/boxes3d")]
+    #[arg(long, env, default_value = "fusion/boxes3d")]
     pub bbox3d_topic: String,
 
     /// bbox3d source
@@ -66,11 +66,11 @@ pub struct Args {
     pub camera_topic: String,
 
     /// radarcube input topic
-    #[arg(long, env, default_value = "rt/radar/cube")]
+    #[arg(long, env, default_value = "radar/cube")]
     pub radarcube_topic: String,
 
     /// radar model output
-    #[arg(long, env, default_value = "rt/fusion/model_output")]
+    #[arg(long, env, default_value = "fusion/model_output")]
     pub model_output_topic: String,
 
     /// model, leave empty to disable
@@ -123,7 +123,7 @@ pub struct Args {
     pub track_update: f32,
 
     /// Occupancy grid output topic
-    #[arg(long, env, default_value = "rt/fusion/occupancy")]
+    #[arg(long, env, default_value = "fusion/occupancy")]
     pub grid_topic: String,
 
     /// Occupancy grid source
@@ -226,9 +226,33 @@ impl Args {
     }
 }
 
+/// System hostname used as the Zenoh session namespace.
+///
+/// Empty or `/`-containing hostnames would create unintended sub-keys, so we
+/// fall back to `"localhost"` and warn. Two devices both falling back would
+/// silently share a namespace; that is a deployment defect.
+fn zenoh_namespace() -> String {
+    let raw = gethostname::gethostname().to_string_lossy().into_owned();
+    if raw.is_empty() || raw.contains('/') {
+        tracing::warn!(
+            hostname = %raw,
+            "system hostname is empty or contains '/' — falling back to \"localhost\""
+        );
+        "localhost".into()
+    } else {
+        raw
+    }
+}
+
 impl From<Args> for Config {
     fn from(args: Args) -> Self {
         let mut config = Config::default();
+
+        // Session namespace = hostname: application keys are bare
+        // (`fusion/radar`) and the wire form is `{hostname}/fusion/radar`.
+        config
+            .insert_json5("namespace", &json!(zenoh_namespace()).to_string())
+            .unwrap();
 
         config
             .insert_json5("mode", &json!(args.mode).to_string())
@@ -257,5 +281,66 @@ impl From<Args> for Config {
             .unwrap();
 
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parse_cli() -> Args {
+        Args::parse_from([
+            "edgefirst-fusion",
+            "--mode",
+            "peer",
+            "--lidar-output-topic",
+            "fusion/lidar",
+            "--radar-output-topic",
+            "fusion/radar",
+            "--info-topic",
+            "camera/info",
+            "--vision-model-topic",
+            "model/output",
+            "--model-info-topic",
+            "model/info",
+            "--bbox3d-topic",
+            "fusion/boxes3d",
+            "--radarcube-topic",
+            "radar/cube",
+            "--model-output-topic",
+            "fusion/model_output",
+            "--grid-topic",
+            "fusion/occupancy",
+            "--camera-topic",
+            "camera/frame",
+        ])
+    }
+
+    #[test]
+    fn zenoh_config_sets_namespace() {
+        let ns = zenoh_namespace();
+        assert!(!ns.is_empty(), "namespace should be non-empty");
+        assert!(!ns.contains('/'), "namespace must not contain '/'");
+        let rendered = Config::from(parse_cli()).to_string();
+        assert!(
+            rendered.contains(&ns),
+            "config should include namespace {ns}: {rendered}"
+        );
+    }
+
+    #[test]
+    fn cli_topics_have_no_rt_prefix() {
+        let args = parse_cli();
+        assert_eq!(args.lidar_output_topic, "fusion/lidar");
+        assert_eq!(args.radar_output_topic, "fusion/radar");
+        assert_eq!(args.info_topic, "camera/info");
+        assert_eq!(args.vision_model_topic, "model/output");
+        assert_eq!(args.model_info_topic, "model/info");
+        assert_eq!(args.bbox3d_topic, "fusion/boxes3d");
+        assert_eq!(args.radarcube_topic, "radar/cube");
+        assert_eq!(args.model_output_topic, "fusion/model_output");
+        assert_eq!(args.grid_topic, "fusion/occupancy");
+        assert_eq!(args.camera_topic, "camera/frame");
     }
 }

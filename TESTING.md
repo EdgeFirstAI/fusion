@@ -31,23 +31,23 @@ Fusion is a pub/sub service that requires live sensor data or recorded Zenoh top
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `rt/radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud |
-| `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud |
+| `radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud |
+| `lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud |
 | `camera/frame` | `edgefirst_msgs/CameraFrame` | Camera frame (tensor + DMA-BUF planes) |
-| `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model |
-| `rt/model/mask` | `edgefirst_msgs/Mask` | Segmentation mask |
-| `rt/model/boxes2d` | `edgefirst_msgs/Detect` | 2D detection boxes (optional, for instance-level fusion) |
-| `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration |
-| `rt/tf_static` | `geometry_msgs/TransformStamped` | Coordinate transforms |
+| `radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model |
+| `model/mask` | `edgefirst_msgs/Mask` | Segmentation mask |
+| `model/boxes2d` | `edgefirst_msgs/Detect` | 2D detection boxes (optional, for instance-level fusion) |
+| `camera/info` | `sensor_msgs/CameraInfo` | Camera calibration |
+| `tf_static` | `geometry_msgs/TransformStamped` | Coordinate transforms |
 
 **Outputs to observe:**
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `rt/fusion/radar` | `sensor_msgs/PointCloud2` | Classified radar point cloud |
-| `rt/fusion/occupancy` | `sensor_msgs/PointCloud2` | Occupancy grid |
-| `rt/fusion/boxes3d` | `edgefirst_msgs/Detect` | 3D bounding boxes |
-| `rt/fusion/model_output` | `edgefirst_msgs/Mask` | ML model predictions |
+| `fusion/radar` | `sensor_msgs/PointCloud2` | Classified radar point cloud |
+| `fusion/occupancy` | `sensor_msgs/PointCloud2` | Occupancy grid |
+| `fusion/boxes3d` | `edgefirst_msgs/Detect` | 3D bounding boxes |
+| `fusion/model_output` | `edgefirst_msgs/Mask` | ML model predictions |
 
 ### Running with a Model
 
@@ -65,13 +65,13 @@ Use Zenoh CLI tools to subscribe to output topics and verify data is being publi
 
 ```bash
 # Check if fusion is publishing classified point clouds
-zenoh-cli subscribe "rt/fusion/radar"
+zenoh-cli subscribe "fusion/radar"
 
 # Check occupancy grid output
-zenoh-cli subscribe "rt/fusion/occupancy"
+zenoh-cli subscribe "fusion/occupancy"
 
 # Check 3D bounding boxes
-zenoh-cli subscribe "rt/fusion/boxes3d"
+zenoh-cli subscribe "fusion/boxes3d"
 ```
 
 ### Profiling

@@ -72,4 +72,5 @@ tracy-client = { version = "0.19", default-features = false, features = [
 ] }
 uuid = { version = "1.18.1", features = ["v4"] }
 zenoh = "1.10"
+gethostname = "1.1.0"
 zstd = { version = "0.13.3", features = ["experimental"] }

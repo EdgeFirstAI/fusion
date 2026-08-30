@@ -27,14 +27,14 @@ EdgeFirst Fusion is a multi-threaded, asynchronous application built on the Toki
 ```mermaid
 graph TB
     subgraph "Zenoh Subscriptions"
-        RadarSub["rt/radar/clusters<br/>PointCloud2"]
-        LidarSub["rt/lidar/clusters<br/>PointCloud2"]
+        RadarSub["radar/clusters<br/>PointCloud2"]
+        LidarSub["lidar/clusters<br/>PointCloud2"]
         CameraSub["camera/frame<br/>CameraFrame"]
-        ModelSub["rt/model/output<br/>Model"]
-        InfoSub["rt/camera/info<br/>CameraInfo"]
-        TFSub["rt/tf_static<br/>TransformStamped"]
-        CubeSub["rt/radar/cube<br/>RadarCube"]
-        ModelInfoSub["rt/model/info<br/>ModelInfo"]
+        ModelSub["model/output<br/>Model"]
+        InfoSub["camera/info<br/>CameraInfo"]
+        TFSub["tf_static<br/>TransformStamped"]
+        CubeSub["radar/cube<br/>RadarCube"]
+        ModelInfoSub["model/info<br/>ModelInfo"]
     end
 
     subgraph "Main Thread (Tokio Async Runtime)"
@@ -56,11 +56,11 @@ graph TB
     end
 
     subgraph "Zenoh Publications"
-        RadarOut["rt/fusion/radar<br/>PointCloud2"]
-        LidarOut["rt/fusion/lidar<br/>PointCloud2"]
-        GridOut["rt/fusion/occupancy<br/>PointCloud2"]
-        BBoxOut["rt/fusion/boxes3d<br/>Detect"]
-        ModelOut["rt/fusion/model_output<br/>Mask"]
+        RadarOut["fusion/radar<br/>PointCloud2"]
+        LidarOut["fusion/lidar<br/>PointCloud2"]
+        GridOut["fusion/occupancy<br/>PointCloud2"]
+        BBoxOut["fusion/boxes3d<br/>Detect"]
+        ModelOut["fusion/model_output<br/>Mask"]
     end
 
     RadarSub --> RadarThread
@@ -235,24 +235,24 @@ All messages use **ROS2 CDR (Common Data Representation)** serialization.
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `rt/radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud with optional cluster_id |
-| `rt/lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
+| `radar/clusters` | `sensor_msgs/PointCloud2` | Radar point cloud with optional cluster_id |
+| `lidar/clusters` | `sensor_msgs/PointCloud2` | LiDAR point cloud with optional cluster_id |
 | `camera/frame` | `edgefirst_msgs/CameraFrame` | Camera frame tensor (dma-buf planes) |
-| `rt/radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
-| `rt/model/output` | `edgefirst_msgs/Model` | Unified vision model output (boxes, masks, segmentation) |
-| `rt/model/info` | `edgefirst_msgs/ModelInfo` | Model info for dynamic label resolution |
-| `rt/camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
-| `rt/tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |
+| `radar/cube` | `edgefirst_msgs/RadarCube` | Radar cube for ML model input |
+| `model/output` | `edgefirst_msgs/Model` | Unified vision model output (boxes, masks, segmentation) |
+| `model/info` | `edgefirst_msgs/ModelInfo` | Model info for dynamic label resolution |
+| `camera/info` | `sensor_msgs/CameraInfo` | Camera calibration parameters |
+| `tf_static` | `geometry_msgs/TransformStamped` | Static coordinate transforms |
 
 ### Output Messages
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `rt/fusion/radar` | `sensor_msgs/PointCloud2` | Radar PCD with vision_class + instance_id fields |
-| `rt/fusion/lidar` | `sensor_msgs/PointCloud2` | LiDAR PCD with vision_class + instance_id fields |
-| `rt/fusion/occupancy` | `sensor_msgs/PointCloud2` | Occupancy grid as point cloud |
-| `rt/fusion/boxes3d` | `edgefirst_msgs/Detect` | 3D bounding boxes from clustered points |
-| `rt/fusion/model_output` | `edgefirst_msgs/Mask` | Raw ML model grid output |
+| `fusion/radar` | `sensor_msgs/PointCloud2` | Radar PCD with vision_class + instance_id fields |
+| `fusion/lidar` | `sensor_msgs/PointCloud2` | LiDAR PCD with vision_class + instance_id fields |
+| `fusion/occupancy` | `sensor_msgs/PointCloud2` | Occupancy grid as point cloud |
+| `fusion/boxes3d` | `edgefirst_msgs/Detect` | 3D bounding boxes from clustered points |
+| `fusion/model_output` | `edgefirst_msgs/Mask` | Raw ML model grid output |
 
 ### Enriched Point Cloud Fields
 

@@ -295,7 +295,12 @@ pub async fn run_tflite_fusion_model(
             (mask, buf, enc)
         });
 
-        publ_mask.put(buf).encoding(enc).await.unwrap();
+        publ_mask
+            .put(buf)
+            .encoding(enc)
+            .timestamp(session.new_timestamp())
+            .await
+            .unwrap();
 
         let occupied = build_occupancy_grid(&mask, &output_shape);
 
