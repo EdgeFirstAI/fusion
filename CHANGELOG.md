@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-31
+
+### Added
+
+- `--background-index` CLI (`-1` = last channel, `0..N` = explicit) for
+  semantic-segmentation background skipping (EDGEAI-1106)
+- `UNCLASSIFIED` sentinel (`u8::MAX`) so class `0` remains a valid model label
+  (EDGEAI-1106)
+
 ### Changed
 
 - Attach a Zenoh source timestamp on published fusion and `tf_static`
@@ -20,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `track_created` on `DetectBoxView`).
 - Camera ingest uses `edgefirst_msgs/CameraFrame` tensors (plane 0 handle + pidfd import)
   instead of `DmaBuffer`. Default `--camera-topic` is `camera/frame`.
+- Majority-vote class assignment via `ClassHistogram` across a tracklet lifetime
+  (EDGEAI-1106)
+
+### Fixed
+
+- Reject invalid `CameraFrame` dimensions
+- Unrecognized box labels skipped instead of silently mapping to class 0
+  (EDGEAI-1106)
 
 ## [1.7.2] - 2026-03-10
 
