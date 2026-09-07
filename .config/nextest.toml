@@ -16,7 +16,7 @@ retries = 0  # Don't retry failed tests by default
 fail-fast = false  # Run all tests even if some fail
 
 # Test threads (0 = number of logical CPUs)
-test-threads = 0
+test-threads = "num-cpus"
 
 # Timeout settings
 slow-timeout = { period = "60s", terminate-after = 2 }
