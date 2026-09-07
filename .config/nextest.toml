@@ -15,7 +15,7 @@ junit.store-failure-output = true
 retries = 0  # Don't retry failed tests by default
 fail-fast = false  # Run all tests even if some fail
 
-# Test threads (0 = number of logical CPUs)
+# Test threads ("num-cpus" = number of logical CPUs; a plain integer sets a fixed count)
 test-threads = "num-cpus"
 
 # Timeout settings
