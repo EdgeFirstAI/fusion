@@ -7,6 +7,10 @@ version = "1.8.1"
 edition = "2021"
 rust-version = "1.82"
 
+[[test]]
+name = "env_scrub"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

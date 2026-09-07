@@ -23,6 +23,23 @@ pub const KEEP: &[&str] = &[
     "MODEL_INFO_TOPIC",
 ];
 
+/// Names of this program's env-bound arguments whose value, as reported by
+/// `var`, is present but empty and not listed in `keep`.
+///
+/// Pure: the environment is only read through `var`, so this can be unit
+/// tested with a fake lookup and no process-wide mutation.
+pub fn empty_env_vars<C: CommandFactory>(
+    keep: &[&str],
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    C::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .filter(|name| !keep.contains(&name.as_str()))
+        .filter(|name| var(name).is_some_and(|v| v.is_empty()))
+        .collect()
+}
+
 /// Treat an empty environment variable as unset, so clap's declared
 /// `default_value` applies instead of failing to parse.
 ///
@@ -34,15 +51,8 @@ pub const KEEP: &[&str] = &[
 /// Must be called before any thread is spawned — that is, before the tokio
 /// runtime is built. Mutating the process environment is not thread-safe.
 pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
-    for arg in C::command().get_arguments() {
-        let Some(env) = arg.get_env() else { continue };
-        let name = env.to_string_lossy().into_owned();
-        if keep.contains(&name.as_str()) {
-            continue;
-        }
-        if matches!(std::env::var(&name), Ok(v) if v.is_empty()) {
-            std::env::remove_var(&name);
-        }
+    for name in empty_env_vars::<C>(keep, |name| std::env::var(name).ok()) {
+        std::env::remove_var(&name);
     }
 }
 
@@ -322,15 +332,7 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::Parser;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// Serialises tests that read or mutate the process environment, since
-    /// `cargo test` runs tests on parallel threads.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    use std::collections::HashMap;
 
     /// Env-bound arguments with a non-empty default where we have consciously
     /// decided that an empty value is NOT meaningful (so scrubbing to the
@@ -381,53 +383,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_env_is_treated_as_unset() {
-        let _guard = env_lock();
-        std::env::set_var("MAX_MODEL_AGE", "");
-        std::env::set_var("THRESHOLD", "");
-        std::env::set_var("LOGITS", "");
-        std::env::set_var("MODEL_POLAR", "");
-
-        // Without scrubbing, clap sees "" and fails to parse the numeric arg.
-        assert!(Args::try_parse_from(["edgefirst-fusion"]).is_err());
-
-        // SAFETY: the env lock is held and no other test mutates these vars.
-        unsafe { scrub_empty_env::<Args>(KEEP) };
-        let result = Args::try_parse_from(["edgefirst-fusion"]);
-
-        std::env::remove_var("MAX_MODEL_AGE");
-        std::env::remove_var("THRESHOLD");
-        std::env::remove_var("LOGITS");
-        std::env::remove_var("MODEL_POLAR");
-
-        let args = result.expect("empty env vars should fall back to defaults");
-        assert_eq!(args.max_model_age, 0.5);
-        assert_eq!(args.threshold, 1);
-        assert!(args.logits);
-        assert!(!args.model_polar);
+    /// Fake environment lookup over a fixed table; never touches the process
+    /// environment.
+    fn lookup(env: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let table: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| table.get(name).cloned()
     }
 
     #[test]
-    fn keep_preserves_empty_disable_sentinel() {
-        let _guard = env_lock();
-        std::env::set_var("LIDAR_OUTPUT_TOPIC", "");
-        std::env::set_var("MAX_MODEL_AGE", "");
+    fn empty_env_vars_lists_only_empty_bound_vars() {
+        let env = [
+            ("MAX_MODEL_AGE", ""),
+            ("THRESHOLD", ""),
+            ("LOGITS", ""),
+            ("MODEL_POLAR", ""),
+            ("TRACK_IOU", "0.3"),
+            ("NOT_A_FUSION_ARG", ""),
+        ];
+        let mut found = empty_env_vars::<Args>(&[], lookup(&env));
+        found.sort();
+        assert_eq!(
+            found,
+            ["LOGITS", "MAX_MODEL_AGE", "MODEL_POLAR", "THRESHOLD"]
+        );
+    }
 
-        // SAFETY: the env lock is held and no other test mutates these vars.
-        unsafe { scrub_empty_env::<Args>(KEEP) };
-        let result = Args::try_parse_from(["edgefirst-fusion"]);
+    #[test]
+    fn empty_env_vars_ignores_unset_and_nonempty() {
+        let env = [("MAX_MODEL_AGE", "0.5"), ("ENGINE", "cpu")];
+        assert!(empty_env_vars::<Args>(&[], lookup(&env)).is_empty());
+        assert!(empty_env_vars::<Args>(&[], lookup(&[])).is_empty());
+    }
 
-        std::env::remove_var("LIDAR_OUTPUT_TOPIC");
-        std::env::remove_var("MAX_MODEL_AGE");
+    #[test]
+    fn empty_env_vars_never_lists_unbound_names() {
+        let env = [("NOT_A_FUSION_ARG", ""), ("PATH", "")];
+        assert!(empty_env_vars::<Args>(&[], lookup(&env)).is_empty());
+    }
 
-        let args = result.expect("kept empty topic should still parse");
-        assert_eq!(args.lidar_output_topic, "");
-        assert_eq!(args.max_model_age, 0.5);
+    #[test]
+    fn keep_excludes_empty_disable_sentinels() {
+        let env = [
+            ("LIDAR_OUTPUT_TOPIC", ""),
+            ("RADAR_OUTPUT_TOPIC", ""),
+            ("VISION_MODEL_TOPIC", ""),
+            ("MODEL_INFO_TOPIC", ""),
+            ("BBOX3D_TOPIC", ""),
+            ("MAX_MODEL_AGE", ""),
+        ];
+        let mut found = empty_env_vars::<Args>(KEEP, lookup(&env));
+        found.sort();
+        for kept in KEEP {
+            assert!(!found.contains(&(*kept).to_owned()), "{kept} must be kept");
+        }
+        assert_eq!(found, ["BBOX3D_TOPIC", "MAX_MODEL_AGE"]);
+
+        // Without the allowlist the same sentinels would be scrubbed.
+        let unkept = empty_env_vars::<Args>(&[], lookup(&env));
+        for kept in KEEP {
+            assert!(unkept.contains(&(*kept).to_owned()), "{kept} is env-bound");
+        }
     }
 
     fn parse_cli() -> Args {
-        let _guard = env_lock();
         Args::parse_from([
             "edgefirst-fusion",
             "--mode",
