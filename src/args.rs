@@ -1,7 +1,7 @@
 // Copyright 2025 Au-Zone Technologies Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
@@ -10,6 +10,40 @@ use zenoh::config::{Config, WhatAmI};
 /// empty PathBuf, which `Args::normalize()` later converts to `None`.
 fn parse_optional_path(s: &str) -> Result<PathBuf, std::convert::Infallible> {
     Ok(PathBuf::from(s))
+}
+
+/// Environment variables where an empty value is meaningful and must be
+/// preserved: each has a non-empty default but `""` is the documented
+/// "leave empty to disable" sentinel, so scrubbing it would silently
+/// re-enable an output the operator turned off.
+pub const KEEP: &[&str] = &[
+    "LIDAR_OUTPUT_TOPIC",
+    "RADAR_OUTPUT_TOPIC",
+    "VISION_MODEL_TOPIC",
+    "MODEL_INFO_TOPIC",
+];
+
+/// Treat an empty environment variable as unset, so clap's declared
+/// `default_value` applies instead of failing to parse.
+///
+/// Only variables bound to this program's own arguments are considered;
+/// unrelated process environment is left alone. `keep` names variables
+/// where an empty value is meaningful and must be preserved.
+///
+/// # Safety
+/// Must be called before any thread is spawned — that is, before the tokio
+/// runtime is built. Mutating the process environment is not thread-safe.
+pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
+    for arg in C::command().get_arguments() {
+        let Some(env) = arg.get_env() else { continue };
+        let name = env.to_string_lossy().into_owned();
+        if keep.contains(&name.as_str()) {
+            continue;
+        }
+        if matches!(std::env::var(&name), Ok(v) if v.is_empty()) {
+            std::env::remove_var(&name);
+        }
+    }
 }
 
 #[derive(Debug, Clone, ValueEnum, Copy, Eq, PartialEq)]
@@ -288,8 +322,112 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serialises tests that read or mutate the process environment, since
+    /// `cargo test` runs tests on parallel threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Env-bound arguments with a non-empty default where we have consciously
+    /// decided that an empty value is NOT meaningful (so scrubbing to the
+    /// default is correct).
+    const SCRUB_REVIEWED: &[&str] = &[
+        "INFO_TOPIC",
+        "MAX_MODEL_AGE",
+        "BBOX3D_TOPIC",
+        "BBOX3D_SRC",
+        "CAMERA_TOPIC",
+        "RADARCUBE_TOPIC",
+        "MODEL_OUTPUT_TOPIC",
+        "MODEL_THRESHOLD",
+        "MODEL_GRID_SIZE",
+        "ENGINE",
+        "LOGITS",
+        "TRACK_EXTRA_LIFESPAN",
+        "TRACK_IOU",
+        "TRACK_UPDATE",
+        "GRID_TOPIC",
+        "GRID_SRC",
+        "RANGE_BIN_LIMIT",
+        "RANGE_BIN_WIDTH",
+        "ANGLE_BIN_LIMIT",
+        "ANGLE_BIN_WIDTH",
+        "THRESHOLD",
+        "BIN_DELAY",
+        "BACKGROUND_INDEX",
+        "MODE",
+    ];
+
+    #[test]
+    fn every_env_arg_is_either_scrubbable_or_explicitly_kept() {
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env() else { continue };
+            let name = env.to_string_lossy().into_owned();
+            let has_nonempty_default = arg
+                .get_default_values()
+                .first()
+                .is_some_and(|d| !d.is_empty());
+            if has_nonempty_default && !KEEP.contains(&name.as_str()) {
+                assert!(
+                    SCRUB_REVIEWED.contains(&name.as_str()),
+                    "{name} has a non-empty default; decide whether empty is meaningful \
+                     and add it to KEEP or SCRUB_REVIEWED"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_env_is_treated_as_unset() {
+        let _guard = env_lock();
+        std::env::set_var("MAX_MODEL_AGE", "");
+        std::env::set_var("THRESHOLD", "");
+        std::env::set_var("LOGITS", "");
+        std::env::set_var("MODEL_POLAR", "");
+
+        // Without scrubbing, clap sees "" and fails to parse the numeric arg.
+        assert!(Args::try_parse_from(["edgefirst-fusion"]).is_err());
+
+        // SAFETY: the env lock is held and no other test mutates these vars.
+        unsafe { scrub_empty_env::<Args>(KEEP) };
+        let result = Args::try_parse_from(["edgefirst-fusion"]);
+
+        std::env::remove_var("MAX_MODEL_AGE");
+        std::env::remove_var("THRESHOLD");
+        std::env::remove_var("LOGITS");
+        std::env::remove_var("MODEL_POLAR");
+
+        let args = result.expect("empty env vars should fall back to defaults");
+        assert_eq!(args.max_model_age, 0.5);
+        assert_eq!(args.threshold, 1);
+        assert!(args.logits);
+        assert!(!args.model_polar);
+    }
+
+    #[test]
+    fn keep_preserves_empty_disable_sentinel() {
+        let _guard = env_lock();
+        std::env::set_var("LIDAR_OUTPUT_TOPIC", "");
+        std::env::set_var("MAX_MODEL_AGE", "");
+
+        // SAFETY: the env lock is held and no other test mutates these vars.
+        unsafe { scrub_empty_env::<Args>(KEEP) };
+        let result = Args::try_parse_from(["edgefirst-fusion"]);
+
+        std::env::remove_var("LIDAR_OUTPUT_TOPIC");
+        std::env::remove_var("MAX_MODEL_AGE");
+
+        let args = result.expect("kept empty topic should still parse");
+        assert_eq!(args.lidar_output_topic, "");
+        assert_eq!(args.max_model_age, 0.5);
+    }
 
     fn parse_cli() -> Args {
+        let _guard = env_lock();
         Args::parse_from([
             "edgefirst-fusion",
             "--mode",
