@@ -1,7 +1,7 @@
 // Copyright 2025 Au-Zone Technologies Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use serde_json::json;
 use std::path::PathBuf;
 use zenoh::config::{Config, WhatAmI};
@@ -10,6 +10,50 @@ use zenoh::config::{Config, WhatAmI};
 /// empty PathBuf, which `Args::normalize()` later converts to `None`.
 fn parse_optional_path(s: &str) -> Result<PathBuf, std::convert::Infallible> {
     Ok(PathBuf::from(s))
+}
+
+/// Environment variables where an empty value is meaningful and must be
+/// preserved: each has a non-empty default but `""` is the documented
+/// "leave empty to disable" sentinel, so scrubbing it would silently
+/// re-enable an output the operator turned off.
+pub const KEEP: &[&str] = &[
+    "LIDAR_OUTPUT_TOPIC",
+    "RADAR_OUTPUT_TOPIC",
+    "VISION_MODEL_TOPIC",
+    "MODEL_INFO_TOPIC",
+];
+
+/// Names of this program's env-bound arguments whose value, as reported by
+/// `var`, is present but empty and not listed in `keep`.
+///
+/// Pure: the environment is only read through `var`, so this can be unit
+/// tested with a fake lookup and no process-wide mutation.
+pub fn empty_env_vars<C: CommandFactory>(
+    keep: &[&str],
+    var: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    C::command()
+        .get_arguments()
+        .filter_map(|arg| arg.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .filter(|name| !keep.contains(&name.as_str()))
+        .filter(|name| var(name).is_some_and(|v| v.is_empty()))
+        .collect()
+}
+
+/// Treat an empty environment variable as unset, so clap's declared
+/// `default_value` applies instead of failing to parse.
+///
+/// Only variables bound to this program's own arguments are considered;
+/// unrelated process environment is left alone. `keep` names variables
+/// where an empty value is meaningful and must be preserved.
+///
+/// # Safety
+/// Must be called before any thread is spawned — that is, before the tokio
+/// runtime is built. Mutating the process environment is not thread-safe.
+pub unsafe fn scrub_empty_env<C: CommandFactory>(keep: &[&str]) {
+    for name in empty_env_vars::<C>(keep, |name| std::env::var(name).ok()) {
+        std::env::remove_var(&name);
+    }
 }
 
 #[derive(Debug, Clone, ValueEnum, Copy, Eq, PartialEq)]
@@ -288,6 +332,121 @@ impl From<Args> for Config {
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::collections::HashMap;
+
+    /// Env-bound arguments with a non-empty default where we have consciously
+    /// decided that an empty value is NOT meaningful (so scrubbing to the
+    /// default is correct).
+    const SCRUB_REVIEWED: &[&str] = &[
+        "INFO_TOPIC",
+        "MAX_MODEL_AGE",
+        "BBOX3D_TOPIC",
+        "BBOX3D_SRC",
+        "CAMERA_TOPIC",
+        "RADARCUBE_TOPIC",
+        "MODEL_OUTPUT_TOPIC",
+        "MODEL_THRESHOLD",
+        "MODEL_GRID_SIZE",
+        "ENGINE",
+        "LOGITS",
+        "TRACK_EXTRA_LIFESPAN",
+        "TRACK_IOU",
+        "TRACK_UPDATE",
+        "GRID_TOPIC",
+        "GRID_SRC",
+        "RANGE_BIN_LIMIT",
+        "RANGE_BIN_WIDTH",
+        "ANGLE_BIN_LIMIT",
+        "ANGLE_BIN_WIDTH",
+        "THRESHOLD",
+        "BIN_DELAY",
+        "BACKGROUND_INDEX",
+        "MODE",
+    ];
+
+    #[test]
+    fn every_env_arg_is_either_scrubbable_or_explicitly_kept() {
+        for arg in Args::command().get_arguments() {
+            let Some(env) = arg.get_env() else { continue };
+            let name = env.to_string_lossy().into_owned();
+            let has_nonempty_default = arg
+                .get_default_values()
+                .first()
+                .is_some_and(|d| !d.is_empty());
+            if has_nonempty_default && !KEEP.contains(&name.as_str()) {
+                assert!(
+                    SCRUB_REVIEWED.contains(&name.as_str()),
+                    "{name} has a non-empty default; decide whether empty is meaningful \
+                     and add it to KEEP or SCRUB_REVIEWED"
+                );
+            }
+        }
+    }
+
+    /// Fake environment lookup over a fixed table; never touches the process
+    /// environment.
+    fn lookup(env: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let table: HashMap<String, String> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        move |name| table.get(name).cloned()
+    }
+
+    #[test]
+    fn empty_env_vars_lists_only_empty_bound_vars() {
+        let env = [
+            ("MAX_MODEL_AGE", ""),
+            ("THRESHOLD", ""),
+            ("LOGITS", ""),
+            ("MODEL_POLAR", ""),
+            ("TRACK_IOU", "0.3"),
+            ("NOT_A_FUSION_ARG", ""),
+        ];
+        let mut found = empty_env_vars::<Args>(&[], lookup(&env));
+        found.sort();
+        assert_eq!(
+            found,
+            ["LOGITS", "MAX_MODEL_AGE", "MODEL_POLAR", "THRESHOLD"]
+        );
+    }
+
+    #[test]
+    fn empty_env_vars_ignores_unset_and_nonempty() {
+        let env = [("MAX_MODEL_AGE", "0.5"), ("ENGINE", "cpu")];
+        assert!(empty_env_vars::<Args>(&[], lookup(&env)).is_empty());
+        assert!(empty_env_vars::<Args>(&[], lookup(&[])).is_empty());
+    }
+
+    #[test]
+    fn empty_env_vars_never_lists_unbound_names() {
+        let env = [("NOT_A_FUSION_ARG", ""), ("PATH", "")];
+        assert!(empty_env_vars::<Args>(&[], lookup(&env)).is_empty());
+    }
+
+    #[test]
+    fn keep_excludes_empty_disable_sentinels() {
+        let env = [
+            ("LIDAR_OUTPUT_TOPIC", ""),
+            ("RADAR_OUTPUT_TOPIC", ""),
+            ("VISION_MODEL_TOPIC", ""),
+            ("MODEL_INFO_TOPIC", ""),
+            ("BBOX3D_TOPIC", ""),
+            ("MAX_MODEL_AGE", ""),
+        ];
+        let mut found = empty_env_vars::<Args>(KEEP, lookup(&env));
+        found.sort();
+        for kept in KEEP {
+            assert!(!found.contains(&(*kept).to_owned()), "{kept} must be kept");
+        }
+        assert_eq!(found, ["BBOX3D_TOPIC", "MAX_MODEL_AGE"]);
+
+        // Without the allowlist the same sentinels would be scrubbed.
+        let unkept = empty_env_vars::<Args>(&[], lookup(&env));
+        for kept in KEEP {
+            assert!(unkept.contains(&(*kept).to_owned()), "{kept} is env-bound");
+        }
+    }
 
     fn parse_cli() -> Args {
         Args::parse_from([

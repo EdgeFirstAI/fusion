@@ -1,7 +1,7 @@
 // Copyright 2025 Au-Zone Technologies Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use args::{Args, PCDSource};
+use args::{scrub_empty_env, Args, PCDSource, KEEP};
 use clap::Parser;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
@@ -87,8 +87,18 @@ const EDGE_OFFSETS: [(f32, f32); 8] = {
     ]
 };
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // SAFETY: single-threaded here; runs before the tokio runtime is built below.
+    unsafe { scrub_empty_env::<Args>(KEEP) };
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(run());
+}
+
+async fn run() {
     let mut args = Args::parse();
     args.normalize();
 
