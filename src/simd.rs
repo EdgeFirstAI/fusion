@@ -479,14 +479,31 @@ mod tests {
                 x[i],
                 dst[i]
             );
-            assert!(
-                (dst[i] - expected).abs() < 1e-4,
-                "atan2({}, {}) = {} expected {}",
-                y[i],
-                x[i],
-                dst[i],
-                expected
-            );
+            if expected == 0.0 {
+                // IEEE-754 makes +0.0 == -0.0, and subtracting them gives
+                // +0.0, so neither a comparison nor a tolerance can see the
+                // sign of a zero -- only the bit pattern can. Check it, since
+                // the signed-zero handling is exactly what this test exists
+                // to pin down.
+                assert_eq!(
+                    dst[i].to_bits(),
+                    expected.to_bits(),
+                    "atan2({}, {}) = {} expected {} (zero sign differs)",
+                    y[i],
+                    x[i],
+                    dst[i],
+                    expected
+                );
+            } else {
+                assert!(
+                    (dst[i] - expected).abs() < 1e-4,
+                    "atan2({}, {}) = {} expected {}",
+                    y[i],
+                    x[i],
+                    dst[i],
+                    expected
+                );
+            }
         }
     }
 
