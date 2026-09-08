@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- NEON `sincos_f32` returned an inverted cosine for `|x| mod 2π` in
+  `[3π/4, 7π/4)` on aarch64. The Cephes quadrant sign mask selected bit 1 of
+  `~(emm2 - 2)` instead of bit 2, flipping the sign over half the circle while
+  leaving sine correct. Cosine is now accurate to ~1 ULP in every quadrant.
+  `sincos_f32` has no callers outside its own tests, so fusion output was
+  unaffected (EDGEAI-1457)
+- NEON `atan2_f32` returned NaN at the origin, where the min/max reduction
+  divides `0/0`, and treated `x = -0.0` as positive so `atan2(±0.0, -0.0)` did
+  not return `±π`. Both now match `f32::atan2`. This path is used for radar
+  angle binning, so origin-valued points no longer poison their lane
+  (EDGEAI-1457)
+
 ## [1.8.1] - 2026-09-07
 
 Patch release for EDGEAI-1094. Argument parsing only; no wire-format or
