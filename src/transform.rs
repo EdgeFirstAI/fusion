@@ -146,6 +146,7 @@ fn scalar_transform_project(
 
 /// NEON: transform and project 4 points at once.
 #[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
 #[inline]
 unsafe fn neon_transform_project_4(
     frame: &mut FusionFrame,

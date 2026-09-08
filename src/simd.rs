@@ -51,6 +51,8 @@ pub fn sincos_f32(src: &[f32], dst_sin: &mut [f32], dst_cos: &mut [f32]) {
 /// Compute `atan2(y, x)` for each element of 4-wide f32 slices.
 ///
 /// Returns results in radians in `dst`. All slices must have the same length.
+/// Matches `f32::atan2` at the origin and for signed zeros: `atan2(0.0, 0.0)`
+/// is `0.0`, not NaN.
 pub fn atan2_f32(y: &[f32], x: &[f32], dst: &mut [f32]) {
     let n = y.len();
     debug_assert_eq!(n, x.len());
@@ -120,6 +122,9 @@ use std::arch::aarch64::*;
 /// Sin: degree-5 polynomial in x^2, multiplied by x.
 /// Cos: degree-6 polynomial in x^2.
 /// Branchless quadrant selection via vbslq.
+///
+/// Coefficients are the Cephes values rounded to f32 and written at the
+/// shortest precision that round-trips to the same bits.
 #[cfg(target_arch = "aarch64")]
 #[inline]
 unsafe fn neon_sincos_f32x4(src: &[f32], offset: usize) -> ([f32; 4], [f32; 4]) {
@@ -128,10 +133,10 @@ unsafe fn neon_sincos_f32x4(src: &[f32], offset: usize) -> ([f32; 4], [f32; 4]) 
     // Constants
     let sign_mask = vdupq_n_u32(0x8000_0000);
     let inv_sign_mask = vdupq_n_u32(0x7FFF_FFFF);
-    let four_over_pi = vdupq_n_f32(1.27323954473516_f32);
+    let four_over_pi = vdupq_n_f32(1.2732395_f32);
     let dp1 = vdupq_n_f32(-0.78515625_f32);
-    let dp2 = vdupq_n_f32(-2.4187564849853515625e-4_f32);
-    let dp3 = vdupq_n_f32(-3.77489497744594108e-8_f32);
+    let dp2 = vdupq_n_f32(-2.4187565e-4_f32);
+    let dp3 = vdupq_n_f32(-3.774895e-8_f32);
 
     // Strip sign, save for later
     let sign_bit_sin = vandq_u32(vreinterpretq_u32_f32(x), sign_mask);
@@ -157,28 +162,34 @@ unsafe fn neon_sincos_f32x4(src: &[f32], offset: usize) -> ([f32; 4], [f32; 4]) 
 
     let sign_bit_sin_final = veorq_u32(sign_bit_sin, swap_sign_bit_sin);
 
-    // Cos sign: bit 1 XOR bit 2 of emm2, shifted to sign position
-    let emm2_minus1 = vsubq_s32(emm2, vdupq_n_s32(2));
-    let sign_bit_cos = vreinterpretq_u32_s32(vshlq_n_s32::<30>(vandq_s32(
-        vmvnq_s32(emm2_minus1),
-        vdupq_n_s32(2),
+    // Cos sign: bit 2 of !(emm2 - 2), shifted into the sign position.
+    // With emm2 = 2*k for quadrant index k, the selected polynomial must be
+    // negated exactly when k mod 4 is 1 or 2, and bit 2 of !(emm2 - 2) is
+    // that predicate. Taking bit 1 instead (`& 2` with a <<30 shift) agrees
+    // only for k mod 4 in {0, 1}, inverting cos over |x| mod 2*pi in
+    // [3*pi/4, 7*pi/4) while leaving sin correct -- see
+    // test_sincos_sweep_all_quadrants.
+    let emm2_minus2 = vsubq_s32(emm2, vdupq_n_s32(2));
+    let sign_bit_cos = vreinterpretq_u32_s32(vshlq_n_s32::<29>(vandq_s32(
+        vmvnq_s32(emm2_minus2),
+        vdupq_n_s32(4),
     )));
 
     let z = vmulq_f32(xr, xr);
 
     // Cosine polynomial: 1 - z/2 + z^2*(c0 + c1*z + c2*z^2)
-    let mut ycos = vdupq_n_f32(2.443315711809948e-5_f32);
-    ycos = vfmaq_f32(vdupq_n_f32(-1.388731625493765e-3_f32), ycos, z);
-    ycos = vfmaq_f32(vdupq_n_f32(4.166664568298827e-2_f32), ycos, z);
+    let mut ycos = vdupq_n_f32(2.4433157e-5_f32);
+    ycos = vfmaq_f32(vdupq_n_f32(-1.3887316e-3_f32), ycos, z);
+    ycos = vfmaq_f32(vdupq_n_f32(4.1666646e-2_f32), ycos, z);
     ycos = vmulq_f32(ycos, z);
     ycos = vmulq_f32(ycos, z);
     ycos = vsubq_f32(ycos, vmulq_f32(z, vdupq_n_f32(0.5_f32)));
     ycos = vaddq_f32(ycos, vdupq_n_f32(1.0_f32));
 
     // Sine polynomial: x + x*z*(s0 + s1*z + s2*z^2)
-    let mut ysin = vdupq_n_f32(-1.9515295891e-4_f32);
-    ysin = vfmaq_f32(vdupq_n_f32(8.3321608736e-3_f32), ysin, z);
-    ysin = vfmaq_f32(vdupq_n_f32(-1.6666654611e-1_f32), ysin, z);
+    let mut ysin = vdupq_n_f32(-1.9515296e-4_f32);
+    ysin = vfmaq_f32(vdupq_n_f32(8.332161e-3_f32), ysin, z);
+    ysin = vfmaq_f32(vdupq_n_f32(-1.6666655e-1_f32), ysin, z);
     ysin = vmulq_f32(ysin, z);
     ysin = vfmaq_f32(xr, ysin, xr);
 
@@ -220,28 +231,39 @@ unsafe fn neon_atan2_f32x4(y_src: &[f32], x_src: &[f32], offset: usize) -> [f32;
     let max_val = vbslq_f32(swap, abs_y, abs_x);
     let min_val = vbslq_f32(swap, abs_x, abs_y);
 
-    // a = min / max (always in [0, 1])
-    let a = vdivq_f32(min_val, max_val);
+    // a = min / max (always in [0, 1]). At the origin both are zero and the
+    // division would yield NaN, poisoning the whole lane, so substitute a 1.0
+    // divisor there to get a = 0; the sign fixups below then reproduce std's
+    // atan2(+-0.0, +-0.0) exactly.
+    let denom = vbslq_f32(
+        vceqq_f32(max_val, vdupq_n_f32(0.0_f32)),
+        vdupq_n_f32(1.0_f32),
+        max_val,
+    );
+    let a = vdivq_f32(min_val, denom);
     let a2 = vmulq_f32(a, a);
 
     // Degree-4 minimax polynomial for atan(a) on [0, 1]
     // atan(a) ~= a * (c0 + c1*a^2 + c2*a^4 + c3*a^6 + c4*a^8)
     let mut p = vdupq_n_f32(0.0028662257_f32);
-    p = vfmaq_f32(vdupq_n_f32(-0.0161657367_f32), p, a2);
-    p = vfmaq_f32(vdupq_n_f32(0.0429096138_f32), p, a2);
-    p = vfmaq_f32(vdupq_n_f32(-0.0752896400_f32), p, a2);
-    p = vfmaq_f32(vdupq_n_f32(0.1065626393_f32), p, a2);
-    p = vfmaq_f32(vdupq_n_f32(-0.1420889944_f32), p, a2);
-    p = vfmaq_f32(vdupq_n_f32(0.1999355085_f32), p, a2);
-    p = vfmaq_f32(vdupq_n_f32(-0.3333314528_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(-0.016165737_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(0.042909615_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(-0.07528964_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(0.10656264_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(-0.142089_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(0.19993551_f32), p, a2);
+    p = vfmaq_f32(vdupq_n_f32(-0.33333147_f32), p, a2);
     let atan_a = vfmaq_f32(a, vmulq_f32(p, a2), a);
 
     // If swapped, result = pi/2 - atan_a
     let pi_over_2 = vdupq_n_f32(std::f32::consts::FRAC_PI_2);
     let result = vbslq_f32(swap, vsubq_f32(pi_over_2, atan_a), atan_a);
 
-    // Apply sign of x: if x < 0, result = pi - result
-    let x_neg = vcltq_f32(x, vdupq_n_f32(0.0_f32));
+    // Apply sign of x: if x is negative, result = pi - result. Test x's sign
+    // bit rather than `x < 0.0` so that x = -0.0 counts as negative, which is
+    // what atan2(+-0.0, -0.0) = +-pi requires. For every other input the two
+    // tests agree.
+    let x_neg = vcltq_s32(vreinterpretq_s32_f32(x), vdupq_n_s32(0));
     let pi = vdupq_n_f32(std::f32::consts::PI);
     let result = vbslq_f32(x_neg, vsubq_f32(pi, result), result);
 
@@ -358,6 +380,43 @@ mod tests {
         }
     }
 
+    /// Dense sweep across every quadrant of the Cephes range reduction.
+    ///
+    /// The narrow smoke tests above cluster near the first octant, where a
+    /// wrong quadrant sign mask still produces correct results. Cover several
+    /// full turns in both directions so any quadrant-selection or sign error
+    /// is caught, and report the first offending angle rather than the last.
+    #[test]
+    fn test_sincos_sweep_all_quadrants() {
+        const N: usize = 4096;
+        const SPAN: f32 = 8.0 * std::f32::consts::PI;
+
+        let angles: Vec<f32> = (0..N)
+            .map(|i| -0.5 * SPAN + (i as f32) * SPAN / (N as f32))
+            .collect();
+        let mut s = vec![0.0f32; N];
+        let mut c = vec![0.0f32; N];
+        sincos_f32(&angles, &mut s, &mut c);
+
+        for i in 0..N {
+            let (expected_s, expected_c) = angles[i].sin_cos();
+            assert!(
+                (s[i] - expected_s).abs() < 1e-5,
+                "sin({}) = {} expected {}",
+                angles[i],
+                s[i],
+                expected_s
+            );
+            assert!(
+                (c[i] - expected_c).abs() < 1e-5,
+                "cos({}) = {} expected {}",
+                angles[i],
+                c[i],
+                expected_c
+            );
+        }
+    }
+
     #[test]
     fn test_atan2_basic() {
         let y = [0.0_f32, 1.0, -1.0, 1.0];
@@ -395,6 +454,56 @@ mod tests {
                 dst[i],
                 expected
             );
+        }
+    }
+
+    /// atan2 at the origin and across signed zeros.
+    ///
+    /// The NEON path divides min/max, which is 0/0 at the origin and returned
+    /// NaN before the divisor was guarded. Signed zeros additionally pin the
+    /// "x is negative" test to x's sign bit, since -0.0 is not less than 0.0
+    /// yet atan2(+-0.0, -0.0) is +-pi.
+    #[test]
+    fn test_atan2_origin_and_signed_zeros() {
+        let y = [0.0_f32, -0.0, 0.0, -0.0, 0.0, -0.0, 1.0, -1.0];
+        let x = [0.0_f32, 0.0, -0.0, -0.0, 1.0, -1.0, 0.0, -0.0];
+        let mut dst = vec![0.0f32; 8];
+        atan2_f32(&y, &x, &mut dst);
+
+        for i in 0..8 {
+            let expected = y[i].atan2(x[i]);
+            assert!(
+                dst[i].is_finite(),
+                "atan2({}, {}) = {} is not finite",
+                y[i],
+                x[i],
+                dst[i]
+            );
+            if expected == 0.0 {
+                // IEEE-754 makes +0.0 == -0.0, and subtracting them gives
+                // +0.0, so neither a comparison nor a tolerance can see the
+                // sign of a zero -- only the bit pattern can. Check it, since
+                // the signed-zero handling is exactly what this test exists
+                // to pin down.
+                assert_eq!(
+                    dst[i].to_bits(),
+                    expected.to_bits(),
+                    "atan2({}, {}) = {} expected {} (zero sign differs)",
+                    y[i],
+                    x[i],
+                    dst[i],
+                    expected
+                );
+            } else {
+                assert!(
+                    (dst[i] - expected).abs() < 1e-4,
+                    "atan2({}, {}) = {} expected {}",
+                    y[i],
+                    x[i],
+                    dst[i],
+                    expected
+                );
+            }
         }
     }
 

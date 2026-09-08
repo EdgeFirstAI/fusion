@@ -44,9 +44,21 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  # Matrixed across both architectures so the #[cfg(target_arch = "aarch64")]
+  # NEON code -- which is what actually ships to the i.MX8MP -- gets linted.
+  # An x86_64-only run compiles those blocks out entirely and sees nothing.
+  # The two legs run concurrently, so this does not lengthen the pipeline.
   clippy:
-    name: Lint with Clippy
-    runs-on: ubuntu-22.04
+    name: Lint with Clippy (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - name: x86_64
+            runner: ubuntu-22.04
+          - name: aarch64
+            runner: ubuntu-22.04-arm
+      fail-fast: false
 
     steps:
       - name: Checkout code
@@ -57,33 +69,35 @@ jobs:
         with:
           components: clippy
 
+      # runner.os is "Linux" on both runners, so the platform name has to be in
+      # the cache key or the two legs would clobber each other's target dir.
       - name: Cache cargo registry
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: ~/.cargo/registry/index
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-index-
+          key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-index-
 
       - name: Cache cargo build
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: target
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-clippy-
+          key: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-clippy-
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Generate Clippy report for SonarCloud
         run: |
-          # Generate JSON report for SonarCloud (allow warnings for report generation)
+          # Report generation only; the gate above is what fails the job.
           cargo clippy --workspace --all-targets --message-format=json 2>&1 \
             | tee clippy-report.json || true
 
       - name: Upload Clippy report
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
-          name: clippy-report
+          name: clippy-report-${{ matrix.platform.name }}
           path: clippy-report.json
           retention-days: 7
 
@@ -137,13 +151,18 @@ jobs:
           restore-keys: ${{ runner.os }}-${{ matrix.platform.name }}-cargo-test
 
       - name: Run tests with coverage
-        run: |
-          cargo llvm-cov nextest --workspace --lcov --output-path coverage.lcov || true
+        run: cargo llvm-cov nextest --workspace --lcov --output-path coverage.lcov
 
-      - name: Run doc tests
-        run: cargo test --doc --workspace || true
+      # No doc test step: edgefirst-fusion is a binary-only crate, and rustdoc
+      # only collects doctests from lib targets, so `cargo test --doc` exits
+      # 101 with "no library targets found" rather than running anything. If a
+      # lib target is ever added, reinstate the step -- without `|| true`.
 
+      # Uploaded even when the test steps fail so a red job still leaves the
+      # partial coverage report behind for diagnosis. The SonarCloud job gates
+      # on needs.test.result == 'success', so it never consumes a partial run.
       - name: Upload coverage artifact
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
           name: coverage-${{ matrix.platform.name }}
@@ -175,11 +194,11 @@ jobs:
           pattern: coverage-*
           path: coverage/
 
-      - name: Download Clippy report
+      - name: Download Clippy reports
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
-          name: clippy-report
-          path: .
+          pattern: clippy-report-*
+          path: clippy/
 
       - name: Organize coverage files for SonarCloud
         run: |
@@ -197,8 +216,14 @@ jobs:
           echo "COVERAGE_PATHS=$COVERAGE_REPORTS" >> $GITHUB_ENV
 
           echo ""
-          echo "=== Clippy report ==="
-          ls -la clippy-report.json || echo "No Clippy report found"
+          echo "=== Clippy reports ==="
+          find clippy/ -type f -name "*.json"
+
+          # One report per architecture; Sonar accepts a comma-separated list
+          CLIPPY_REPORTS=$(find clippy/ -name "clippy-report.json" | tr '\n' ',' | sed 's/,$//')
+
+          echo "Clippy reports: $CLIPPY_REPORTS"
+          echo "CLIPPY_PATHS=$CLIPPY_REPORTS" >> $GITHUB_ENV
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9  # master
@@ -208,7 +233,7 @@ jobs:
         with:
           args: >
             -Dsonar.rust.lcov.reportPaths=${{ env.COVERAGE_PATHS }}
-            -Dsonar.rust.clippy.reportPaths=clippy-report.json
+            -Dsonar.rust.clippy.reportPaths=${{ env.CLIPPY_PATHS }}
 
       - name: Generate coverage summary
         if: always()
@@ -221,8 +246,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Platform | Architecture | Environment | Test Types |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|--------------|-------------|------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Ubuntu 22.04 | x86_64 | GitHub Runner | Unit tests, doc tests |" >> $GITHUB_STEP_SUMMARY
-          echo "| Ubuntu 22.04 ARM | aarch64 | GitHub ARM Runner | Unit tests, doc tests |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ubuntu 22.04 | x86_64 | GitHub Runner | Unit tests |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ubuntu 22.04 ARM | aarch64 | GitHub ARM Runner | Unit tests |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Coverage Summary
