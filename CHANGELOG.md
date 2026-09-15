@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `fusion.default` assignments are now `KEY="value"` with no spaces around `=`,
+  matching other EdgeFirst services. systemd `EnvironmentFile=` does not strip
+  those spaces, so the previous `KEY = "value"` form may not have been applied
+  (EDGEAI-733, EDGEAI-1234)
+- Stock radar late-fusion defaults: `RADAR_PCD_TOPIC=radar/clusters`,
+  `BBOX3D_SRC=radar`. LiDAR remains opt-in. `BACKGROUND_INDEX` is documented
+  in `fusion.default` (EDGEAI-733, EDGEAI-1604)
+- CameraFrame fourcc is mapped to G2D the same way the camera service maps HAL
+  format strings (`YUYV` → `G2D_YUYV`). Fusion no longer routes fourcc through
+  `G2DFormat::try_from(FourCharCode)`, which mis-read YUYV as VYUY
+  (EDGEAI-1234)
+
 ### Fixed
 
+- Fusion exits with an error (instead of exit 0) when no model and no PCD
+  topic is configured, so systemd `Restart=always` does not spin. The
+  `fusion/boxes3d` publisher is declared only when `BBOX3D_SRC` names an
+  enabled PCD topic (EDGEAI-1234)
+- Fusion-model input tensors are identified by name. A camera-only model no
+  longer treats the RGB tensor as radar and panic on `copy_from_slice`
+  (EDGEAI-1234)
 - NEON `sincos_f32` returned an inverted cosine for `|x| mod 2π` in
   `[3π/4, 7π/4)` on aarch64. The Cephes quadrant sign mask selected bit 1 of
   `~(emm2 - 2)` instead of bit 2, flipping the sign over half the circle while

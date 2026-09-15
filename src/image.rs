@@ -6,10 +6,11 @@ use core::fmt;
 use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
 use edgefirst_schemas::edgefirst_msgs::CameraFrame;
-use four_char_code::{four_char_code, FourCharCode};
 use g2d_sys::{
-    g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270,
-    g2d_rotation_G2D_ROTATION_90, G2DFormat, G2DPhysical, G2DSurface, G2D,
+    g2d_format, g2d_format_G2D_NV12, g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888,
+    g2d_format_G2D_RGBX8888, g2d_format_G2D_YUYV, g2d_rotation_G2D_ROTATION_0,
+    g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
+    G2DPhysical, G2DSurface, G2D,
 };
 use libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
 use log::{debug, warn};
@@ -26,14 +27,17 @@ use std::{
     slice::{from_raw_parts, from_raw_parts_mut},
 };
 
-/// Local type alias for readability across the codebase.
-pub type FourCC = FourCharCode;
+/// HAL / V4L2 fourcc stored as four ASCII bytes in wire order (`b"YUYV"`).
+/// Matches the camera service (`videostream::fourcc::FourCC(*b"YUYV")`) and
+/// the CameraFrame tensor `format` string. Do not route these through
+/// `four-char-code` / `G2DFormat::try_from` — that path byte-swaps to VYUY.
+pub type FourCC = [u8; 4];
 
-pub const RGB3: FourCC = four_char_code!("RGB3");
-pub const RGBX: FourCC = four_char_code!("RGBX");
-pub const RGBA: FourCC = four_char_code!("RGBA");
-pub const YUYV: FourCC = four_char_code!("YUYV");
-pub const NV12: FourCC = four_char_code!("NV12");
+pub const RGB3: FourCC = *b"RGB3";
+pub const RGBX: FourCC = *b"RGBX";
+pub const RGBA: FourCC = *b"RGBA";
+pub const YUYV: FourCC = *b"YUYV";
+pub const NV12: FourCC = *b"NV12";
 
 pub struct Rect {
     pub x: i32,
@@ -73,7 +77,7 @@ impl ImageManager {
         crop: Option<Rect>,
         rot: Rotation,
     ) -> Result<(), Box<dyn Error>> {
-        let mut src: G2DSurface = from.try_into()?;
+        let mut src = surface_from_image(from)?;
 
         if let Some(r) = crop {
             src.left = r.x;
@@ -82,7 +86,7 @@ impl ImageManager {
             src.bottom = r.y + r.height;
         }
 
-        let mut dst: G2DSurface = to.try_into()?;
+        let mut dst = surface_from_image(to)?;
         dst.rot = rot as u32;
 
         self.g2d.blit(&src, &dst)?;
@@ -92,6 +96,62 @@ impl ImageManager {
 
         Ok(())
     }
+}
+
+/// Map a HAL fourcc (same table as `edgefirst-camera::image::fourcc_to_g2d_format`)
+/// to the G2D format constant. YUYV must not become VYUY; RGBA must not become ABGR.
+pub fn fourcc_to_g2d_format(fourcc: FourCC) -> Result<g2d_format, io::Error> {
+    match &fourcc {
+        b"RGB3" => Ok(g2d_format_G2D_RGB888),
+        b"RGBX" => Ok(g2d_format_G2D_RGBX8888),
+        b"RGBA" => Ok(g2d_format_G2D_RGBA8888),
+        b"YUYV" => Ok(g2d_format_G2D_YUYV),
+        b"NV12" => Ok(g2d_format_G2D_NV12),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("unsupported G2D pixel format: {}", fourcc_str(fourcc)),
+        )),
+    }
+}
+
+/// Parse the CameraFrame / HAL tensor `format` string as four ASCII bytes.
+pub fn fourcc_from_hal(format: &str) -> io::Result<FourCC> {
+    let bytes = format.as_bytes();
+    if bytes.len() != 4 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("HAL fourcc must be 4 characters, got {format:?}"),
+        ));
+    }
+    Ok([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Build a [`G2DSurface`] from an [`Image`]'s DMA buffer (camera `surface_from_image`).
+fn surface_from_image(img: &Image) -> Result<G2DSurface, Box<dyn Error>> {
+    let phys = G2DPhysical::new(img.fd.as_raw_fd())?;
+    let addr = phys.address();
+    let planes = match img.format {
+        NV12 => {
+            let y_size = img.width as u64 * img.height as u64;
+            [addr, addr + y_size, 0]
+        }
+        _ => [addr, 0, 0],
+    };
+    Ok(G2DSurface {
+        planes,
+        format: fourcc_to_g2d_format(img.format)?,
+        left: 0,
+        top: 0,
+        right: img.width as i32,
+        bottom: img.height as i32,
+        stride: img.width as i32,
+        width: img.width as i32,
+        height: img.height as i32,
+        blendfunc: 0,
+        clrcolor: 0,
+        rot: 0,
+        global_alpha: 0,
+    })
 }
 
 pub struct Image {
@@ -199,30 +259,6 @@ impl Image {
     }
 }
 
-impl TryFrom<&Image> for G2DSurface {
-    type Error = Box<dyn Error>;
-
-    fn try_from(img: &Image) -> Result<Self, Self::Error> {
-        let phys = G2DPhysical::try_from(img.fd.as_raw_fd())?;
-        let format = G2DFormat::try_from(img.format)?.format();
-        Ok(Self {
-            planes: [phys.address(), 0, 0],
-            format,
-            left: 0,
-            top: 0,
-            right: img.width as i32,
-            bottom: img.height as i32,
-            stride: img.width as i32,
-            width: img.width as i32,
-            height: img.height as i32,
-            blendfunc: 0,
-            clrcolor: 0,
-            rot: 0,
-            global_alpha: 0,
-        })
-    }
-}
-
 fn camera_frame_invalid(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
 }
@@ -268,9 +304,7 @@ pub fn image_from_camera_frame(frame: &CameraFrame<Vec<u8>>) -> Result<Image, io
     let width = t
         .shape_at(1)
         .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing width (shape[1])"))?;
-    let format = t.format();
-    let fourcc = FourCharCode::from_str(format)
-        .map_err(|e| io::Error::other(format!("invalid fourcc {format}: {e}")))?;
+    let fourcc = fourcc_from_hal(t.format())?;
     Ok(Image {
         fd: fd.into(),
         width: camera_frame_nonzero_u32("width", width)?,
@@ -287,12 +321,9 @@ impl TryFrom<&CameraFrame<Vec<u8>>> for Image {
     }
 }
 
-/// Format a FourCharCode as a 4-character string for display purposes.
+/// Format a HAL fourcc as a 4-character string for display purposes.
 fn fourcc_str(fcc: FourCC) -> String {
-    // FourCharCode stores a u32; extract the 4 ASCII bytes
-    let val: u32 = fcc.into();
-    let bytes = val.to_le_bytes();
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8_lossy(&fcc).into_owned()
 }
 
 impl fmt::Display for Image {
@@ -327,5 +358,36 @@ impl Drop for MappedImage {
         if unsafe { munmap(self.mmap.cast::<c_void>(), self.len) } != 0 {
             warn!("unmap failed!");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fourcc_from_hal_keeps_wire_order() {
+        assert_eq!(fourcc_from_hal("YUYV").unwrap(), YUYV);
+        assert_eq!(fourcc_from_hal("RGBA").unwrap(), RGBA);
+        assert_eq!(fourcc_from_hal("NV12").unwrap(), NV12);
+        assert!(fourcc_from_hal("YUY").is_err());
+        assert!(fourcc_from_hal("ABGRX").is_err());
+    }
+
+    #[test]
+    fn fourcc_to_g2d_does_not_byte_swap() {
+        assert_eq!(fourcc_to_g2d_format(YUYV).unwrap(), g2d_format_G2D_YUYV);
+        assert_eq!(fourcc_to_g2d_format(RGBA).unwrap(), g2d_format_G2D_RGBA8888);
+        assert_eq!(fourcc_to_g2d_format(RGB3).unwrap(), g2d_format_G2D_RGB888);
+        assert_eq!(fourcc_to_g2d_format(RGBX).unwrap(), g2d_format_G2D_RGBX8888);
+        assert_eq!(fourcc_to_g2d_format(NV12).unwrap(), g2d_format_G2D_NV12);
+        assert!(fourcc_to_g2d_format(*b"VYUY").is_err());
+        assert!(fourcc_to_g2d_format(*b"ABGR").is_err());
+    }
+
+    #[test]
+    fn fourcc_str_matches_hal() {
+        assert_eq!(fourcc_str(YUYV), "YUYV");
+        assert_eq!(fourcc_str(RGBA), "RGBA");
     }
 }

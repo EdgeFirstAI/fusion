@@ -21,6 +21,8 @@ pub const KEEP: &[&str] = &[
     "RADAR_OUTPUT_TOPIC",
     "VISION_MODEL_TOPIC",
     "MODEL_INFO_TOPIC",
+    // Non-empty default, but `""` disables the radar late-fusion pipeline.
+    "RADAR_PCD_TOPIC",
 ];
 
 /// Names of this program's env-bound arguments whose value, as reported by
@@ -65,19 +67,26 @@ pub enum PCDSource {
 #[derive(Debug, Clone, Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// radar input topic. leave empty to disable radar fusion
-    #[arg(long, env, default_value = "")]
+    /// Radar point cloud input topic. Default `radar/clusters`. Set to empty
+    /// (`""`) to disable radar late-fusion. Unset uses the default; empty is
+    /// not the same as unset.
+    #[arg(long, env, default_value = "radar/clusters")]
     pub radar_pcd_topic: String,
 
-    /// lidar input topic. leave empty to disable lidar fusion
+    /// LiDAR point cloud input topic. Default empty (disabled). Set a topic
+    /// such as `lidar/clusters` to enable LiDAR late-fusion.
     #[arg(long, env, default_value = "")]
     pub lidar_pcd_topic: String,
 
-    /// lidar fusion output topic. leave empty to disable
+    /// LiDAR fusion output topic. Default `fusion/lidar`. Set to empty (`""`)
+    /// to disable publishing. Unset uses the default; empty is not the same
+    /// as unset.
     #[arg(long, env, default_value = "fusion/lidar")]
     pub lidar_output_topic: String,
 
-    /// radar fusion output topic. leave empty to disable
+    /// Radar fusion output topic. Default `fusion/radar`. Set to empty (`""`)
+    /// to disable publishing. Unset uses the default; empty is not the same
+    /// as unset.
     #[arg(long, env, default_value = "fusion/radar")]
     pub radar_output_topic: String,
 
@@ -102,7 +111,7 @@ pub struct Args {
     pub bbox3d_topic: String,
 
     /// bbox3d source
-    #[arg(long, env, default_value = "lidar")]
+    #[arg(long, env, default_value = "radar")]
     pub bbox3d_src: PCDSource,
 
     /// camera frame input topic (`CameraFrame`)
@@ -248,7 +257,7 @@ impl Args {
 
     /// Normalize parsed arguments: convert empty strings to None for optional
     /// path parameters, and filter empty strings from endpoint lists. This
-    /// allows setting `MODEL = ""` or `CONNECT = ""` in environment files to
+    /// allows setting `MODEL=""` or `CONNECT=""` in environment files to
     /// represent the disabled/unset state.
     pub fn normalize(&mut self) {
         if self
@@ -267,6 +276,67 @@ impl Args {
         }
         self.connect.retain(|s| !s.is_empty());
         self.listen.retain(|s| !s.is_empty());
+    }
+
+    /// True when at least one late-fusion PCD input topic is set.
+    pub fn has_pcd_input(&self) -> bool {
+        !self.radar_pcd_topic.is_empty() || !self.lidar_pcd_topic.is_empty()
+    }
+
+    /// PCD topic for a sensor source. Empty when the source is disabled.
+    pub fn pcd_topic_for(&self, src: PCDSource) -> &str {
+        match src {
+            PCDSource::Radar => self.radar_pcd_topic.as_str(),
+            PCDSource::Lidar => self.lidar_pcd_topic.as_str(),
+            PCDSource::Disabled => "",
+        }
+    }
+
+    /// True when 3D boxes should be published: `bbox3d_src` names a sensor
+    /// whose PCD topic is non-empty.
+    pub fn bbox3d_enabled(&self) -> bool {
+        !matches!(self.bbox3d_src, PCDSource::Disabled)
+            && !self.pcd_topic_for(self.bbox3d_src).is_empty()
+    }
+
+    /// True when the occupancy-grid publisher should be declared.
+    pub fn grid_enabled(&self) -> bool {
+        self.has_fusion_model()
+            && !self.grid_topic.is_empty()
+            && !matches!(self.grid_src, PCDSource::Disabled)
+            && !self.pcd_topic_for(self.grid_src).is_empty()
+    }
+
+    /// Reject a config that would start no pipeline (no model and no PCD).
+    pub fn validate_pipeline(&self) -> Result<(), String> {
+        if self.has_fusion_model() || self.has_pcd_input() {
+            return Ok(());
+        }
+        Err(
+            "no fusion pipeline is configured: set MODEL and/or RADAR_PCD_TOPIC / LIDAR_PCD_TOPIC"
+                .into(),
+        )
+    }
+
+    /// Log when bbox/grid sources point at a disabled PCD topic.
+    pub fn warn_disabled_outputs(&self) {
+        if !matches!(self.bbox3d_src, PCDSource::Disabled)
+            && self.pcd_topic_for(self.bbox3d_src).is_empty()
+        {
+            tracing::warn!(
+                "BBOX3D_SRC={:?} names a sensor with an empty PCD topic; fusion/boxes3d will not be declared",
+                self.bbox3d_src
+            );
+        }
+        if self.has_fusion_model()
+            && !matches!(self.grid_src, PCDSource::Disabled)
+            && self.pcd_topic_for(self.grid_src).is_empty()
+        {
+            tracing::warn!(
+                "GRID_SRC={:?} names a sensor with an empty PCD topic; occupancy grid will not be declared",
+                self.grid_src
+            );
+        }
     }
 }
 
@@ -431,6 +501,7 @@ mod tests {
             ("RADAR_OUTPUT_TOPIC", ""),
             ("VISION_MODEL_TOPIC", ""),
             ("MODEL_INFO_TOPIC", ""),
+            ("RADAR_PCD_TOPIC", ""),
             ("BBOX3D_TOPIC", ""),
             ("MAX_MODEL_AGE", ""),
         ];
@@ -501,5 +572,73 @@ mod tests {
         assert_eq!(args.model_output_topic, "fusion/model_output");
         assert_eq!(args.grid_topic, "fusion/occupancy");
         assert_eq!(args.camera_topic, "camera/frame");
+        assert_eq!(args.radar_pcd_topic, "radar/clusters");
+        assert_eq!(args.bbox3d_src, PCDSource::Radar);
+    }
+
+    fn args_from(extra: &[&str]) -> Args {
+        let mut argv = vec!["edgefirst-fusion"];
+        argv.extend(extra);
+        let mut args = Args::parse_from(argv);
+        args.normalize();
+        args
+    }
+
+    #[test]
+    fn validate_rejects_idle_pipeline() {
+        let args = args_from(&["--radar-pcd-topic", ""]);
+        assert!(args.validate_pipeline().is_err());
+        assert!(!args.bbox3d_enabled());
+    }
+
+    #[test]
+    fn validate_accepts_stock_radar_defaults() {
+        let args = args_from(&[]);
+        assert!(args.validate_pipeline().is_ok());
+        assert_eq!(args.radar_pcd_topic, "radar/clusters");
+        assert!(args.bbox3d_enabled());
+        assert!(!args.grid_enabled());
+    }
+
+    #[test]
+    fn bbox3d_omitted_when_src_topic_disagree() {
+        let args = args_from(&["--bbox3d-src", "lidar", "--lidar-pcd-topic", ""]);
+        assert!(!args.bbox3d_enabled());
+        let args = args_from(&["--bbox3d-src", "disabled"]);
+        assert!(!args.bbox3d_enabled());
+    }
+
+    #[test]
+    fn fusion_default_assignments_have_no_spaces_around_eq() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fusion.default");
+        let text = std::fs::read_to_string(path).expect("fusion.default");
+        let assignment = regex_lite_or_manual_assignment_lines(&text);
+        assert!(
+            !assignment.is_empty(),
+            "fusion.default should contain KEY=\"value\" assignments"
+        );
+        for (line_no, line) in assignment {
+            assert!(
+                line.contains("=\""),
+                "line {line_no}: expected KEY=\"value\", got {line}"
+            );
+            assert!(
+                !line.contains(" =") && !line.contains("= "),
+                "line {line_no}: spaces around '=': {line}"
+            );
+        }
+    }
+
+    fn regex_lite_or_manual_assignment_lines(text: &str) -> Vec<(usize, &str)> {
+        text.lines()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    return None;
+                }
+                Some((i + 1, trimmed))
+            })
+            .collect()
     }
 }

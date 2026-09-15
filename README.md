@@ -177,20 +177,20 @@ edgefirst-fusion --help
 
 **Sensor Input Topics:**
 
-- `--radar-pcd-topic <TOPIC>` - Radar point cloud input (default: empty/disabled)
+- `--radar-pcd-topic <TOPIC>` - Radar point cloud input (default: `radar/clusters`). Set to empty (`""`) to disable. Unset uses the default; empty is not the same as unset.
 - `--lidar-pcd-topic <TOPIC>` - LiDAR point cloud input (default: empty/disabled)
 - `--camera-topic <TOPIC>` - CameraFrame input (default: `camera/frame`)
 - `--radarcube-topic <TOPIC>` - Radar cube input (default: `radar/cube`)
-- `--vision-model-topic <TOPIC>` - Unified vision model output (default: `model/output`)
-- `--model-info-topic <TOPIC>` - Model info for label resolution (default: `model/info`)
+- `--vision-model-topic <TOPIC>` - Unified vision model output (default: `model/output`). Set to empty (`""`) to disable.
+- `--model-info-topic <TOPIC>` - Model info for label resolution (default: `model/info`). Set to empty (`""`) to disable.
 - `--info-topic <TOPIC>` - Camera info input (default: `camera/info`)
 
 **Output Topics:**
 
-- `--radar-output-topic <TOPIC>` - Enriched radar point cloud (default: `fusion/radar`)
-- `--lidar-output-topic <TOPIC>` - Enriched LiDAR point cloud (default: `fusion/lidar`)
+- `--radar-output-topic <TOPIC>` - Enriched radar point cloud (default: `fusion/radar`). Set to empty (`""`) to disable publishing.
+- `--lidar-output-topic <TOPIC>` - Enriched LiDAR point cloud (default: `fusion/lidar`). Set to empty (`""`) to disable publishing.
 - `--grid-topic <TOPIC>` - Occupancy grid output (default: `fusion/occupancy`)
-- `--bbox3d-topic <TOPIC>` - 3D bounding boxes output (default: `fusion/boxes3d`)
+- `--bbox3d-topic <TOPIC>` - 3D bounding boxes output (default: `fusion/boxes3d`; declared only when `--bbox3d-src` names an enabled PCD topic)
 - `--model-output-topic <TOPIC>` - Model predictions output (default: `fusion/model_output`)
 
 **ML Model Configuration:**
@@ -206,6 +206,7 @@ edgefirst-fusion --help
 **Vision & Instance Detection:**
 
 - `--max-model-age <SECS>` - Maximum age in seconds for model output data before warning (default: `0.5`, 0 = disabled)
+- `--background-index <INT>` - Semantic-segmentation background class (`-1` = last channel, default)
 
 **Tracking Configuration:**
 
@@ -217,11 +218,13 @@ edgefirst-fusion --help
 **Occupancy Grid Configuration:**
 
 - `--grid-src <radar|lidar|disabled>` - Occupancy grid source (default: `radar`)
-- `--bbox3d-src <radar|lidar|disabled>` - 3D bounding box source (default: `lidar`)
+- `--bbox3d-src <radar|lidar|disabled>` - 3D bounding box source (default: `radar`)
 - `--range-bin-limit <MIN> <MAX>` - Range bin limits in meters (default: `0 16`)
 - `--range-bin-width <FLOAT>` - Range bin width in meters (default: `1.0`)
 - `--angle-bin-limit <MIN> <MAX>` - Angle bin limits in degrees (default: `-55 55`)
 - `--angle-bin-width <FLOAT>` - Angle bin width in degrees (default: `6.875`)
+- `--threshold <N>` - Occupancy bin count threshold in unclustered mode (default: `1`)
+- `--bin-delay <N>` - Frames a bin must stay valid/invalid before it is drawn or removed (default: `3`)
 
 **Zenoh Configuration:**
 
@@ -245,6 +248,8 @@ export TRACK=true
 
 edgefirst-fusion  # Uses environment configuration
 ```
+
+systemd `EnvironmentFile=` (for example `/etc/default/fusion`) must use `KEY="value"` with **no spaces** around `=`. The shipped [`fusion.default`](fusion.default) template follows that format. At least one of `MODEL`, `RADAR_PCD_TOPIC`, or `LIDAR_PCD_TOPIC` must be set or the service exits with an error instead of restarting silently.
 
 ---
 

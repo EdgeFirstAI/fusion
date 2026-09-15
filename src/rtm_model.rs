@@ -23,7 +23,7 @@ use zenoh::{
 use crate::{
     args::Args,
     drain_recv,
-    fusion_model::{apply_sigmoid, preprocess_cube, FusionError},
+    fusion_model::{apply_sigmoid, identify_named_inputs, preprocess_cube, FusionError},
     image::{Image, ImageManager, Rotation, RGBA},
     DrainRecvTimeoutSettings, Grid,
 };
@@ -69,20 +69,11 @@ fn load_model(model_name: Option<PathBuf>, engine: String) -> Option<Context> {
 }
 
 #[instrument(skip_all)]
-fn identify_inputs(input_names: &[&str]) -> (usize, Option<usize>) {
-    let mut radar_input_index = 0;
-    let mut camera_input_index = None;
+fn identify_inputs(input_names: &[&str]) -> (Option<usize>, Option<usize>) {
     for (i, name) in input_names.iter().enumerate() {
         debug!("Input #{i} has name: {name}");
-        if name.contains("radar") {
-            radar_input_index = i;
-            debug!("setting radar input index to {i}");
-        } else if name.contains("camera") {
-            let _ = camera_input_index.insert(i);
-            debug!("setting camera input index to {i}");
-        }
     }
-    (radar_input_index, camera_input_index)
+    identify_named_inputs(input_names.iter().copied())
 }
 
 #[instrument(skip_all)]
@@ -168,21 +159,36 @@ pub async fn run_rtm_fusion_model(
 
     let (radar_input_index, camera_input_index) = identify_inputs(&input_names);
 
-    let radar_input_shape: Vec<_> =
+    if radar_input_index.is_none() && camera_input_index.is_none() {
+        error!("fusion model has no tensor named 'radar' or 'camera'; cannot identify inputs");
+        return Err(
+            "fusion model has no tensor named 'radar' or 'camera'; cannot identify inputs".into(),
+        );
+    }
+
+    let radar_input_shape: Vec<_> = if let Some(radar_input_index) = radar_input_index {
         match backbone.tensor_index(input_tensor_index[radar_input_index] as usize) {
             Ok(v) => v.shape().iter().map(|v| *v as usize).collect(),
             Err(e) => {
-                error!("Could not get input 0 from model: {e:?}");
+                error!("Could not get radar input from model: {e:?}");
                 return Err(e.into());
             }
-        };
+        }
+    } else {
+        vec![1, 1, 1, 1]
+    };
     debug!("got input tensor shape: {:?}", radar_input_shape);
 
-    let sub_radarcube = session
-        .declare_subscriber(&args.radarcube_topic)
-        .await
-        .unwrap();
-    info!("Declared subscriber on {:?}", &args.radarcube_topic);
+    let sub_radarcube = if radar_input_index.is_some() {
+        let s = session
+            .declare_subscriber(&args.radarcube_topic)
+            .await
+            .unwrap();
+        info!("Declared subscriber on {:?}", &args.radarcube_topic);
+        Some(s)
+    } else {
+        None
+    };
 
     let mut sub_camera = None;
     if camera_input_index.is_some() {
@@ -211,43 +217,68 @@ pub async fn run_rtm_fusion_model(
     let (mut camera_input_tensor, camera_input_shape) =
         get_camera_input(&backbone, &input_tensor_index, camera_input_index)?;
 
-    let (img_mgr, mut dest) = initialize_g2d(&camera_input_shape)?;
+    let mut g2d = if camera_input_index.is_some() {
+        Some(initialize_g2d(&camera_input_shape)?)
+    } else {
+        None
+    };
 
     let mut timeout_radarcube = DrainRecvTimeoutSettings::default();
     let mut timeout_camera = DrainRecvTimeoutSettings::default();
     loop {
-        let sample = match drain_recv(&sub_radarcube, &mut timeout_radarcube).await {
-            Some(v) => v,
-            None => continue,
-        };
+        let mut timestamp = 0u64;
+        if let Some(ref sub_radarcube) = sub_radarcube {
+            let sample = match drain_recv(sub_radarcube, &mut timeout_radarcube).await {
+                Some(v) => v,
+                None => continue,
+            };
 
-        let radarcube = info_span!("cube_deserialize")
-            .in_scope(|| RadarCube::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
-        let cube_shape = radarcube
-            .shape()
-            .iter()
-            .map(|v| *v as usize)
-            .collect::<Vec<_>>();
-        let cube = preprocess_cube(radarcube.cube(), &cube_shape, &radar_input_shape);
+            let radarcube = info_span!("cube_deserialize")
+                .in_scope(|| RadarCube::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
+            timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
+            let cube_shape = radarcube
+                .shape()
+                .iter()
+                .map(|v| *v as usize)
+                .collect::<Vec<_>>();
+            let cube = preprocess_cube(radarcube.cube(), &cube_shape, &radar_input_shape);
 
-        load_cube(&mut backbone, &input_tensor_index, radar_input_index, &cube);
+            if let Some(radar_input_index) = radar_input_index {
+                load_cube(&mut backbone, &input_tensor_index, radar_input_index, &cube);
+            }
 
-        if camera_input_index.is_some() {
+            if let (true, Some((img_mgr, dest))) = (camera_input_index.is_some(), g2d.as_mut()) {
+                let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
+                let sub_camera = sub_camera.as_ref().unwrap();
+                let _ = load_camera_frame(
+                    camera_input_tensor,
+                    sub_camera,
+                    &mut timeout_camera,
+                    img_mgr,
+                    dest,
+                )
+                .await;
+            }
+        } else {
+            let (img_mgr, dest) = g2d.as_mut().expect("camera-only model initializes G2D");
             let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
             let sub_camera = sub_camera.as_ref().unwrap();
-            load_camera_frame(
+            if !load_camera_frame(
                 camera_input_tensor,
                 sub_camera,
                 &mut timeout_camera,
-                &img_mgr,
-                &mut dest,
+                img_mgr,
+                dest,
             )
-            .await;
+            .await
+            {
+                continue;
+            }
         }
 
         if let Err(e) = run_model(&backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {e}");
-            return Err(e.into());
+            return Err(e);
         }
 
         let output_ctx = match decoder {
@@ -290,7 +321,6 @@ pub async fn run_rtm_fusion_model(
             .unwrap();
 
         let occupied = build_occupancy_grid(&mask, &output_shape);
-        let timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
         let mut guard = grid.lock().await;
         *guard = Some((occupied, timestamp));
     }
@@ -313,6 +343,14 @@ fn load_cube(
         };
     let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
     trace!("mapped input tensor: len={:?}", input_tensor_map.len());
+    if input_tensor_map.len() != cube.len() {
+        error!(
+            "radar cube tensor size does not match preprocessed cube; dest={} src={}",
+            input_tensor_map.len(),
+            cube.len()
+        );
+        return;
+    }
     input_tensor_map.copy_from_slice(cube);
 }
 
@@ -359,10 +397,10 @@ async fn load_camera_frame(
     timeout_camera: &mut DrainRecvTimeoutSettings,
     img_mgr: &ImageManager,
     dest: &mut Image,
-) {
+) -> bool {
     let sample = match drain_recv(sub_camera, timeout_camera).await {
         Some(v) => v,
-        None => return,
+        None => return false,
     };
 
     let cam_frame = info_span!("camera_deserialize")
@@ -377,9 +415,10 @@ async fn load_camera_frame(
             Preprocessing::UnsignedNorm,
         )
     }) {
-        Ok(_) => {}
+        Ok(_) => true,
         Err(e) => {
             error!("Error loading camera frame into input: {e:?}");
+            false
         }
     }
 }
@@ -433,7 +472,7 @@ fn run_model(
     backbone: &Context,
     decoder: &mut Option<Context>,
     input_match: &[(usize, usize)],
-) -> Result<(), deepviewrt::error::Error> {
+) -> Result<(), FusionError> {
     backbone.run()?;
     if decoder.is_none() {
         return Ok(());
@@ -470,13 +509,15 @@ fn run_model(
             }
         };
 
-        assert!(
-            output_map.len() >= tensor_size && input_map.len() >= tensor_size,
-            "Tensor buffer size mismatch: output={}, input={}, needed={}",
-            output_map.len(),
-            input_map.len(),
-            tensor_size
-        );
+        if output_map.len() < tensor_size || input_map.len() < tensor_size {
+            error!(
+                "backbone/decoder tensor size mismatch: output={} input={} needed={}",
+                output_map.len(),
+                input_map.len(),
+                tensor_size
+            );
+            return Err("backbone/decoder tensor size mismatch".into());
+        }
         input_map[..tensor_size].copy_from_slice(&output_map[..tensor_size]);
     }
     decoder.run()
@@ -596,6 +637,14 @@ fn load_input_u8(
     let mut dest_mapped = dest.mmap();
     let data = dest_mapped.as_slice_mut();
     if tensor_channels == data_channels {
+        if tensor_mapped.len() != tensor_vol || data.len() < tensor_vol {
+            return Err(format!(
+                "camera tensor size mismatch: dest={}, src={}, needed={}",
+                tensor_mapped.len(),
+                data.len(),
+                tensor_vol
+            ));
+        }
         tensor_mapped.copy_from_slice(&data[0..tensor_vol]);
         return Ok(());
     }
