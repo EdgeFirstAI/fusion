@@ -74,10 +74,13 @@ BBOX3D_TOPIC="fusion/boxes3d"
 # Sensor source for 3D bounding box generation: radar, lidar, or disabled.
 BBOX3D_SRC="radar"
 
-# Occupancy grid output topic. Publisher is created only when MODEL is set.
+# Occupancy grid output topic. Declared only when MODEL is set, GRID_SRC
+# names a sensor whose PCD topic is non-empty, and GRID_TOPIC is non-empty.
+# A model-only install with empty PCD topics will not publish this topic.
 GRID_TOPIC="fusion/occupancy"
 
 # Sensor source for occupancy grid generation: radar, lidar, or disabled.
+# The named sensor must have a non-empty PCD topic or the publisher is omitted.
 GRID_SRC="radar"
 
 # ---------------------------------------------------------------------------

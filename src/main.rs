@@ -142,6 +142,9 @@ async fn run() {
             "{reason} (RADAR_PCD_TOPIC={:?}, LIDAR_PCD_TOPIC={:?}, MODEL={:?})",
             args.radar_pcd_topic, args.lidar_pcd_topic, args.model
         );
+        // Exit 1 is a configuration error. The platform unit (meta-maivin)
+        // should set RestartPreventExitStatus=1 so Restart=always does not
+        // retry this case.
         std::process::exit(1);
     }
     args.warn_disabled_outputs();

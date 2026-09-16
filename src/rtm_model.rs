@@ -244,26 +244,32 @@ pub async fn run_rtm_fusion_model(
             let cube = preprocess_cube(radarcube.cube(), &cube_shape, &radar_input_shape);
 
             if let Some(radar_input_index) = radar_input_index {
-                load_cube(&mut backbone, &input_tensor_index, radar_input_index, &cube);
+                if !load_cube(&mut backbone, &input_tensor_index, radar_input_index, &cube) {
+                    continue;
+                }
             }
 
             if let (true, Some((img_mgr, dest))) = (camera_input_index.is_some(), g2d.as_mut()) {
                 let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
                 let sub_camera = sub_camera.as_ref().unwrap();
-                let _ = load_camera_frame(
+                if load_camera_frame(
                     camera_input_tensor,
                     sub_camera,
                     &mut timeout_camera,
                     img_mgr,
                     dest,
                 )
-                .await;
+                .await
+                .is_none()
+                {
+                    continue;
+                }
             }
         } else {
             let (img_mgr, dest) = g2d.as_mut().expect("camera-only model initializes G2D");
             let camera_input_tensor = camera_input_tensor.as_mut().unwrap();
             let sub_camera = sub_camera.as_ref().unwrap();
-            if !load_camera_frame(
+            match load_camera_frame(
                 camera_input_tensor,
                 sub_camera,
                 &mut timeout_camera,
@@ -272,7 +278,8 @@ pub async fn run_rtm_fusion_model(
             )
             .await
             {
-                continue;
+                Some(ts) => timestamp = ts,
+                None => continue,
             }
         }
 
@@ -332,13 +339,13 @@ fn load_cube(
     input_tensor_index: &[u32],
     radar_input_index: usize,
     cube: &[f32],
-) {
+) -> bool {
     let radar_input_tensor =
         match backbone.tensor_index_mut(input_tensor_index[radar_input_index] as usize) {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not get input 0 from model: {e:?}");
-                return;
+                return false;
             }
         };
     let mut input_tensor_map = radar_input_tensor.maprw_f32().unwrap();
@@ -349,9 +356,10 @@ fn load_cube(
             input_tensor_map.len(),
             cube.len()
         );
-        return;
+        return false;
     }
     input_tensor_map.copy_from_slice(cube);
+    true
 }
 
 #[instrument(skip_all)]
@@ -397,14 +405,15 @@ async fn load_camera_frame(
     timeout_camera: &mut DrainRecvTimeoutSettings,
     img_mgr: &ImageManager,
     dest: &mut Image,
-) -> bool {
+) -> Option<u64> {
     let sample = match drain_recv(sub_camera, timeout_camera).await {
         Some(v) => v,
-        None => return false,
+        None => return None,
     };
 
     let cam_frame = info_span!("camera_deserialize")
         .in_scope(|| CameraFrame::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
+    let timestamp = cam_frame.stamp().to_nanos().unwrap_or(0);
 
     match info_span!("camera_load").in_scope(|| {
         load_frame_dmabuf(
@@ -415,10 +424,10 @@ async fn load_camera_frame(
             Preprocessing::UnsignedNorm,
         )
     }) {
-        Ok(_) => true,
+        Ok(_) => Some(timestamp),
         Err(e) => {
             error!("Error loading camera frame into input: {e:?}");
-            false
+            None
         }
     }
 }
@@ -483,14 +492,14 @@ fn run_model(
             Ok(v) => v,
             Err(e) => {
                 error!("Could not get output tensor from backbone");
-                return Err(e);
+                return Err(e.into());
             }
         };
         let input = match decoder.tensor_index_mut(*dc_in) {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not get input tensor from decoder");
-                return Err(e);
+                return Err(e.into());
             }
         };
         let tensor_size = output.size() as usize;
@@ -498,14 +507,14 @@ fn run_model(
             Ok(v) => v,
             Err(e) => {
                 error!("Could not map output tensor from backbone");
-                return Err(e);
+                return Err(e.into());
             }
         };
         let mut input_map = match input.maprw::<u8>() {
             Ok(v) => v,
             Err(e) => {
                 error!("Could not map input tensor from decoder");
-                return Err(e);
+                return Err(e.into());
             }
         };
 
@@ -520,7 +529,7 @@ fn run_model(
         }
         input_map[..tensor_size].copy_from_slice(&output_map[..tensor_size]);
     }
-    decoder.run()
+    Ok(decoder.run()?)
 }
 
 #[allow(dead_code)]

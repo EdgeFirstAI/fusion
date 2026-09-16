@@ -55,7 +55,9 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
         #[cfg(feature = "deepviewrt")]
         Some(v) if v.eq_ignore_ascii_case("rtm") => {
             info!("Using RTM model type for {model_name:?}");
-            let _ = run_rtm_fusion_model(session, args, grid).await;
+            if let Err(e) = run_rtm_fusion_model(session, args, grid).await {
+                error!("fusion model thread exited: {e}");
+            }
         }
         #[cfg(not(feature = "deepviewrt"))]
         Some(v) if v.eq_ignore_ascii_case("rtm") => {

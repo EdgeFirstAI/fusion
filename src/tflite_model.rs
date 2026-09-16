@@ -247,21 +247,27 @@ pub async fn run_tflite_fusion_model(
 
             let mut backbone_inputs = backbone.inputs_mut()?;
             if let Some(radar_input_index) = radar_input_index {
-                load_cube(&mut backbone_inputs, radar_input_index, &cube);
+                if !load_cube(&mut backbone_inputs, radar_input_index, &cube) {
+                    continue;
+                }
             }
             if let (Some(camera_input_index), Some((img_mgr, dest))) =
                 (camera_input_index, g2d.as_mut())
             {
                 let camera_input_tensor = &mut backbone_inputs[camera_input_index];
                 let sub_camera = sub_camera.as_ref().unwrap();
-                let _ = load_camera_frame(
+                if load_camera_frame(
                     camera_input_tensor,
                     sub_camera,
                     &mut timeout_camera,
                     img_mgr,
                     dest,
                 )
-                .await;
+                .await
+                .is_none()
+                {
+                    continue;
+                }
             }
             drop(backbone_inputs);
         } else {
@@ -279,8 +285,9 @@ pub async fn run_tflite_fusion_model(
             )
             .await;
             drop(backbone_inputs);
-            if !loaded {
-                continue;
+            match loaded {
+                Some(ts) => timestamp = ts,
+                None => continue,
             }
         }
 
@@ -341,13 +348,13 @@ pub async fn run_tflite_fusion_model(
 }
 
 #[instrument(skip_all)]
-fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: &[f32]) {
+fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: &[f32]) -> bool {
     let radar_input_tensor = &mut backbone_inputs[radar_input_index];
     let input_tensor_map = match radar_input_tensor.maprw() {
         Ok(v) => v,
         Err(e) => {
             error!("Could not map radar input: {e:?}");
-            return;
+            return false;
         }
     };
     if input_tensor_map.len() != cube.len() {
@@ -356,9 +363,10 @@ fn load_cube(backbone_inputs: &mut [TensorMut], radar_input_index: usize, cube: 
             input_tensor_map.len(),
             cube.len()
         );
-        return;
+        return false;
     }
     input_tensor_map.copy_from_slice(cube);
+    true
 }
 
 #[instrument(skip_all)]
@@ -487,14 +495,15 @@ async fn load_camera_frame(
     timeout_camera: &mut DrainRecvTimeoutSettings,
     img_mgr: &ImageManager,
     dest: &mut Image,
-) -> bool {
+) -> Option<u64> {
     let sample = match drain_recv(sub_camera, timeout_camera).await {
         Some(v) => v,
-        None => return false,
+        None => return None,
     };
 
     let cam_frame = info_span!("camera_deserialize")
         .in_scope(|| CameraFrame::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
+    let timestamp = cam_frame.stamp().to_nanos().unwrap_or(0);
 
     match load_frame_dmabuf(
         camera_input_tensor,
@@ -503,10 +512,10 @@ async fn load_camera_frame(
         &cam_frame,
         Preprocessing::UnsignedNorm,
     ) {
-        Ok(_) => true,
+        Ok(_) => Some(timestamp),
         Err(e) => {
             error!("Error loading camera frame into input: {e:?}");
-            false
+            None
         }
     }
 }

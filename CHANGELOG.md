@@ -24,11 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fusion exits with an error (instead of exit 0) when no model and no PCD
-  topic is configured, so systemd `Restart=always` does not spin. The
-  `fusion/boxes3d` publisher is declared only when `BBOX3D_SRC` names an
-  enabled PCD topic (EDGEAI-1234)
+  topic is configured, so the idle case is visible in the journal. The
+  shipped unit still uses `Restart=always`; add `RestartPreventExitStatus=1`
+  in the platform unit (meta-maivin) to stop retries. The `fusion/boxes3d`
+  publisher is declared only when `BBOX3D_SRC` names an enabled PCD topic
+  (EDGEAI-1234)
 - Fusion-model input tensors are identified by name. A camera-only model no
-  longer treats the RGB tensor as radar and panic on `copy_from_slice`
+  longer treats the RGB tensor as radar and panics on `copy_from_slice`
   (EDGEAI-1234)
 - NEON `sincos_f32` returned an inverted cosine for `|x| mod 2π` in
   `[3π/4, 7π/4)` on aarch64. The Cephes quadrant sign mask selected bit 1 of

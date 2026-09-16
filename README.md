@@ -249,7 +249,7 @@ export TRACK=true
 edgefirst-fusion  # Uses environment configuration
 ```
 
-systemd `EnvironmentFile=` (for example `/etc/default/fusion`) must use `KEY="value"` with **no spaces** around `=`. The shipped [`fusion.default`](fusion.default) template follows that format. At least one of `MODEL`, `RADAR_PCD_TOPIC`, or `LIDAR_PCD_TOPIC` must be set or the service exits with an error instead of restarting silently.
+systemd `EnvironmentFile=` (for example `/etc/default/fusion`) must use `KEY="value"` with **no spaces** around `=`. The shipped [`fusion.default`](fusion.default) template follows that format. At least one of `MODEL`, `RADAR_PCD_TOPIC`, or `LIDAR_PCD_TOPIC` must be set or the process exits 1 (previously it exited 0 with no work). `Restart=always` will still retry until the platform unit adds `RestartPreventExitStatus=1`.
 
 ---
 
