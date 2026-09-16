@@ -18,8 +18,6 @@ use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::Session;
 
-#[cfg(feature = "deepviewrt")]
-use crate::rtm_model::run_rtm_fusion_model;
 use crate::{args::Args, tflite_model::run_tflite_fusion_model, Grid};
 
 pub fn spawn_fusion_model_thread(
@@ -48,19 +46,12 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
     match model_name.extension() {
         Some(v) if v.eq_ignore_ascii_case("tflite") => {
             info!("Using TFLite model type for {model_name:?}");
-            let _ = run_tflite_fusion_model(session, args, grid).await;
+            if let Err(e) = run_tflite_fusion_model(session, args, grid).await {
+                error!("fusion model thread exited: {e}");
+            }
         }
-        #[cfg(feature = "deepviewrt")]
-        Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            info!("Using RTM model type for {model_name:?}");
-            let _ = run_rtm_fusion_model(session, args, grid).await;
-        }
-        #[cfg(not(feature = "deepviewrt"))]
-        Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            error!("Model {model_name:?} requires the `deepviewrt` feature. Rebuild with `--features deepviewrt`.");
-        }
-        Some(_) => {
-            error!("Unknown model type extension for {model_name:?}");
+        Some(v) => {
+            error!("Unsupported model type {v:?}; fusion models must be TFLite (.tflite)");
         }
         None => {
             error!("No extension for {model_name:?}");
@@ -138,9 +129,6 @@ pub enum FusionError {
     String(String),
     #[error("TfLite Error: {0:?}")]
     TfLite(#[from] TfLiteError),
-    #[cfg(feature = "deepviewrt")]
-    #[error("Rtm Error: {0:?}")]
-    Rtm(#[from] deepviewrt::error::Error),
     #[error("LibLoading Error: {0:?}")]
     LibLoading(#[from] LibloadingError),
     #[error("IO Error: {0:?}")]
@@ -159,10 +147,42 @@ impl From<&str> for FusionError {
     }
 }
 
+/// Locate radar/camera tensors by name. An input is radar or camera only when
+/// the name contains that substring — never default radar to index 0.
+pub(crate) fn identify_named_inputs<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+) -> (Option<usize>, Option<usize>) {
+    let mut radar_input_index = None;
+    let mut camera_input_index = None;
+    for (i, name) in names.into_iter().enumerate() {
+        if name.contains("radar") {
+            radar_input_index = Some(i);
+        }
+        if name.contains("camera") {
+            camera_input_index = Some(i);
+        }
+    }
+    (radar_input_index, camera_input_index)
+}
+
 #[cfg(test)]
 mod swap_axes_test {
 
     use super::*;
+
+    #[test]
+    fn identify_named_inputs_does_not_default_radar() {
+        assert_eq!(identify_named_inputs(["camera"]), (None, Some(0)));
+        assert_eq!(
+            identify_named_inputs(["serving_default_camera:0"]),
+            (None, Some(0))
+        );
+        assert_eq!(
+            identify_named_inputs(["radar", "camera"]),
+            (Some(0), Some(1))
+        );
+        assert_eq!(identify_named_inputs(["input_0", "input_1"]), (None, None));
+    }
 
     #[test]
     fn test_log1p() {

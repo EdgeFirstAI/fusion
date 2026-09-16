@@ -597,24 +597,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
-name = "deepviewrt"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdafd7511a5de56df61169bc4dd30cb80be3b3c4c9073f40f92045d910ea8f31"
-dependencies = [
- "deepviewrt-sys",
-]
-
-[[package]]
-name = "deepviewrt-sys"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8c10196ef09be2b96a799194884373c5ecfe05ab8f840eeefc6b7015e81f02a"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "defmt"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -756,7 +738,6 @@ version = "1.8.1"
 dependencies = [
  "async-pidfd",
  "clap",
- "deepviewrt",
  "dma-buf",
  "dma-heap",
  "edgefirst-schemas",

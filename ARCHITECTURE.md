@@ -161,13 +161,12 @@ graph TD
 
 - Subscribe to camera frames and radar cubes
 - Pre-process inputs (image scaling via G2D, radar cube formatting)
-- Run ML inference (TFLite or DeepView RT)
+- Run ML inference (TFLite)
 - Publish grid predictions to shared state
 
 **Supported Engines:**
 
-- **DeepView RT (.rtm)**: Au-Zone's inference runtime with NPU acceleration
-- **TFLite (.tflite)**: TensorFlow Lite with optional delegate (NPU, GPU)
+- **TFLite (.tflite)**: TensorFlow Lite with optional NPU delegate
 
 **Processing Pipeline:**
 
@@ -176,7 +175,7 @@ graph TD
    ↓
 [Preprocess]  G2D image resize + format conversion
    ↓          Radar cube normalization
-[Inference]   TFLite or DeepView RT model execution
+[Inference]   TFLite model execution
    ↓
 [Postprocess] Sigmoid activation (optional)
    ↓          Grid extraction
@@ -292,19 +291,6 @@ Loaded dynamically via `tflitec-sys` FFI bindings:
 
 See `tflitec-sys/` for FFI bindings and `src/tflite_model.rs` for model loading.
 
-### DeepView RT Runtime
-
-Au-Zone's inference runtime (`deepviewrt` crate), **feature-gated** behind `--features deepviewrt`:
-
-- Native NPU acceleration on NXP i.MX8M Plus
-- Loads `.rtm` model files
-- DMA-BUF plane import for zero-copy inference
-- Requires `libdeepview-rt.so` installed on the target system
-
-Build with DeepView RT support: `cargo build --release --features deepviewrt`
-
-See `src/rtm_model.rs` for model loading.
-
 ### CameraFrame Handling
 
 Camera frames are received as `edgefirst_msgs/CameraFrame` tensors with DMA-BUF planes:
@@ -378,7 +364,6 @@ Frame marks track the fusion loop iteration rate.
 - [zenoh](https://zenoh.io/) - Pub/sub middleware
 - [nalgebra](https://nalgebra.org/) - Linear algebra for transforms
 - [ndarray](https://docs.rs/ndarray/) - N-dimensional arrays for model I/O
-- [deepviewrt](https://crates.io/crates/deepviewrt) - DeepView RT inference runtime
 
 **Hardware Documentation:**
 

@@ -4,16 +4,12 @@
 use std::{fs::read, time::Instant};
 
 use clap::Parser;
-#[cfg(feature = "deepviewrt")]
-use deepviewrt::{context::Context, engine::Engine, model};
 use log::{error, info};
 use setup::Args;
 use tflitec_sys::{delegate::Delegate, TFLiteLib};
 mod setup;
 
 const TFLITE_NPU_PATH: &str = "libvx_delegate.so";
-#[cfg(feature = "deepviewrt")]
-const RTM_NPU_PATH: &str = "deepview-rt-openvx.so";
 fn main() {
     let args = Args::parse();
     let model_data =
@@ -21,19 +17,11 @@ fn main() {
     info!("Model read from file");
 
     match args.model.extension() {
-        #[cfg(feature = "deepviewrt")]
-        Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            run_rtm(&args, model_data);
-        }
-        #[cfg(not(feature = "deepviewrt"))]
-        Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            error!("RTM models require the `deepviewrt` feature. Rebuild with `--features deepviewrt`.");
-        }
         Some(v) if v.eq_ignore_ascii_case("tflite") => {
             run_tflite(&args, model_data).unwrap();
         }
         Some(v) => {
-            error!("Unknown extension: {:?}", v);
+            error!("Unsupported model type {v:?}; fusion models must be TFLite (.tflite)");
         }
         None => {
             error!("No extension found");
@@ -80,34 +68,4 @@ fn run_tflite(args: &Args, model_data: Vec<u8>) -> Result<(), String> {
         info!("Model took {:?}", elapsed);
     }
     Ok(())
-}
-
-#[cfg(feature = "deepviewrt")]
-fn run_rtm(args: &Args, model_data: Vec<u8>) {
-    let engine = if args.engine == "npu" {
-        Some(
-            Engine::new(RTM_NPU_PATH)
-                .unwrap_or_else(|_| panic!("Initializing {RTM_NPU_PATH} engine failed")),
-        )
-    } else {
-        None
-    };
-
-    let mut nn_context = Context::new(engine, model::memory_size(&model_data), 4096 * 1024).expect(
-        "NNContext init
-    failed",
-    );
-    info!("NNContext initialized");
-
-    nn_context
-        .load_model(model_data)
-        .expect("Load model failed");
-    info!("Model loaded into NNContext");
-
-    for _ in 0..10 {
-        let start = Instant::now();
-        nn_context.run().expect("Run model failed");
-        let elapsed = start.elapsed();
-        info!("Model took {:?}", elapsed);
-    }
 }

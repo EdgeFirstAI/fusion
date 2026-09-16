@@ -42,8 +42,6 @@ mod image;
 mod kalman;
 mod mask;
 mod pcd;
-#[cfg(feature = "deepviewrt")]
-mod rtm_model;
 mod simd;
 mod tflite_model;
 mod tracker;
@@ -136,6 +134,18 @@ async fn run() {
         .with(tracy);
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
     tracing_log::LogTracer::init().unwrap();
+
+    if let Err(reason) = args.validate_pipeline() {
+        error!(
+            "{reason} (RADAR_PCD_TOPIC={:?}, LIDAR_PCD_TOPIC={:?}, MODEL={:?})",
+            args.radar_pcd_topic, args.lidar_pcd_topic, args.model
+        );
+        // Exit 1 is a configuration error. The platform unit (meta-maivin)
+        // should set RestartPreventExitStatus=1 so Restart=always does not
+        // retry this case.
+        std::process::exit(1);
+    }
+    args.warn_disabled_outputs();
 
     let session = zenoh::open(args.clone()).await.unwrap();
 
@@ -264,17 +274,25 @@ async fn run() {
         }
     }
 
-    match args.bbox3d_src {
-        PCDSource::Radar => zenoh_radar.bbox_publ = Some(bbox_publ),
-        PCDSource::Lidar => zenoh_lidar.bbox_publ = Some(bbox_publ),
-        _ => {}
+    if let Some(bbox_publ) = bbox_publ {
+        match args.bbox3d_src {
+            PCDSource::Radar => zenoh_radar.bbox_publ = Some(bbox_publ),
+            PCDSource::Lidar => zenoh_lidar.bbox_publ = Some(bbox_publ),
+            PCDSource::Disabled => {}
+        }
     }
-    let lidar_handle = spawn_fusion_thread(data_lidar, zenoh_lidar, args.clone());
-    let radar_handle = spawn_fusion_thread(data_radar, zenoh_radar, args.clone());
 
-    let _ = lidar_handle.join();
-    let _ = radar_handle.join();
-    let _ = fusion_model_handle.join();
+    let mut handles = Vec::new();
+    if !args.lidar_pcd_topic.is_empty() {
+        handles.push(spawn_fusion_thread(data_lidar, zenoh_lidar, args.clone()));
+    }
+    if !args.radar_pcd_topic.is_empty() {
+        handles.push(spawn_fusion_thread(data_radar, zenoh_radar, args.clone()));
+    }
+    handles.push(fusion_model_handle);
+    for handle in handles {
+        let _ = handle.join();
+    }
 }
 
 fn model_info_callback(
@@ -356,7 +374,7 @@ async fn declare_sub_pub(
     Option<Subscriber<FifoChannelHandler<Sample>>>,
     Option<Subscriber<FifoChannelHandler<Sample>>>,
     Option<Publisher<'static>>,
-    Publisher<'static>,
+    Option<Publisher<'static>>,
 ) {
     let radar_sub = if !args.radar_pcd_topic.is_empty() {
         Some(
@@ -380,7 +398,7 @@ async fn declare_sub_pub(
         None
     };
 
-    let grid_publ = if args.has_fusion_model() && !args.grid_topic.is_empty() {
+    let grid_publ = if args.grid_enabled() {
         Some(
             session
                 .declare_publisher(args.grid_topic.clone())
@@ -391,10 +409,16 @@ async fn declare_sub_pub(
         None
     };
 
-    let bbox_publ = session
-        .declare_publisher(args.bbox3d_topic.clone())
-        .await
-        .expect("Failed to declare Zenoh publisher");
+    let bbox_publ = if args.bbox3d_enabled() {
+        Some(
+            session
+                .declare_publisher(args.bbox3d_topic.clone())
+                .await
+                .expect("Failed to declare Zenoh publisher"),
+        )
+    } else {
+        None
+    };
 
     (radar_sub, lidar_sub, grid_publ, bbox_publ)
 }

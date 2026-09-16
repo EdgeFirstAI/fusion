@@ -1,8 +1,15 @@
 # EdgeFirst Sensor Fusion Service
 #
 # Default configuration for the fusion service. This file is loaded as a
-# systemd EnvironmentFile and all values below represent the built-in defaults.
+# systemd EnvironmentFile. Assignments MUST be KEY="value" with no spaces
+# around `=`; systemd does not strip those spaces, so `KEY = "value"` is
+# ignored or stored under a different name.
+#
 # Refer to `fusion --help` for detailed argument descriptions.
+#
+# WebUI note: fields below are grouped to match the configuration page.
+# MODEL / ENGINE / TRACK belong to the fusion-trainer radar-camera pipeline,
+# not the vision model service (VISION_MODEL_TOPIC / MODEL_INFO_TOPIC).
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -10,80 +17,90 @@
 
 # Log level filter. Sub-targets include zenoh and edgefirst_fusion.
 # Refer to the RUST_LOG / tracing-subscriber documentation for syntax.
-RUST_LOG = "info"
+RUST_LOG="info"
 
 # ---------------------------------------------------------------------------
-# Sensor Input Topics
+# Sensor input
 # ---------------------------------------------------------------------------
 
-# Radar point cloud input topic. Set to enable radar late-fusion pipeline.
-# Typical values: radar/clusters (clustered targets with better stability)
-# or radar/targets (raw detections). Leave empty to disable radar fusion.
-RADAR_PCD_TOPIC = ""
+# Radar point cloud input topic. Stock default enables radar late-fusion.
+# Typical values: radar/clusters (clustered targets) or radar/targets (raw).
+# Set to "" to disable radar fusion.
+RADAR_PCD_TOPIC="radar/clusters"
 
-# LiDAR point cloud input topic. Set to enable LiDAR late-fusion pipeline.
-# Typical values: lidar/clusters (clustered points with cluster_id field)
-# or lidar/points (raw unclustered points). Leave empty to disable LiDAR fusion.
-LIDAR_PCD_TOPIC = ""
+# LiDAR point cloud input topic. Leave empty to disable LiDAR fusion
+# (Phantom / Raivin is radar-only by default).
+# Typical values: lidar/clusters or lidar/points.
+LIDAR_PCD_TOPIC=""
 
 # Unified vision model output topic. Subscribes to detection boxes, instance
 # segmentation masks, and semantic segmentation from the model service.
 # Set to "" to disable vision fusion.
-VISION_MODEL_TOPIC = "model/output"
+VISION_MODEL_TOPIC="model/output"
 
 # Model info topic for dynamic label resolution. Provides the class label
 # list from the model service so fusion can map label strings to class indices.
 # Set to "" to disable (labels default to numeric indices).
-MODEL_INFO_TOPIC = "model/info"
+MODEL_INFO_TOPIC="model/info"
 
 # Camera intrinsics topic. The camera matrix is used to project 3D sensor
 # points onto the 2D image plane for vision fusion.
-INFO_TOPIC = "camera/info"
+INFO_TOPIC="camera/info"
 
 # Note: The service also subscribes to tf_static for camera extrinsics
 # (position and orientation relative to sensors). This topic follows the ROS
 # TF convention and is not configurable.
 
 # ---------------------------------------------------------------------------
-# Fusion Output Topics
+# Outputs
 # ---------------------------------------------------------------------------
 
 # Radar fusion output topic. Only active when RADAR_PCD_TOPIC is set.
 # Publishes radar points annotated with vision_class and instance_id
 # (plus track_id when tracking is detected). Late-fusion layout is
 # 16 bytes/point (20 with tracking). Set to "" to disable publishing.
-RADAR_OUTPUT_TOPIC = "fusion/radar"
+RADAR_OUTPUT_TOPIC="fusion/radar"
 
 # LiDAR fusion output topic. Only active when LIDAR_PCD_TOPIC is set.
 # Publishes LiDAR points annotated with vision_class and instance_id
 # (plus track_id when tracking is detected). Late-fusion layout is
 # 16 bytes/point (20 with tracking). Set to "" to disable publishing.
-LIDAR_OUTPUT_TOPIC = "fusion/lidar"
+LIDAR_OUTPUT_TOPIC="fusion/lidar"
 
-# 3D bounding box output topic.
-BBOX3D_TOPIC = "fusion/boxes3d"
+# 3D bounding box output topic. Declared only when BBOX3D_SRC names a
+# sensor whose PCD topic is non-empty.
+BBOX3D_TOPIC="fusion/boxes3d"
 
 # Sensor source for 3D bounding box generation: radar, lidar, or disabled.
-BBOX3D_SRC = "lidar"
+BBOX3D_SRC="radar"
 
-# Occupancy grid output topic.
-GRID_TOPIC = "fusion/occupancy"
+# Occupancy grid output topic. Declared only when MODEL is set, GRID_SRC
+# names a sensor whose PCD topic is non-empty, and GRID_TOPIC is non-empty.
+# A model-only install with empty PCD topics will not publish this topic.
+GRID_TOPIC="fusion/occupancy"
 
 # Sensor source for occupancy grid generation: radar, lidar, or disabled.
-GRID_SRC = "radar"
+# The named sensor must have a non-empty PCD topic or the publisher is omitted.
+GRID_SRC="radar"
 
 # ---------------------------------------------------------------------------
-# Vision & Instance Detection
+# Vision & instance detection
 # ---------------------------------------------------------------------------
 
 # Maximum age in seconds for model output data relative to the current
 # point cloud frame. A warning is logged when stale data is used for fusion.
 # Set to 0 to disable the staleness check.
-MAX_MODEL_AGE = "0.5"
+MAX_MODEL_AGE="0.5"
+
+# Background class index for semantic segmentation instance detection.
+# -1 = last channel (default), 0..N = explicit index.
+BACKGROUND_INDEX="-1"
 
 # ---------------------------------------------------------------------------
-# Radar Fusion Model
+# Fusion model (fusion-trainer radar-camera pipeline)
 # ---------------------------------------------------------------------------
+# These settings drive the optional on-device fusion model. They are
+# independent of the vision model service (VISION_MODEL_TOPIC).
 
 # Path to the radar-camera fusion model (TFLite). This model performs BEV
 # occupancy prediction from radar cube and camera inputs. Set to "" to disable
@@ -91,36 +108,36 @@ MAX_MODEL_AGE = "0.5"
 #
 # When set, the model subscribes to CAMERA_TOPIC and RADARCUBE_TOPIC and
 # publishes predictions to MODEL_OUTPUT_TOPIC.
-MODEL = ""
+MODEL=""
 
 # Path to an optional second-stage decoder model for two-stage fusion models.
 # Set to "" to disable.
-MODEL_DECODER = ""
+MODEL_DECODER=""
 
 # CameraFrame input topic for the radar fusion model.
-CAMERA_TOPIC = "camera/frame"
+CAMERA_TOPIC="camera/frame"
 
 # Radar cube input topic for the radar fusion model.
-RADARCUBE_TOPIC = "radar/cube"
+RADARCUBE_TOPIC="radar/cube"
 
 # Radar fusion model prediction output topic.
-MODEL_OUTPUT_TOPIC = "fusion/model_output"
+MODEL_OUTPUT_TOPIC="fusion/model_output"
 
 # Interpret the radar fusion model output as polar coordinates.
-MODEL_POLAR = "false"
+MODEL_POLAR="false"
 
 # Confidence threshold for the radar fusion model output topic.
-MODEL_THRESHOLD = "0.5"
+MODEL_THRESHOLD="0.5"
 
 # Real-world size (length width) in meters of each 1x1 model output grid cell.
 # If MODEL_POLAR is true, the width value is in degrees.
-MODEL_GRID_SIZE = "1 1"
+MODEL_GRID_SIZE="1 1"
 
 # Apply sigmoid (logistic) function to raw model outputs.
-LOGITS = "true"
+LOGITS="true"
 
-# Inference engine: npu, cpu, or gpu.
-ENGINE = "npu"
+# Inference engine: npu or cpu.
+ENGINE="npu"
 
 # ---------------------------------------------------------------------------
 # Tracking (ByteTrack)
@@ -128,64 +145,64 @@ ENGINE = "npu"
 
 # Enable the ByteTrack multi-object tracker. Reduces flickering in radar
 # fusion model output and provides persistent track IDs for 3D bounding boxes.
-TRACK = "false"
+TRACK="false"
 
 # Seconds a tracked object may be missing before its track is removed.
-TRACK_EXTRA_LIFESPAN = "0.5"
+TRACK_EXTRA_LIFESPAN="0.5"
 
 # IoU threshold for associating detections to existing tracks. Higher values
 # require closer overlap with the predicted track location.
-TRACK_IOU = "0.1"
+TRACK_IOU="0.1"
 
 # Kalman filter update factor (0.0 to 1.0). Higher values reduce smoothing
 # but respond more rapidly to position changes.
-TRACK_UPDATE = "0.4"
+TRACK_UPDATE="0.4"
 
 # ---------------------------------------------------------------------------
-# Binning Configuration
+# Binning
 # ---------------------------------------------------------------------------
 # Range and angle bins are used to interpret the radar fusion model output.
 # They are also used for the occupancy grid when the input point cloud does
 # not contain a cluster_id field (unclustered mode).
 
 # Range limits (min max) in meters.
-RANGE_BIN_LIMIT = "0 16"
+RANGE_BIN_LIMIT="0 16"
 
 # Size of each range bin in meters.
-RANGE_BIN_WIDTH = "1.0"
+RANGE_BIN_WIDTH="1.0"
 
 # Angle limits (min max) in degrees. 0 degrees is the forward direction.
-ANGLE_BIN_LIMIT = "-55 55"
+ANGLE_BIN_LIMIT="-55 55"
 
 # Size of each angle bin in degrees.
-ANGLE_BIN_WIDTH = "6.875"
+ANGLE_BIN_WIDTH="6.875"
 
 # Minimum number of detections in a bin before it is considered a valid target
 # rather than noise. Only used in unclustered mode.
-THRESHOLD = "1"
+THRESHOLD="1"
 
 # Number of consecutive frames a bin must be valid before it is drawn, and
 # the number of consecutive invalid frames before it is removed. Only used
 # in unclustered mode.
-BIN_DELAY = "3"
+BIN_DELAY="3"
 
 # ---------------------------------------------------------------------------
-# Zenoh Network
+# Zenoh
 # ---------------------------------------------------------------------------
 
 # Zenoh session mode: peer or client.
-MODE = "peer"
+MODE="peer"
 
 # Connect to specific Zenoh endpoints. Space-separated list of endpoints
 # (e.g. "tcp/192.168.1.1:7447"). Set to "" for multicast-only discovery.
-CONNECT = ""
+CONNECT=""
 
 # Listen on specific Zenoh endpoints. Set to "" for default behavior.
-LISTEN = ""
+LISTEN=""
 
 # Disable multicast scouting entirely. Useful when connecting to a Zenoh
 # router via CONNECT instead of local discovery.
-NO_MULTICAST_SCOUTING = "false"
+NO_MULTICAST_SCOUTING="false"
 
 # Enable Tracy profiler broadcast for performance analysis.
-TRACY = "false"
+TRACY="false"
