@@ -109,6 +109,15 @@ verify-version:
 	fi
 	@CARGO_VERSION=$$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/'); \
 	echo "Cargo.toml version: $$CARGO_VERSION"; \
+	if [ -f "Cargo.lock" ]; then \
+		LOCK_VERSION=$$(grep -A1 '^name = "$(PROJECT_NAME)"$$' Cargo.lock | grep '^version = ' | head -1 | sed 's/version = "\(.*\)"/\1/'); \
+		if [ "$$LOCK_VERSION" != "$$CARGO_VERSION" ]; then \
+			echo "ERROR: Cargo.lock package version ($$LOCK_VERSION) != Cargo.toml ($$CARGO_VERSION)"; \
+			echo "Run: cargo update -p $(PROJECT_NAME)"; \
+			exit 1; \
+		fi; \
+		echo "Cargo.lock: ✓"; \
+	fi; \
 	if [ -f "CHANGELOG.md" ]; then \
 		if ! grep -q "\[$$CARGO_VERSION\]" CHANGELOG.md; then \
 			echo "ERROR: Version $$CARGO_VERSION not found in CHANGELOG.md"; \
