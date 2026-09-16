@@ -198,7 +198,7 @@ pub async fn run_tflite_fusion_model(
             .declare_subscriber(&args.radarcube_topic)
             .await
             .unwrap();
-        info!("Declared subscriber on {:?}", &args.radarcube_topic);
+        info!("Declared subscriber on {:?}", args.radarcube_topic);
         Some(s)
     } else {
         None

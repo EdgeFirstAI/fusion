@@ -3,7 +3,6 @@
 
 use async_pidfd::PidFd;
 use core::fmt;
-use dma_buf::DmaBuf;
 use dma_heap::{Heap, HeapKind};
 use edgefirst_schemas::edgefirst_msgs::CameraFrame;
 use g2d_sys::{
@@ -12,19 +11,16 @@ use g2d_sys::{
     g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
     G2DPhysical, G2DSurface, G2D,
 };
-use libc::{dup, mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
+use libc::{mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
 use log::{debug, warn};
 use pidfd_getfd::{get_file_from_pidfd, GetFdFlags};
 use std::{
     error::Error,
     ffi::c_void,
     io,
-    os::{
-        fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd},
-        unix::io::OwnedFd,
-    },
+    os::{fd::AsRawFd, unix::io::OwnedFd},
     ptr::null_mut,
-    slice::{from_raw_parts, from_raw_parts_mut},
+    slice::from_raw_parts_mut,
 };
 
 /// HAL / V4L2 fourcc stored as four ASCII bytes in wire order (`b"YUYV"`).
@@ -202,25 +198,8 @@ impl Image {
         })
     }
 
-    pub fn new_preallocated(fd: OwnedFd, width: u32, height: u32, format: FourCC) -> Self {
-        Self {
-            fd,
-            width,
-            height,
-            format,
-        }
-    }
-
-    pub fn fd(&self) -> BorrowedFd<'_> {
-        self.fd.as_fd()
-    }
-
     pub fn raw_fd(&self) -> i32 {
         self.fd.as_raw_fd()
-    }
-
-    pub fn dmabuf(&self) -> DmaBuf {
-        unsafe { DmaBuf::from_raw_fd(dup(self.fd.as_raw_fd())) }
     }
 
     pub fn width(&self) -> u32 {
@@ -345,10 +324,6 @@ pub struct MappedImage {
 }
 
 impl MappedImage {
-    pub fn as_slice(&self) -> &[u8] {
-        unsafe { from_raw_parts(self.mmap, self.len) }
-    }
-
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
         unsafe { from_raw_parts_mut(self.mmap, self.len) }
     }
