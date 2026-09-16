@@ -18,8 +18,6 @@ use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::Session;
 
-#[cfg(feature = "deepviewrt")]
-use crate::rtm_model::run_rtm_fusion_model;
 use crate::{args::Args, tflite_model::run_tflite_fusion_model, Grid};
 
 pub fn spawn_fusion_model_thread(
@@ -52,19 +50,8 @@ pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Opti
                 error!("fusion model thread exited: {e}");
             }
         }
-        #[cfg(feature = "deepviewrt")]
-        Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            info!("Using RTM model type for {model_name:?}");
-            if let Err(e) = run_rtm_fusion_model(session, args, grid).await {
-                error!("fusion model thread exited: {e}");
-            }
-        }
-        #[cfg(not(feature = "deepviewrt"))]
-        Some(v) if v.eq_ignore_ascii_case("rtm") => {
-            error!("Model {model_name:?} requires the `deepviewrt` feature. Rebuild with `--features deepviewrt`.");
-        }
-        Some(_) => {
-            error!("Unknown model type extension for {model_name:?}");
+        Some(v) => {
+            error!("Unsupported model type {v:?}; fusion models must be TFLite (.tflite)");
         }
         None => {
             error!("No extension for {model_name:?}");
@@ -142,9 +129,6 @@ pub enum FusionError {
     String(String),
     #[error("TfLite Error: {0:?}")]
     TfLite(#[from] TfLiteError),
-    #[cfg(feature = "deepviewrt")]
-    #[error("Rtm Error: {0:?}")]
-    Rtm(#[from] deepviewrt::error::Error),
     #[error("LibLoading Error: {0:?}")]
     LibLoading(#[from] LibloadingError),
     #[error("IO Error: {0:?}")]

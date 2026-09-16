@@ -17,7 +17,7 @@ EdgeFirst Fusion is a real-time sensor fusion service designed for edge AI perce
 **Key Features:**
 
 - **Late Fusion** - Projects radar/LiDAR points onto camera segmentation masks for per-point classification
-- **ML Inference** - Runs TFLite or DeepView RT models for radar-camera fusion occupancy grids
+- **ML Inference** - Runs TFLite models for radar-camera fusion occupancy grids
 - **Object Tracking** - ByteTrack-based multi-object tracker with Kalman filtering
 - **Occupancy Grids** - Generates polar or cartesian occupancy grids from sensor data
 - **3D Bounding Boxes** - Produces 3D bounding boxes from clustered point clouds
@@ -112,7 +112,7 @@ wget https://github.com/EdgeFirstAI/fusion/releases/latest/download/edgefirst-fu
 chmod +x edgefirst-fusion-linux-aarch64
 
 # Run with a fusion model
-./edgefirst-fusion-linux-aarch64 --model model.rtm --track
+./edgefirst-fusion-linux-aarch64 --model model.tflite --track
 ```
 
 **Option 2: Build from Source**
@@ -122,11 +122,8 @@ chmod +x edgefirst-fusion-linux-aarch64
 git clone https://github.com/EdgeFirstAI/fusion.git
 cd fusion
 
-# Build release binary (TFLite-only, default)
+# Build release binary
 cargo build --release
-
-# Build with DeepView RT support (requires libdeepview-rt installed)
-cargo build --release --features deepviewrt
 
 # Run
 ./target/release/edgefirst-fusion --model model.tflite --track
@@ -138,7 +135,7 @@ cargo build --release --features deepviewrt
 
 ```bash
 edgefirst-fusion \
-  --model model.rtm \
+  --model model.tflite \
   --engine npu \
   --track \
   --radar-pcd-topic radar/clusters \
@@ -162,7 +159,7 @@ edgefirst-fusion \
   --lidar-pcd-topic lidar/clusters \
   --camera-topic camera/frame \
   --vision-model-topic model/output \
-  --model model.rtm
+  --model model.tflite
 ```
 
 ---
@@ -195,7 +192,7 @@ edgefirst-fusion --help
 
 **ML Model Configuration:**
 
-- `--model <PATH>` - Path to fusion model (.tflite by default, or .rtm with the `deepviewrt` feature)
+- `--model <PATH>` - Path to fusion model (TFLite `.tflite`)
 - `--model-decoder <PATH>` - Path to model decoder (optional)
 - `--engine <ENGINE>` - Inference engine: `npu`, `cpu` (default: `npu`)
 - `--model-threshold <FLOAT>` - Detection threshold (default: `0.5`)
@@ -242,7 +239,7 @@ edgefirst-fusion --help
 All command-line flags can be set via environment variables (uppercase, underscore-separated):
 
 ```bash
-export MODEL=/path/to/model.rtm
+export MODEL=/path/to/model.tflite
 export ENGINE=npu
 export TRACK=true
 
@@ -301,9 +298,8 @@ fusion/
 │   ├── main.rs          # Main loop, Zenoh pub/sub, thread coordination
 │   ├── args.rs           # CLI argument parsing (clap derive)
 │   ├── image.rs          # CameraFrame import, G2D image conversion
-│   ├── fusion_model.rs   # ML model thread (TFLite/DeepView RT inference)
+│   ├── fusion_model.rs   # ML model thread (TFLite inference)
 │   ├── tflite_model.rs   # TFLite model loading and inference
-│   ├── rtm_model.rs      # DeepView RT model loading and inference
 │   ├── mask.rs            # Segmentation mask processing, flood fill
 │   ├── pcd.rs             # Point cloud parsing and serialization
 │   ├── transform.rs       # 3D-to-2D projection, coordinate transforms
@@ -350,10 +346,10 @@ zenoh-cli query "tf_static"
 
 ```bash
 # Check that the model file exists and is readable
-ls -la /path/to/model.rtm
+ls -la /path/to/model.tflite
 
 # Try CPU engine if NPU is not available
-edgefirst-fusion --model model.rtm --engine cpu
+edgefirst-fusion --model model.tflite --engine cpu
 
 # Check for TFLite library
 ldconfig -p | grep tensorflow
@@ -363,13 +359,13 @@ ldconfig -p | grep tensorflow
 
 ```bash
 # Enable Tracy profiling to identify bottlenecks
-edgefirst-fusion --model model.rtm --tracy
+edgefirst-fusion --model model.tflite --tracy
 
 # Check CPU usage
 htop
 
 # Reduce tracking overhead
-edgefirst-fusion --model model.rtm  # Without --track
+edgefirst-fusion --model model.tflite  # Without --track
 ```
 
 ### Logging

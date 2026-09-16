@@ -12,7 +12,7 @@ A clear and concise description of what the bug is.
 
 ## Steps to Reproduce
 
-1. Run command: `edgefirst-fusion --model model.rtm ...`
+1. Run command: `edgefirst-fusion --model model.tflite ...`
 2. Observe behavior: ...
 3. See error: ...
 
@@ -38,7 +38,7 @@ What actually happened (including error messages).
 **Configuration:**
 ```bash
 # Paste your command-line arguments or configuration
-edgefirst-fusion --model model.rtm --track --engine npu
+edgefirst-fusion --model model.tflite --track --engine npu
 ```
 
 ## Logs

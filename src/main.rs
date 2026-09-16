@@ -42,8 +42,6 @@ mod image;
 mod kalman;
 mod mask;
 mod pcd;
-#[cfg(feature = "deepviewrt")]
-mod rtm_model;
 mod simd;
 mod tflite_model;
 mod tracker;

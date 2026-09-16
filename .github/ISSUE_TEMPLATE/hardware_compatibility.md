@@ -31,7 +31,7 @@ assignees: ''
 
 **Command tested:**
 ```bash
-edgefirst-fusion --model model.rtm --track --engine npu
+edgefirst-fusion --model model.tflite --track --engine npu
 ```
 
 **Results:**
@@ -40,7 +40,7 @@ edgefirst-fusion --model model.rtm --track --engine npu
 - [ ] Camera DMA buffer reception works
 - [ ] Radar point cloud processing works
 - [ ] LiDAR point cloud processing works
-- [ ] ML model inference works (TFLite / DeepView RT)
+- [ ] ML model inference works (TFLite)
 - [ ] Object tracking works
 - [ ] Occupancy grid generation works
 - [ ] ⚠️ Partial functionality (see notes)
@@ -63,7 +63,7 @@ edgefirst-fusion --model model.rtm --track --engine npu
 List any issues, workarounds, or limitations discovered on this platform.
 
 **Example:**
-> TFLite model inference falls back to CPU when NPU delegate library is not found. Works with DeepView RT engine instead.
+> TFLite model inference falls back to CPU when NPU delegate library is not found.
 
 ## Logs
 

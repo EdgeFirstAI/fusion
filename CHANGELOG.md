@@ -32,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fusion-model input tensors are identified by name. A camera-only model no
   longer treats the RGB tensor as radar and panics on `copy_from_slice`
   (EDGEAI-1234)
+
+### Removed
+
+- DeepView RT (`.rtm`) fusion-model support and the `deepviewrt` Cargo
+  feature. Fusion models are TFLite-only (EDGEAI-733, EDGEAI-1234)
 - NEON `sincos_f32` returned an inverted cosine for `|x| mod 2π` in
   `[3π/4, 7π/4)` on aarch64. The Cephes quadrant sign mask selected bit 1 of
   `~(emm2 - 2)` instead of bit 2, flipping the sign over half the circle while

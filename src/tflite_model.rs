@@ -227,78 +227,30 @@ pub async fn run_tflite_fusion_model(
 
     let mut timeout_radarcube = DrainRecvTimeoutSettings::default();
     let mut timeout_camera = DrainRecvTimeoutSettings::default();
+    let mut inputs = FusionInputCtx {
+        backbone: &mut backbone,
+        radar_input_index,
+        camera_input_index,
+        radar_input_shape: &radar_input_shape,
+        sub_radarcube: sub_radarcube.as_ref(),
+        sub_camera: sub_camera.as_ref(),
+        g2d: &mut g2d,
+        timeout_radarcube: &mut timeout_radarcube,
+        timeout_camera: &mut timeout_camera,
+    };
     loop {
-        let timestamp = if let Some(ref sub_radarcube) = sub_radarcube {
-            let sample = match drain_recv(sub_radarcube, &mut timeout_radarcube).await {
-                Some(v) => v,
-                None => continue,
-            };
-
-            let radarcube = info_span!("cube_deserialize")
-                .in_scope(|| RadarCube::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
-            let timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
-            let cube_shape = radarcube
-                .shape()
-                .iter()
-                .map(|v| *v as usize)
-                .collect::<Vec<_>>();
-            let cube = preprocess_cube(radarcube.cube(), &cube_shape, &radar_input_shape);
-
-            let mut backbone_inputs = backbone.inputs_mut()?;
-            if let Some(radar_input_index) = radar_input_index {
-                if !load_cube(&mut backbone_inputs, radar_input_index, &cube) {
-                    continue;
-                }
-            }
-            if let (Some(camera_input_index), Some((img_mgr, dest))) =
-                (camera_input_index, g2d.as_mut())
-            {
-                let camera_input_tensor = &mut backbone_inputs[camera_input_index];
-                let sub_camera = sub_camera.as_ref().unwrap();
-                if load_camera_frame(
-                    camera_input_tensor,
-                    sub_camera,
-                    &mut timeout_camera,
-                    img_mgr,
-                    dest,
-                )
-                .await
-                .is_none()
-                {
-                    continue;
-                }
-            }
-            drop(backbone_inputs);
-            timestamp
-        } else {
-            let (img_mgr, dest) = g2d.as_mut().expect("camera-only model initializes G2D");
-            let camera_input_index = camera_input_index.expect("camera-only model");
-            let sub_camera = sub_camera.as_ref().unwrap();
-            let mut backbone_inputs = backbone.inputs_mut()?;
-            let camera_input_tensor = &mut backbone_inputs[camera_input_index];
-            let loaded = load_camera_frame(
-                camera_input_tensor,
-                sub_camera,
-                &mut timeout_camera,
-                img_mgr,
-                dest,
-            )
-            .await;
-            drop(backbone_inputs);
-            match loaded {
-                Some(ts) => ts,
-                None => continue,
-            }
+        let Some(timestamp) = load_fusion_inputs(&mut inputs).await? else {
+            continue;
         };
 
-        if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
+        if let Err(e) = run_model(inputs.backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {e}");
             return Err(e);
         }
 
         let output_ctx = match decoder {
             Some(ref v) => v,
-            None => &backbone,
+            None => inputs.backbone,
         };
 
         let outputs = output_ctx.outputs()?;
@@ -345,6 +297,103 @@ pub async fn run_tflite_fusion_model(
 
         args.tracy.then(|| secondary_frame_mark!("model"));
     }
+}
+
+/// Zenoh + G2D state used to fill TFLite inputs for one inference pass.
+struct FusionInputCtx<'a, 'b> {
+    backbone: &'a mut Interpreter<'b>,
+    radar_input_index: Option<usize>,
+    camera_input_index: Option<usize>,
+    radar_input_shape: &'a [usize],
+    sub_radarcube: Option<&'a Subscriber<FifoChannelHandler<Sample>>>,
+    sub_camera: Option<&'a Subscriber<FifoChannelHandler<Sample>>>,
+    g2d: &'a mut Option<(ImageManager, Image)>,
+    timeout_radarcube: &'a mut DrainRecvTimeoutSettings,
+    timeout_camera: &'a mut DrainRecvTimeoutSettings,
+}
+
+/// Fill backbone inputs for one iteration. `None` means skip (no sample or a
+/// tensor size mismatch); the caller must not run inference on that pass.
+#[instrument(skip_all)]
+async fn load_fusion_inputs(ctx: &mut FusionInputCtx<'_, '_>) -> Result<Option<u64>, FusionError> {
+    match ctx.sub_radarcube {
+        Some(_) => load_radar_fusion_inputs(ctx).await,
+        None => load_camera_only_inputs(ctx).await,
+    }
+}
+
+#[instrument(skip_all)]
+async fn load_radar_fusion_inputs(
+    ctx: &mut FusionInputCtx<'_, '_>,
+) -> Result<Option<u64>, FusionError> {
+    let sample = {
+        let sub_radarcube = ctx.sub_radarcube.expect("radar path has a cube subscriber");
+        match drain_recv(sub_radarcube, ctx.timeout_radarcube).await {
+            Some(v) => v,
+            None => return Ok(None),
+        }
+    };
+
+    let radarcube = info_span!("cube_deserialize")
+        .in_scope(|| RadarCube::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
+    let timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
+    let cube_shape = radarcube
+        .shape()
+        .iter()
+        .map(|v| *v as usize)
+        .collect::<Vec<_>>();
+    let cube = preprocess_cube(radarcube.cube(), &cube_shape, ctx.radar_input_shape);
+
+    let mut backbone_inputs = ctx.backbone.inputs_mut()?;
+    if let Some(radar_input_index) = ctx.radar_input_index {
+        if !load_cube(&mut backbone_inputs, radar_input_index, &cube) {
+            return Ok(None);
+        }
+    }
+    let camera_input_index = ctx.camera_input_index;
+    let sub_camera = ctx.sub_camera;
+    if let (Some(camera_input_index), Some((img_mgr, dest)), Some(sub_camera)) =
+        (camera_input_index, ctx.g2d.as_mut(), sub_camera)
+    {
+        let camera_input_tensor = &mut backbone_inputs[camera_input_index];
+        if load_camera_frame(
+            camera_input_tensor,
+            sub_camera,
+            ctx.timeout_camera,
+            img_mgr,
+            dest,
+        )
+        .await
+        .is_none()
+        {
+            return Ok(None);
+        }
+    }
+    drop(backbone_inputs);
+    Ok(Some(timestamp))
+}
+
+#[instrument(skip_all)]
+async fn load_camera_only_inputs(
+    ctx: &mut FusionInputCtx<'_, '_>,
+) -> Result<Option<u64>, FusionError> {
+    let (img_mgr, dest) = ctx.g2d.as_mut().expect("camera-only model initializes G2D");
+    let camera_input_index = ctx.camera_input_index.expect("camera-only model");
+    let sub_camera = ctx
+        .sub_camera
+        .expect("camera-only model subscribes to camera");
+    let mut backbone_inputs = ctx.backbone.inputs_mut()?;
+    let camera_input_tensor = &mut backbone_inputs[camera_input_index];
+    let loaded = load_camera_frame(
+        camera_input_tensor,
+        sub_camera,
+        ctx.timeout_camera,
+        img_mgr,
+        dest,
+    )
+    .await;
+    drop(backbone_inputs);
+    Ok(loaded)
 }
 
 #[instrument(skip_all)]

@@ -23,7 +23,7 @@ Fusion is a pub/sub service that requires live sensor data or recorded Zenoh top
 
 1. A running Zenoh router or peer network
 2. Sensor publishers (camera, radar, and/or LiDAR) or recorded data playback
-3. A fusion model file (`.tflite` or `.rtm`) if testing ML inference
+3. A fusion model file (`.tflite`) if testing ML inference
 
 ### Primary Topics
 
@@ -54,9 +54,6 @@ Fusion is a pub/sub service that requires live sensor data or recorded Zenoh top
 ```bash
 # TFLite model on NPU
 edgefirst-fusion --model model.tflite --engine npu --track
-
-# DeepView RT model (requires --features deepviewrt build)
-edgefirst-fusion --model model.rtm --engine npu --track
 ```
 
 ### Verifying Output
@@ -79,7 +76,7 @@ zenoh-cli subscribe "fusion/boxes3d"
 Enable Tracy profiling to measure per-stage latency:
 
 ```bash
-edgefirst-fusion --model model.rtm --track --tracy
+edgefirst-fusion --model model.tflite --track --tracy
 ```
 
 Connect with the [Tracy profiler](https://github.com/wolfpld/tracy) to visualize fusion loop timing, inference latency, and publishing overhead.

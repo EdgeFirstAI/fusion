@@ -61,7 +61,7 @@ JIRA: EDGEAI-
 
 ```bash
 # Example: Commands run and their results
-edgefirst-fusion --model model.rtm --track
+edgefirst-fusion --model model.tflite --track
 # Expected: Fusion runs with tracking enabled
 # Actual: ...
 ```

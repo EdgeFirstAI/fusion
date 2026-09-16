@@ -24,7 +24,6 @@ debug = true
 
 [features]
 default = ["tracy"]
-deepviewrt = ["dep:deepviewrt"]
 tracy = ["tracing-tracy/enable", "tracy-client/enable"]
 profiling = [
     "tracing-tracy/sampling",
@@ -36,7 +35,6 @@ profiling = [
 [dependencies]
 async-pidfd = "0.1.5"
 clap = { version = "4.6", features = ["derive", "env"] }
-deepviewrt = { version = "0.7.3", optional = true }
 dma-buf = "0.4.0"
 dma-heap = "0.4.1"
 edgefirst-schemas = "4.0.0"

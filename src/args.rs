@@ -126,7 +126,7 @@ pub struct Args {
     #[arg(long, env, default_value = "fusion/model_output")]
     pub model_output_topic: String,
 
-    /// model, leave empty to disable
+    /// TFLite fusion model path (.tflite). Leave empty to disable.
     #[arg(short, long, env, value_parser = parse_optional_path)]
     pub model: Option<PathBuf>,
 
