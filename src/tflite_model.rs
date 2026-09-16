@@ -228,8 +228,7 @@ pub async fn run_tflite_fusion_model(
     let mut timeout_radarcube = DrainRecvTimeoutSettings::default();
     let mut timeout_camera = DrainRecvTimeoutSettings::default();
     loop {
-        let mut timestamp = 0u64;
-        if let Some(ref sub_radarcube) = sub_radarcube {
+        let timestamp = if let Some(ref sub_radarcube) = sub_radarcube {
             let sample = match drain_recv(sub_radarcube, &mut timeout_radarcube).await {
                 Some(v) => v,
                 None => continue,
@@ -237,7 +236,7 @@ pub async fn run_tflite_fusion_model(
 
             let radarcube = info_span!("cube_deserialize")
                 .in_scope(|| RadarCube::from_cdr(sample.payload().to_bytes().to_vec()).unwrap());
-            timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
+            let timestamp = radarcube.stamp().to_nanos().unwrap_or(0);
             let cube_shape = radarcube
                 .shape()
                 .iter()
@@ -270,6 +269,7 @@ pub async fn run_tflite_fusion_model(
                 }
             }
             drop(backbone_inputs);
+            timestamp
         } else {
             let (img_mgr, dest) = g2d.as_mut().expect("camera-only model initializes G2D");
             let camera_input_index = camera_input_index.expect("camera-only model");
@@ -286,10 +286,10 @@ pub async fn run_tflite_fusion_model(
             .await;
             drop(backbone_inputs);
             match loaded {
-                Some(ts) => timestamp = ts,
+                Some(ts) => ts,
                 None => continue,
             }
-        }
+        };
 
         if let Err(e) = run_model(&mut backbone, &mut decoder, &input_match) {
             error!("Failed to run model: {e}");
