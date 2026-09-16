@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-15
+
+TFLite-only fusion models, aligned `fusion.default` quoting and stock radar
+defaults, and NEON math fixes for radar angle binning (EDGEAI-733, EDGEAI-1234,
+EDGEAI-1457).
+
 ### Changed
 
 - `fusion.default` assignments are now `KEY="value"` with no spaces around `=`,
@@ -32,11 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fusion-model input tensors are identified by name. A camera-only model no
   longer treats the RGB tensor as radar and panics on `copy_from_slice`
   (EDGEAI-1234)
-
-### Removed
-
-- DeepView RT (`.rtm`) fusion-model support and the `deepviewrt` Cargo
-  feature. Fusion models are TFLite-only (EDGEAI-733, EDGEAI-1234)
 - NEON `sincos_f32` returned an inverted cosine for `|x| mod 2π` in
   `[3π/4, 7π/4)` on aarch64. The Cephes quadrant sign mask selected bit 1 of
   `~(emm2 - 2)` instead of bit 2, flipping the sign over half the circle while
@@ -48,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not return `±π`. Both now match `f32::atan2`. This path is used for radar
   angle binning, so origin-valued points no longer poison their lane
   (EDGEAI-1457)
+
+### Removed
+
+- DeepView RT (`.rtm`) fusion-model support and the `deepviewrt` Cargo
+  feature. Fusion models are TFLite-only (EDGEAI-733, EDGEAI-1234)
 
 ## [1.8.1] - 2026-09-07
 
