@@ -420,4 +420,4 @@ We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
 - **Professional Services**: Training, custom development, enterprise support
 - **Contact**: support@au-zone.com
 
-<img referrerpolicy="no-referrer-when-downgrade" src="https://px.edgefirst.ai/a.png?x-pxid=5d51de83-9880-43ce-b5ce-f93107ca3d6c" alt="" width="1" height="1" style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;" />
+<img referrerpolicy="no-referrer" src="https://px.edgefirst.ai/a.png?x-pxid=5d51de83-9880-43ce-b5ce-f93107ca3d6c" alt="" width="1" height="1" style="position:absolute; width:1px; height:1px; opacity:0; pointer-events:none;" />
