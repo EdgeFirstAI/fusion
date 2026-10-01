@@ -87,9 +87,8 @@ GRID_SRC="radar"
 # Vision & instance detection
 # ---------------------------------------------------------------------------
 
-# Maximum age in seconds for model output data relative to the current
-# point cloud frame. A warning is logged when stale data is used for fusion.
-# Set to 0 to disable the staleness check.
+# Warn when the newest model output was received more than this many seconds
+# ago. A liveness check only; it does not affect pairing. Set to 0 to disable.
 MAX_MODEL_AGE="0.5"
 
 # Background class index for semantic segmentation instance detection.
@@ -206,3 +205,13 @@ NO_MULTICAST_SCOUTING="false"
 
 # Enable Tracy profiler broadcast for performance analysis.
 TRACY="false"
+
+# Stamp pairing (seconds unless noted)
+#SYNC_WAIT=0.05
+#MAX_TEMPORAL_DELTA=0.1
+#MAX_GRID_DELTA=0.3
+#MODEL_BUFFER_SIZE=16
+#CAMERA_BUFFER_SIZE=8
+#RADAR_TIME_OFFSET=0.0
+#LIDAR_TIME_OFFSET=0.0
+#STATS_INTERVAL=10

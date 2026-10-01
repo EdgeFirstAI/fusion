@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-01
+
+Timestamp contract and temporal alignment: every fusion output carries its source acquisition stamp, and fusion pairs inputs by stamp instead of by arrival (EDGEAI-1940).
+
+### Added
+
+- Stamp-based pairing of point clouds with `model/output` and fusion-grid predictions, and of radar cubes with camera frames. Inputs farther apart than `MAX_TEMPORAL_DELTA` (`MAX_GRID_DELTA` for the grid) are skipped with a warning naming the topics, repeated at most once per stats interval (EDGEAI-1940)
+- `SYNC_WAIT`, `MAX_TEMPORAL_DELTA`, `MAX_GRID_DELTA`, `MODEL_BUFFER_SIZE`, `CAMERA_BUFFER_SIZE`, `RADAR_TIME_OFFSET`, `LIDAR_TIME_OFFSET` and `STATS_INTERVAL` settings. Non-finite or out-of-range values and buffer sizes below 1 are rejected at startup (EDGEAI-1940)
+- Periodic pairing statistics per pipeline: `paired`, `too_far`, `missing`, `grid_too_far`, `grid_missing` (point-cloud lines), `stale` (cube and camera line, frames skipped as too old to read), and `delta`, `grid_delta`, `wait` and `latency` summaries (EDGEAI-1940)
+- Warnings when the radar cube or camera topic stops publishing to a radar and camera model, with backoff (EDGEAI-1940)
+
+### Changed
+
+- The Zenoh sample timestamp equals `header.stamp` on every fusion topic. `fusion/model_output` and `fusion/model_output/tracked` carry the radar cube stamp (the camera frame stamp for a camera-only model) (EDGEAI-1940)
+- `tf_static` is stamped with the time of each 1 Hz republish (EDGEAI-1940)
+- Tracker lifetimes use the monotonic clock. Buffers clear, and the grid tracker resets, when input stamps step back (EDGEAI-1940)
+- The grid tracker runs once per grid in the fusion-model thread (EDGEAI-1940)
+- `MAX_MODEL_AGE` warns when the newest model output was received more than the limit ago (EDGEAI-1940)
+- With a radar and camera model, a dedicated thread converts camera frames on arrival into a ring of `CAMERA_BUFFER_SIZE` frames, and each radar cube is paired with the nearest frame by stamp. Frames received more than 2 s ago are never paired (EDGEAI-1940)
+- Camera frames that arrive after their capture buffer may have been overwritten are skipped instead of converted. The limit is `(N - 1)` frame periods less a margin, with `N` learned from the distinct DMA-BUF descriptors in `CameraFrame` and the period from the stamp interval, so it follows the camera service's `CAMERA_BUFFERS` and frame rate (100 ms until learned) (EDGEAI-1940)
+- Model-output pairing is skipped when `VISION_MODEL_TOPIC` is empty (EDGEAI-1940)
+
+### Fixed
+
+- The grid tracker re-ingested the same grid on every point cloud (EDGEAI-1940)
+- Grid and centroid tracks shared one tracker (EDGEAI-1940)
+- Model outputs were dropped while fusion was classifying (EDGEAI-1940)
+- `fusion/model_output/tracked` was published by both the radar and lidar threads (EDGEAI-1940)
+
 ## [1.9.0] - 2026-09-15
 
 TFLite-only fusion models, aligned `fusion.default` quoting and stock radar

@@ -69,7 +69,6 @@ pub struct ByteTrack {
     pub lost_tracks: Vec<Tracklet>,
     pub removed_tracks: Vec<Tracklet>,
     pub frame_count: i32,
-    pub timestamp: u64,
     pub uuid_class_histogram: HashMap<Uuid, ClassHistogram>,
     pub settings: ByteTrackSettings,
 }
@@ -218,7 +217,6 @@ impl ByteTrack {
             lost_tracks: vec![],
             removed_tracks: vec![],
             frame_count: 0,
-            timestamp: 0,
             uuid_class_histogram: HashMap::new(),
             settings: ByteTrackSettings {
                 track_extra_lifespan: 0.5,
@@ -235,7 +233,6 @@ impl ByteTrack {
             lost_tracks: vec![],
             removed_tracks: vec![],
             frame_count: 0,
-            timestamp: 0,
             uuid_class_histogram: HashMap::new(),
             settings,
         }

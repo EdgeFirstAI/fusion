@@ -106,6 +106,51 @@ pub struct Args {
     #[arg(long, env, default_value = "0.5")]
     pub max_model_age: f32,
 
+    /// Maximum time in seconds to wait for a model output stamped at or after
+    /// the point cloud before pairing with the nearest one available.
+    #[arg(long, env, default_value = "0.05", allow_hyphen_values = true)]
+    pub sync_wait: f32,
+
+    /// Maximum stamp difference in seconds between a point cloud and the model
+    /// output it is fused with, and between a radar cube and its camera frame.
+    /// Larger differences skip that input. 0 disables the check and always
+    /// uses the nearest.
+    #[arg(long, env, default_value = "0.1", allow_hyphen_values = true)]
+    pub max_temporal_delta: f32,
+
+    /// Maximum stamp difference in seconds between a point cloud and the
+    /// fusion-model grid it is fused with. The grid for an instant is ready
+    /// later than the point cloud, so it is paired without waiting and its
+    /// nearest stamp lags by the model latency. 0 disables the check.
+    #[arg(long, env, default_value = "0.3", allow_hyphen_values = true)]
+    pub max_grid_delta: f32,
+
+    /// Number of model outputs buffered for stamp pairing.
+    #[arg(long, env, default_value = "16")]
+    pub model_buffer_size: usize,
+
+    /// Number of pre-converted camera frames buffered for radar-cube pairing.
+    /// A cube arrives 110–150 ms after its stamp, so its match is several
+    /// frames back.
+    #[arg(long, env, default_value = "8")]
+    pub camera_buffer_size: usize,
+
+    /// Seconds added to the radar point-cloud stamp to form the model-output
+    /// pairing target (constant residual between the radar stamp and the
+    /// camera's view).
+    #[arg(long, env, default_value = "0.0", allow_hyphen_values = true)]
+    pub radar_time_offset: f32,
+
+    /// Seconds added to the lidar point-cloud stamp (start of sweep) to form
+    /// the model-output pairing target, e.g. the time the sweep crosses the
+    /// camera view.
+    #[arg(long, env, default_value = "0.0", allow_hyphen_values = true)]
+    pub lidar_time_offset: f32,
+
+    /// Seconds between pairing statistics log lines. 0 disables.
+    #[arg(long, env, default_value = "10.0", allow_hyphen_values = true)]
+    pub stats_interval: f32,
+
     /// bbox3d output topic
     #[arg(long, env, default_value = "fusion/boxes3d")]
     pub bbox3d_topic: String,
@@ -249,7 +294,26 @@ pub struct Args {
     no_multicast_scouting: bool,
 }
 
+/// Non-negative seconds to nanoseconds, rounded to microseconds so the f32
+/// representation error of decimal inputs such as 0.1 does not leak into the
+/// nanosecond bound. Saturates instead of overflowing.
+fn seconds_to_ns(seconds: f32) -> u64 {
+    ((seconds.max(0.0) as f64 * 1e6).round() as u64).saturating_mul(1_000)
+}
+
 impl Args {
+    pub fn sync_wait_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f32(self.sync_wait.max(0.0))
+    }
+
+    pub fn max_temporal_delta_ns(&self) -> u64 {
+        seconds_to_ns(self.max_temporal_delta)
+    }
+
+    pub fn max_grid_delta_ns(&self) -> u64 {
+        seconds_to_ns(self.max_grid_delta)
+    }
+
     /// Returns true when a fusion model is configured (early/mid fusion mode).
     pub fn has_fusion_model(&self) -> bool {
         self.model.is_some()
@@ -309,6 +373,39 @@ impl Args {
 
     /// Reject a config that would start no pipeline (no model and no PCD).
     pub fn validate_pipeline(&self) -> Result<(), String> {
+        let finite = [
+            self.sync_wait,
+            self.max_temporal_delta,
+            self.max_grid_delta,
+            self.stats_interval,
+            self.radar_time_offset,
+            self.lidar_time_offset,
+        ]
+        .iter()
+        .all(|v| v.is_finite());
+        if !finite {
+            return Err(
+                "SYNC_WAIT, MAX_TEMPORAL_DELTA, MAX_GRID_DELTA, STATS_INTERVAL, \
+                 RADAR_TIME_OFFSET and LIDAR_TIME_OFFSET must be finite"
+                    .into(),
+            );
+        }
+        let bounds = [
+            ("SYNC_WAIT", self.sync_wait, 0.0, 10.0),
+            ("MAX_TEMPORAL_DELTA", self.max_temporal_delta, 0.0, 3600.0),
+            ("MAX_GRID_DELTA", self.max_grid_delta, 0.0, 3600.0),
+            ("STATS_INTERVAL", self.stats_interval, 0.0, 86400.0),
+            ("RADAR_TIME_OFFSET", self.radar_time_offset, -10.0, 10.0),
+            ("LIDAR_TIME_OFFSET", self.lidar_time_offset, -10.0, 10.0),
+        ];
+        for (name, value, min, max) in bounds {
+            if !(min..=max).contains(&value) {
+                return Err(format!("{name}={value} is outside [{min}, {max}]"));
+            }
+        }
+        if self.model_buffer_size == 0 || self.camera_buffer_size == 0 {
+            return Err("MODEL_BUFFER_SIZE and CAMERA_BUFFER_SIZE must be >= 1".into());
+        }
         if self.has_fusion_model() || self.has_pcd_input() {
             return Ok(());
         }
@@ -432,6 +529,14 @@ mod tests {
         "BIN_DELAY",
         "BACKGROUND_INDEX",
         "MODE",
+        "SYNC_WAIT",
+        "MAX_TEMPORAL_DELTA",
+        "MAX_GRID_DELTA",
+        "MODEL_BUFFER_SIZE",
+        "CAMERA_BUFFER_SIZE",
+        "RADAR_TIME_OFFSET",
+        "LIDAR_TIME_OFFSET",
+        "STATS_INTERVAL",
     ];
 
     #[test]
@@ -582,6 +687,86 @@ mod tests {
         let mut args = Args::parse_from(argv);
         args.normalize();
         args
+    }
+
+    #[test]
+    fn pairing_defaults() {
+        let args = args_from(&[]);
+        assert_eq!(args.sync_wait, 0.05);
+        assert_eq!(args.max_temporal_delta, 0.1);
+        assert_eq!(args.model_buffer_size, 16);
+        assert_eq!(args.camera_buffer_size, 8);
+        assert_eq!(args.radar_time_offset, 0.0);
+        assert_eq!(args.lidar_time_offset, 0.0);
+        assert_eq!(args.stats_interval, 10.0);
+        assert_eq!(args.max_temporal_delta_ns(), 100_000_000);
+        assert_eq!(args.max_grid_delta, 0.3);
+        assert_eq!(args.max_grid_delta_ns(), 300_000_000);
+    }
+
+    #[test]
+    fn out_of_range_pairing_args_are_rejected() {
+        for extra in [
+            ["--sync-wait", "10.5"],
+            ["--sync-wait", "1e30"],
+            ["--max-temporal-delta", "3601"],
+            ["--max-grid-delta", "3601"],
+            ["--max-grid-delta", "-0.1"],
+            ["--stats-interval", "86401"],
+            ["--radar-time-offset", "10.5"],
+            ["--radar-time-offset", "-10.5"],
+            ["--lidar-time-offset", "11"],
+            ["--lidar-time-offset", "-1e30"],
+        ] {
+            let args = args_from(&extra);
+            assert!(args.validate_pipeline().is_err(), "{extra:?} accepted");
+        }
+        let args = args_from(&[
+            "--sync-wait",
+            "10",
+            "--max-temporal-delta",
+            "3600",
+            "--max-grid-delta",
+            "0",
+            "--stats-interval",
+            "86400",
+            "--radar-time-offset",
+            "-10",
+            "--lidar-time-offset",
+            "10",
+        ]);
+        assert!(args.validate_pipeline().is_ok());
+        assert_eq!(args.max_grid_delta_ns(), 0);
+    }
+
+    #[test]
+    fn seconds_to_ns_saturates() {
+        assert_eq!(seconds_to_ns(f32::MAX), u64::MAX);
+        assert_eq!(seconds_to_ns(-1.0), 0);
+        assert_eq!(seconds_to_ns(3600.0), 3_600_000_000_000);
+    }
+
+    #[test]
+    fn negative_offsets_parse_and_negative_wait_is_rejected() {
+        let args = args_from(&["--lidar-time-offset", "-0.025"]);
+        assert_eq!(args.lidar_time_offset, -0.025);
+        let args = args_from(&["--sync-wait", "-1"]);
+        assert!(args.validate_pipeline().is_err());
+    }
+
+    #[test]
+    fn non_finite_pairing_args_are_rejected() {
+        for extra in [
+            ["--sync-wait", "inf"],
+            ["--max-temporal-delta", "inf"],
+            ["--max-grid-delta", "NaN"],
+            ["--stats-interval", "NaN"],
+            ["--radar-time-offset", "-inf"],
+            ["--lidar-time-offset", "NaN"],
+        ] {
+            let args = args_from(&extra);
+            assert!(args.validate_pipeline().is_err(), "{extra:?} accepted");
+        }
     }
 
     #[test]

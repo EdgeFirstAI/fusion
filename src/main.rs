@@ -5,11 +5,12 @@ use args::{scrub_empty_env, Args, PCDSource, KEEP};
 use clap::Parser;
 use edgefirst_schemas::{
     builtin_interfaces::Time,
-    edgefirst_msgs::{Detect, DetectBoxView, Mask, MaskView, Model, ModelInfo},
+    edgefirst_msgs::{Detect, DetectBoxView, MaskView, Model, ModelInfo},
     geometry_msgs::{Quaternion, Transform, TransformStamped, Vector3},
     sensor_msgs::{CameraInfo, PointCloud2},
 };
 use fusion_model::spawn_fusion_model_thread;
+use grid::SharedGrid;
 use log::{error, trace, warn};
 use mask::{mask_instance, process_mask, resolve_box_label, Box2D, ProcessedMask, UNCLASSIFIED};
 use pcd::{
@@ -22,6 +23,7 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+use sync::{Selection, SyncedTopic};
 use tokio::{join, sync::Mutex};
 use tracing::{instrument, level_filters::LevelFilter};
 use tracing_subscriber::{layer::SubscriberExt as _, Layer as _, Registry};
@@ -33,24 +35,29 @@ use zenoh::{
     handlers::FifoChannelHandler,
     pubsub::{Publisher, Subscriber},
     sample::Sample,
+    time::TimestampId,
     Session,
 };
 
 mod args;
+mod camera_ring;
 mod fusion_model;
+mod grid;
 mod image;
 mod kalman;
 mod mask;
 mod pcd;
 mod simd;
+mod stamp;
+mod stats;
+mod sync;
 mod tflite_model;
 mod tracker;
 mod transform;
 
 const BASE_LINK_FRAME_ID: &str = "base_link";
 
-type Grid = (Vec<Vec<f32>>, u64);
-type SharedModelOutput = Arc<Mutex<Option<(Model<Vec<u8>>, std::time::Instant)>>>;
+type SharedModelOutput = Arc<SyncedTopic<Model<Vec<u8>>>>;
 
 /// Data loaded from a single point cloud frame: the cloud header, parsed frame,
 /// sensor-to-base transform, camera-to-base transform, and camera intrinsics.
@@ -157,7 +164,8 @@ async fn run() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let model_output: SharedModelOutput = Arc::new(Mutex::new(None));
+    let model_output: SharedModelOutput =
+        Arc::new(SyncedTopic::new("model/output", args.model_buffer_size));
     let _model_output_sub = if !args.vision_model_topic.is_empty() {
         let cb = model_output_callback(model_output.clone());
         Some(
@@ -193,7 +201,7 @@ async fn run() {
         .await
         .expect("Failed to declare Zenoh subscriber");
 
-    let grid: Arc<Mutex<Option<Grid>>> = Arc::new(Mutex::new(None));
+    let grid: SharedGrid = Arc::new(SyncedTopic::new("fusion/grid", 4));
     let fusion_model_handle =
         spawn_fusion_model_thread(session.clone(), args.clone(), grid.clone());
 
@@ -226,17 +234,16 @@ async fn run() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let tf_session = session.clone();
-    let tf_msg = build_tf_msg().expect("static base_link optical TransformStamped");
-    let tf_msg = ZBytes::from(tf_msg.into_cdr());
-    let tf_enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     tokio::spawn(async move {
-        if let Err(e) = tf_static(tf_session, tf_msg, tf_enc).await {
+        if let Err(e) = tf_static(tf_session).await {
             log::error!("TF static publisher failed: {e}");
         }
     });
 
+    let ts_id = stamp::timestamp_id(&session);
     let mut zenoh_radar = ZenohCtx {
-        session: session.clone(),
+        ts_id,
+        source: PCDSource::Radar,
         pcd_sub: radar_sub,
         output_publ: radar_output_publ,
         grid_publ: None,
@@ -244,7 +251,8 @@ async fn run() {
     };
 
     let mut zenoh_lidar = ZenohCtx {
-        session,
+        ts_id,
+        source: PCDSource::Lidar,
         pcd_sub: lidar_sub,
         output_publ: lidar_output_publ,
         grid_publ: None,
@@ -314,16 +322,99 @@ fn model_info_callback(
 }
 
 fn model_output_callback(model: SharedModelOutput) -> impl FnMut(Sample) {
-    move |s: Sample| {
-        let new_model = match Model::from_cdr(s.payload().to_bytes().to_vec()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to deserialize Model: {e:?}");
-                return;
+    move |s: Sample| match Model::from_cdr(s.payload().to_bytes().to_vec()) {
+        Ok(m) => {
+            let stamp = m.stamp();
+            model.push(stamp, m);
+        }
+        Err(e) => error!("Failed to deserialize Model: {e:?}"),
+    }
+}
+
+/// Model output nearest `target_ns` within the configured gate, or `None`.
+async fn select_model(
+    topic: &SyncedTopic<Model<Vec<u8>>>,
+    target_ns: u64,
+    max_delta_ns: u64,
+    wait: Duration,
+    stats: &mut stats::PairStats,
+    label: &str,
+) -> Option<Arc<Model<Vec<u8>>>> {
+    let start = std::time::Instant::now();
+    let selection = topic.select_nearest(target_ns, max_delta_ns, wait).await;
+    stats
+        .waited_ns
+        .record_ns(i64::try_from(start.elapsed().as_nanos()).unwrap_or(i64::MAX));
+    match selection {
+        Selection::Match { item, delta_ns } => {
+            stats.paired += 1;
+            stats.delta_ns.record_ns(delta_ns);
+            Some(item.data)
+        }
+        Selection::TooFar { delta_ns } => {
+            stats.too_far += 1;
+            if !stats.warned_too_far {
+                stats.warned_too_far = true;
+                warn!(
+                    "[{label}] model/output stamp is {:.3} s from the point cloud (limit {:.3} s); \
+                     classification skipped. Point-cloud and camera stamps are in different \
+                     clock domains or a service is stalled. Set MAX_TEMPORAL_DELTA=0 to pair \
+                     with the nearest output regardless.",
+                    delta_ns as f64 * 1e-9,
+                    max_delta_ns as f64 * 1e-9
+                );
             }
-        };
-        if let Ok(mut guard) = model.try_lock() {
-            *guard = Some((new_model, std::time::Instant::now()));
+            None
+        }
+        Selection::Empty | Selection::Pending => {
+            stats.missing += 1;
+            None
+        }
+    }
+}
+
+/// Stats label for the fusion thread consuming `source` point clouds.
+fn fusion_label(source: PCDSource) -> &'static str {
+    match source {
+        PCDSource::Lidar => "fusion/lidar",
+        _ => "fusion/radar",
+    }
+}
+
+/// Fusion-model grid predictions nearest `target_ns` within the gate, or
+/// none. Does not wait for a later grid.
+async fn select_grid(
+    grid: &SharedGrid,
+    target_ns: u64,
+    max_delta_ns: u64,
+    stats: &mut stats::PairStats,
+    label: &str,
+) -> Vec<Box2D> {
+    match grid
+        .select_nearest(target_ns, max_delta_ns, Duration::ZERO)
+        .await
+    {
+        Selection::Match { item, delta_ns } => {
+            stats.grid_delta_ns.record_ns(delta_ns);
+            item.data.predictions.clone()
+        }
+        Selection::TooFar { delta_ns } => {
+            stats.grid_too_far += 1;
+            if !stats.warned_grid_too_far {
+                stats.warned_grid_too_far = true;
+                warn!(
+                    "[{label}] fusion grid stamp is {:.3} s from the point cloud (limit {:.3} s); \
+                     fusion classification skipped. Set MAX_GRID_DELTA=0 to pair with the \
+                     nearest grid regardless.",
+                    delta_ns as f64 * 1e-9,
+                    max_delta_ns as f64 * 1e-9
+                );
+            }
+            Vec::new()
+        }
+        Selection::Empty | Selection::Pending => {
+            stats.grid_missing += 1;
+            Vec::new()
         }
     }
 }
@@ -438,7 +529,9 @@ pub fn spawn_fusion_thread(data: Mutexes, zenoh: ZenohCtx, args: Args) -> JoinHa
 
 #[derive(Debug)]
 pub struct ZenohCtx {
-    session: Session,
+    ts_id: TimestampId,
+    /// Sensor whose point clouds this context's fusion thread consumes.
+    source: PCDSource,
     pcd_sub: Option<Subscriber<FifoChannelHandler<Sample>>>,
     output_publ: Option<Publisher<'static>>,
     grid_publ: Option<Publisher<'static>>,
@@ -450,7 +543,7 @@ pub struct Mutexes {
     model_output: SharedModelOutput,
     info: Arc<Mutex<Option<CameraInfo<Vec<u8>>>>>,
     tf_static: Arc<Mutex<HashMap<(String, String), Transform>>>,
-    grid: Arc<Mutex<Option<Grid>>>,
+    grid: SharedGrid,
     model_info: Arc<Mutex<Option<Vec<String>>>>,
 }
 
@@ -562,12 +655,11 @@ async fn fusion(
     transform: Transform,
     cam_transform: Transform,
     cam_info: &CameraInfo<Vec<u8>>,
-    track: bool,
-    tracker: &mut ByteTrack,
-    grid: &Arc<Mutex<Option<Grid>>>,
     args: &Args,
-    session: &Session,
     data: &Mutexes,
+    source: PCDSource,
+    header: &CloudHeader,
+    stats: &mut stats::PairStats,
 ) -> HashMap<u32, Vec<usize>> {
     let cam_mtx = cam_info.k().map(|v| v as f32);
     transform_and_project_points(
@@ -580,32 +672,38 @@ async fn fusion(
 
     let ids = get_cluster_ids(frame);
 
-    // Lock model output and check age
-    let model_guard = data.model_output.lock().await;
-    if args.max_model_age > 0.0 {
-        if let Some((_, received)) = model_guard.as_ref() {
-            let age = received.elapsed();
-            if age.as_secs_f32() > args.max_model_age {
-                warn!(
-                    "Model output is {:.0}ms old (limit: {:.0}ms)",
-                    age.as_millis(),
-                    args.max_model_age * 1000.0
-                );
-            }
-        }
-    }
-    let model_ref = model_guard.as_ref().map(|(m, _)| m);
+    let offset_s = match source {
+        PCDSource::Lidar => args.lidar_time_offset,
+        _ => args.radar_time_offset,
+    };
+    let label = fusion_label(source);
+    let cloud_ns = stamp::time_to_ns(header.stamp);
+    let target_ns = stamp::offset_ns(cloud_ns, offset_s);
+    let model = if args.vision_model_topic.is_empty() {
+        None
+    } else {
+        select_model(
+            &data.model_output,
+            target_ns,
+            args.max_temporal_delta_ns(),
+            args.sync_wait_duration(),
+            stats,
+            label,
+        )
+        .await
+    };
 
     let model_labels_guard = data.model_info.lock().await;
     let labels = model_labels_guard.as_deref();
-
-    get_vision_class_and_instance(frame, model_ref, &ids, labels, args.background_index);
+    get_vision_class_and_instance(frame, model.as_deref(), &ids, labels, args.background_index);
     drop(model_labels_guard);
-    drop(model_guard);
 
     if args.has_fusion_model() {
-        let fusion_predictions = get_fusion_predictions(track, tracker, grid, args, session).await;
-        get_fusion_class(frame, &fusion_predictions, &ids);
+        // The grid comes from the radar cube, so it pairs on the cloud stamp;
+        // the time offsets only correct for the camera's view.
+        let predictions =
+            select_grid(&data.grid, cloud_ns, args.max_grid_delta_ns(), stats, label).await;
+        get_fusion_class(frame, &predictions, &ids);
     }
 
     ids
@@ -621,7 +719,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
     let mut timeout = DrainRecvTimeoutSettings::default();
     let mut tracking_detected = false;
 
-    let mut tracker = ByteTrack::new_with_settings(ByteTrackSettings {
+    let mut point_tracker = ByteTrack::new_with_settings(ByteTrackSettings {
         track_high_conf: 0.5,
         track_extra_lifespan: args.track_extra_lifespan,
         track_iou: args.track_iou,
@@ -630,7 +728,16 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
 
     setup_bins(&mut bins, args);
 
+    let mut stats = stats::PairStats::point_cloud();
+    let mut last_stats = std::time::Instant::now();
+    let label = fusion_label(zenoh.source);
+
     loop {
+        if args.stats_interval > 0.0 && last_stats.elapsed().as_secs_f32() >= args.stats_interval {
+            stats.log_and_reset(label);
+            last_stats = std::time::Instant::now();
+        }
+
         let msg = match drain_recv(zenoh.pcd_sub.as_ref().unwrap(), &mut timeout).await {
             Some(v) => v,
             None => {
@@ -647,17 +754,35 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
                 }
             };
 
+        let latency_ns = i128::from(stamp::time_to_ns(stamp::now_stamp()))
+            - i128::from(stamp::time_to_ns(header.stamp));
+        stats
+            .latency_ns
+            .record_ns(latency_ns.clamp(i64::MIN.into(), i64::MAX.into()) as i64);
+
+        if args.max_model_age > 0.0 {
+            if let Some(received) = data.model_output.newest_received() {
+                let age = received.elapsed();
+                if age.as_secs_f32() > args.max_model_age {
+                    warn!(
+                        "Newest model output was received {:.0}ms ago (limit: {:.0}ms)",
+                        age.as_millis(),
+                        args.max_model_age * 1000.0
+                    );
+                }
+            }
+        }
+
         let ids = fusion(
             &mut frame,
             transform,
             cam_transform,
             &cam_info,
-            args.track,
-            &mut tracker,
-            &data.grid,
             args,
-            &zenoh.session,
             &data,
+            zenoh.source,
+            &header,
+            &mut stats,
         )
         .await;
 
@@ -674,7 +799,7 @@ async fn fusion_loop(data: Mutexes, zenoh: ZenohCtx, args: &Args) {
             &header,
             &frame,
             &ids,
-            &mut tracker,
+            &mut point_tracker,
             &mut bins,
             frame_index,
             tracking_detected,
@@ -701,11 +826,11 @@ async fn publish(
     frame_index: u128,
     tracking: bool,
 ) {
-    let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), &zenoh.session, header, frame, ids);
+    let publ_bbox = publish_bbox3d(zenoh.bbox_publ.as_ref(), zenoh.ts_id, header, frame, ids);
 
     let publ_output = publish_output(
         zenoh.output_publ.as_ref(),
-        &zenoh.session,
+        zenoh.ts_id,
         frame,
         header,
         args.has_fusion_model(),
@@ -714,7 +839,7 @@ async fn publish(
 
     let publ_grid = publish_grid(
         zenoh.grid_publ.as_ref(),
-        &zenoh.session,
+        zenoh.ts_id,
         header,
         frame,
         point_tracker,
@@ -724,6 +849,25 @@ async fn publish(
     );
 
     join!(publ_bbox, publ_output, publ_grid);
+}
+
+/// Publish with the Zenoh sample timestamp equal to the message stamp.
+pub(crate) async fn put_stamped(
+    publ: &Publisher<'_>,
+    buf: ZBytes,
+    enc: Encoding,
+    ts_id: TimestampId,
+    stamp: Time,
+) {
+    match publ
+        .put(buf)
+        .encoding(enc)
+        .timestamp(stamp::zenoh_timestamp(ts_id, stamp))
+        .await
+    {
+        Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
+        Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
+    }
 }
 
 /// Hash a track ID string to a u32 using FNV-1a.
@@ -1172,24 +1316,10 @@ fn get_fusion_class(
     }
 }
 
-async fn get_fusion_predictions(
-    track: bool,
-    tracker: &mut ByteTrack,
-    grid: &Arc<Mutex<Option<Grid>>>,
-    args: &Args,
-    session: &Session,
-) -> Vec<Box2D> {
-    if track {
-        grid_radar_tracked(grid, tracker, args, session).await
-    } else {
-        grid_radar(grid, args).await
-    }
-}
-
 #[instrument(skip_all)]
 async fn publish_bbox3d(
     bbox_publ: Option<&Publisher<'_>>,
-    session: &Session,
+    ts_id: TimestampId,
     header: &CloudHeader,
     frame: &FusionFrame,
     ids: &HashMap<u32, Vec<usize>>,
@@ -1206,21 +1336,13 @@ async fn publish_bbox3d(
     let bbox_publ = bbox_publ.unwrap();
     let (buf_bbox, enc_bbox) = get_3d_bbox(header, frame, ids);
 
-    match bbox_publ
-        .put(buf_bbox)
-        .encoding(enc_bbox)
-        .timestamp(session.new_timestamp())
-        .await
-    {
-        Ok(_) => trace!("Message Sent on {:?}", bbox_publ.key_expr()),
-        Err(e) => error!("Message Error on {:?}: {:?}", bbox_publ.key_expr(), e),
-    }
+    put_stamped(bbox_publ, buf_bbox, enc_bbox, ts_id, header.stamp).await;
 }
 
 #[instrument(skip_all)]
 async fn publish_output(
     publ: Option<&Publisher<'_>>,
-    session: &Session,
+    ts_id: TimestampId,
     frame: &FusionFrame,
     header: &CloudHeader,
     has_fusion_model: bool,
@@ -1237,22 +1359,14 @@ async fn publish_output(
     };
     let buf = ZBytes::from(pcd.into_cdr());
     let enc = Encoding::APPLICATION_CDR.with_schema("sensor_msgs/msg/PointCloud2");
-    match publ
-        .put(buf)
-        .encoding(enc)
-        .timestamp(session.new_timestamp())
-        .await
-    {
-        Ok(_) => trace!("Message Sent on {:?}", publ.key_expr()),
-        Err(e) => error!("Message Error on {:?}: {:?}", publ.key_expr(), e),
-    }
+    put_stamped(publ, buf, enc, ts_id, header.stamp).await;
 }
 
 #[instrument(skip_all)]
 #[allow(clippy::too_many_arguments)]
 async fn publish_grid(
     grid_publ: Option<&Publisher<'_>>,
-    session: &Session,
+    ts_id: TimestampId,
     header: &CloudHeader,
     frame: &FusionFrame,
     point_tracker: &mut ByteTrack,
@@ -1270,15 +1384,7 @@ async fn publish_grid(
         let (bins, frame_index) = bins_data;
         get_occupied_no_cluster(header, frame, bins, frame_index, args)
     };
-    match grid_publ
-        .put(buf_grid)
-        .encoding(enc_grid)
-        .timestamp(session.new_timestamp())
-        .await
-    {
-        Ok(_) => trace!("Message Sent on {:?}", grid_publ.key_expr()),
-        Err(e) => error!("Message Error on {:?}: {:?}", grid_publ.key_expr(), e),
-    }
+    put_stamped(grid_publ, buf_grid, enc_grid, ts_id, header.stamp).await;
 }
 
 // Gets 3D bounding boxes from the PCD points. Any classified cluster
@@ -1372,27 +1478,24 @@ fn get_3d_bbox(
     (msg, enc)
 }
 
-async fn tf_static(
-    session: Session,
-    msg: ZBytes,
-    enc: Encoding,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let topic = "tf_static".to_string();
+async fn tf_static(session: Session) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let publ = session.declare_publisher("tf_static").await?;
+    let ts_id = stamp::timestamp_id(&session);
+    let enc = Encoding::APPLICATION_CDR.with_schema("geometry_msgs/msg/TransformStamped");
     let mut interval = tokio::time::interval(Duration::from_secs(1));
-
     loop {
         interval.tick().await;
-        session
-            .put(&topic, msg.clone())
-            .encoding(enc.clone())
-            .timestamp(session.new_timestamp())
-            .await?;
+        let now = stamp::now_stamp();
+        let msg = build_tf_msg(now)?;
+        put_stamped(&publ, ZBytes::from(msg.into_cdr()), enc.clone(), ts_id, now).await;
     }
 }
 
-fn build_tf_msg() -> Result<TransformStamped<Vec<u8>>, edgefirst_schemas::cdr::CdrError> {
+fn build_tf_msg(
+    stamp: Time,
+) -> Result<TransformStamped<Vec<u8>>, edgefirst_schemas::cdr::CdrError> {
     TransformStamped::builder()
-        .stamp(Time { sec: 0, nanosec: 0 })
+        .stamp(stamp)
         .frame_id(BASE_LINK_FRAME_ID)
         .child_frame_id(format!("{BASE_LINK_FRAME_ID}_optical"))
         .transform(Transform {
@@ -1586,172 +1689,6 @@ fn get_cluster_ids(frame: &FusionFrame) -> HashMap<u32, Vec<usize>> {
     cluster_ids
 }
 
-async fn grid_radar_tracked(
-    grid: &Arc<Mutex<Option<Grid>>>,
-    grid_tracker: &mut ByteTrack,
-    args: &Args,
-    session: &Session,
-) -> Vec<Box2D> {
-    let mut class = Vec::new();
-
-    let guard = grid.lock().await;
-    if guard.is_none() {
-        return class;
-    }
-    let (g, timestamp) = guard.as_ref().unwrap();
-
-    if *timestamp > grid_tracker.timestamp {
-        grid_radar_update_tracker(g, timestamp, grid_tracker, args, session).await;
-    }
-
-    for tracklet in grid_tracker.get_tracklets() {
-        if tracklet.count < 2 {
-            continue;
-        }
-        let pred = tracklet.get_predicted_location();
-        let i = (pred.ymin + pred.ymax) / 2.0;
-        let j = (pred.xmin + pred.xmax) / 2.0;
-
-        // center of grid
-        let width = g[0].len();
-        let (x, y) = grid_to_xy(i, j, width, args);
-
-        class.push(Box2D {
-            center_x: x,
-            center_y: y,
-            width: args.model_grid_size[0],
-            height: args.model_grid_size[1],
-            label: 1,
-        });
-    }
-
-    class
-}
-
-async fn grid_radar_update_tracker(
-    g: &[Vec<f32>],
-    timestamp: &u64,
-    grid_tracker: &mut ByteTrack,
-    args: &Args,
-    session: &Session,
-) {
-    let height = g.len();
-    let width = g[0].len();
-
-    let mut boxes = Vec::new();
-    for (i, g_i) in g.iter().enumerate() {
-        for (j, g_ij) in g_i.iter().enumerate() {
-            if *g_ij < args.model_threshold {
-                continue;
-            }
-            boxes.push(TrackerBox {
-                xmin: j as f32 - 1.0,
-                ymin: i as f32 - 1.0,
-                xmax: j as f32 + 1.0,
-                ymax: i as f32 + 1.0,
-                score: 1.0,
-                vision_class: 1,
-
-                fusion_class: 1,
-            });
-        }
-    }
-
-    grid_tracker.update(&mut boxes, *timestamp);
-
-    {
-        let mut tracked_g = vec![vec![0.0; width]; height];
-        for tracklet in grid_tracker.get_tracklets() {
-            if tracklet.count < 3 {
-                continue;
-            }
-            let pred = tracklet.get_predicted_location();
-            let i = ((pred.ymin + pred.ymax) / 2.0).round() as i32;
-            let j = ((pred.xmin + pred.xmax) / 2.0).round() as i32;
-            if i < 0 || i >= height as i32 || j < 0 || j >= width as i32 {
-                continue;
-            }
-
-            tracked_g[i as usize][j as usize] = 1.0
-        }
-
-        let mask: Vec<u8> = tracked_g
-            .iter()
-            .flatten()
-            .flat_map(|v| [128, (*v * 255.0f64).min(255.0) as u8])
-            .collect();
-        let msg = Mask::builder()
-            .height(height as u32)
-            .width(width as u32)
-            .length(1)
-            .encoding("")
-            .mask(&mask)
-            .boxed(false)
-            .build()
-            .expect("valid Mask");
-
-        let buf = ZBytes::from(msg.into_cdr());
-        let enc = Encoding::APPLICATION_CDR.with_schema("edgefirst_msgs/msg/Mask");
-
-        session
-            .put(format!("{}/tracked", args.model_output_topic), buf)
-            .encoding(enc)
-            .timestamp(session.new_timestamp())
-            .await
-            .unwrap();
-    }
-}
-
-#[instrument(skip_all)]
-async fn grid_radar(grid: &Arc<Mutex<Option<Grid>>>, args: &Args) -> Vec<Box2D> {
-    let mut class = Vec::new();
-
-    let guard = grid.lock().await;
-    if guard.is_none() {
-        return class;
-    }
-
-    let (g, _) = guard.as_ref().unwrap();
-
-    let width = g[0].len();
-    for (i, g_i) in g.iter().enumerate() {
-        for (j, g_ij) in g_i.iter().enumerate() {
-            if *g_ij < args.model_threshold {
-                continue;
-            }
-            // center of grid
-            let (x, y) = grid_to_xy(i as f32, j as f32, width, args);
-
-            class.push(Box2D {
-                center_x: x,
-                center_y: y,
-                width: args.model_grid_size[0],
-                height: args.model_grid_size[1],
-                label: 1,
-            });
-        }
-    }
-    class
-}
-
-// Half of the width of the model is used to offset the j value
-fn grid_to_xy(i: f32, j: f32, width: usize, args: &Args) -> (f32, f32) {
-    let i_width = args.model_grid_size[0];
-    let j_width = args.model_grid_size[1];
-
-    if args.model_polar {
-        let angle = -(width as f32) / 2.0 + j_width * (j + 0.5);
-        let range = i_width * (i + 0.5);
-        let x = (-angle).to_radians().cos() * range;
-        let y = (-angle).to_radians().sin() * range;
-        (x, y)
-    } else {
-        let x = i_width * (i + 0.5);
-        let y = -(width as f32) / 2.0 + j_width * (j + 0.5);
-        (x, y)
-    }
-}
-
 fn centroids_get_class(cluster_ids: &HashMap<u32, Vec<usize>>, frame: &FusionFrame) -> FusionFrame {
     let capacity = cluster_ids.len();
     let mut centroid = FusionFrame::new(capacity);
@@ -1889,7 +1826,7 @@ fn get_occupied_cluster(
     point_tracker: &mut ByteTrack,
 ) -> (ZBytes, Encoding) {
     let mut centroid = centroids_get_class(cluster_ids, frame);
-    let timestamp = header.stamp.to_nanos().unwrap_or(0);
+    let timestamp = stamp::mono_ns();
     centroids_update_tracker_classes(&mut centroid, point_tracker, timestamp);
     centroids_add_tracks(&mut centroid, point_tracker, timestamp);
 
@@ -2217,6 +2154,219 @@ async fn drain_recv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn centroid_tracker(track_extra_lifespan: f32) -> ByteTrack {
+        ByteTrack::new_with_settings(ByteTrackSettings {
+            track_high_conf: 0.5,
+            track_extra_lifespan,
+            track_iou: 0.1,
+            track_update: 0.25,
+        })
+    }
+
+    /// One classified single-point cluster per x position, so each centroid's
+    /// tracker box scores 1.0 and creates a tracklet.
+    fn classified_clusters(xs: &[f32]) -> FusionFrame {
+        let mut frame = FusionFrame::new(xs.len());
+        for (i, x) in xs.iter().enumerate() {
+            frame.x.push(*x);
+            frame.y.push(0.0);
+            frame.z.push(0.0);
+            frame.cluster_id.push(i as u32 + 1);
+            frame.vision_class[i] = 1;
+        }
+        frame.len = xs.len();
+        frame
+    }
+
+    fn cloud_header(sec: i32) -> CloudHeader {
+        CloudHeader {
+            stamp: Time { sec, nanosec: 0 },
+            frame_id: "radar".into(),
+        }
+    }
+
+    #[test]
+    fn centroid_tracker_uses_monotonic_time_not_stamps() {
+        let mut tracker = centroid_tracker(0.01);
+        let both = classified_clusters(&[5.0, 20.0]);
+        let _ = get_occupied_cluster(
+            &cloud_header(1_790_000_000),
+            &both,
+            &get_cluster_ids(&both),
+            &mut tracker,
+        );
+        assert_eq!(tracker.get_tracklets().len(), 2);
+        std::thread::sleep(Duration::from_millis(50));
+        // A header stamp one hour in the past must not make the unmatched
+        // track immortal: its lifetime runs on the monotonic clock.
+        let one = classified_clusters(&[5.0]);
+        let _ = get_occupied_cluster(
+            &cloud_header(1_789_996_400),
+            &one,
+            &get_cluster_ids(&one),
+            &mut tracker,
+        );
+        assert_eq!(tracker.get_tracklets().len(), 1);
+        assert_eq!(tracker.get_tracklets()[0].count, 2);
+    }
+
+    #[test]
+    fn centroid_tracks_survive_forward_stamp_jump() {
+        let mut tracker = centroid_tracker(0.5);
+        let both = classified_clusters(&[5.0, 20.0]);
+        let _ = get_occupied_cluster(
+            &cloud_header(1_790_000_000),
+            &both,
+            &get_cluster_ids(&both),
+            &mut tracker,
+        );
+        // A stamp one hour ahead must not expire a track missed for one frame.
+        let one = classified_clusters(&[5.0]);
+        let _ = get_occupied_cluster(
+            &cloud_header(1_790_003_600),
+            &one,
+            &get_cluster_ids(&one),
+            &mut tracker,
+        );
+        assert_eq!(tracker.get_tracklets().len(), 2);
+    }
+
+    #[test]
+    fn tf_msg_carries_given_stamp() {
+        let stamp = Time {
+            sec: 1_790_000_000,
+            nanosec: 42,
+        };
+        let msg = build_tf_msg(stamp).expect("tf msg");
+        assert_eq!(msg.stamp(), stamp);
+        assert_eq!(msg.frame_id(), BASE_LINK_FRAME_ID);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn put_stamped_sets_sample_timestamp_to_stamp() {
+        let mut cfg = zenoh::Config::default();
+        cfg.insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        cfg.insert_json5("listen/endpoints", "[]").unwrap();
+        let session = zenoh::open(cfg).await.unwrap();
+        let sub = session.declare_subscriber("test/stamped").await.unwrap();
+        let publ = session.declare_publisher("test/stamped").await.unwrap();
+        let stamp = Time {
+            sec: 1_790_000_000,
+            nanosec: 987_654_321,
+        };
+        put_stamped(
+            &publ,
+            ZBytes::from(vec![1u8]),
+            Encoding::APPLICATION_CDR,
+            stamp::timestamp_id(&session),
+            stamp,
+        )
+        .await;
+        let sample = sub.recv_async().await.unwrap();
+        let ts = sample.timestamp().expect("timestamp attached");
+        let got = ts.get_time().to_duration().as_nanos() as u64;
+        assert!(got.abs_diff(stamp::time_to_ns(stamp)) <= 2);
+    }
+
+    fn model_with_stamp(stamp: Time) -> Model<Vec<u8>> {
+        Model::builder()
+            .stamp(stamp)
+            .frame_id("camera_optical")
+            .build()
+            .expect("model")
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn select_model_picks_nearest_stamp() {
+        let topic = SyncedTopic::new("model/output", 8);
+        for ms in [0u64, 33, 66, 100] {
+            let t = stamp::ns_to_time(1_790_000_000_000_000_000 + ms * 1_000_000);
+            topic.push(t, model_with_stamp(t));
+        }
+        let target = 1_790_000_000_000_000_000 + 60 * 1_000_000;
+        let mut stats = stats::PairStats::point_cloud();
+        let m = select_model(
+            &topic,
+            target,
+            50_000_000,
+            Duration::ZERO,
+            &mut stats,
+            "fusion/radar",
+        )
+        .await
+        .expect("paired");
+        assert_eq!(
+            stamp::time_to_ns(m.stamp()),
+            1_790_000_000_000_000_000 + 66 * 1_000_000
+        );
+        assert_eq!(stats.paired, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unpaired_warning_is_logged_once() {
+        let topic = SyncedTopic::new("model/output", 8);
+        let t = stamp::ns_to_time(1_000_000_000_000_000_000);
+        topic.push(t, model_with_stamp(t));
+        let mut stats = stats::PairStats::point_cloud();
+        for _ in 0..3 {
+            assert!(select_model(
+                &topic,
+                1_790_000_000_000_000_000,
+                100_000_000,
+                Duration::ZERO,
+                &mut stats,
+                "fusion/radar",
+            )
+            .await
+            .is_none());
+        }
+        assert_eq!(stats.too_far, 3);
+        assert!(stats.warned_too_far);
+    }
+
+    fn grid_with_x(x: f32) -> grid::GridFrame {
+        grid::GridFrame {
+            predictions: vec![Box2D {
+                center_x: x,
+                ..Default::default()
+            }],
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn select_grid_pairs_by_stamp() {
+        const BASE: u64 = 1_790_000_000_000_000_000;
+        const MS: u64 = 1_000_000;
+        let grid: SharedGrid = Arc::new(SyncedTopic::new("fusion/grid", 4));
+        let mut stats = stats::PairStats::point_cloud();
+        assert!(
+            select_grid(&grid, BASE, 100 * MS, &mut stats, "fusion/radar")
+                .await
+                .is_empty()
+        );
+        assert_eq!(stats.grid_missing, 1);
+        assert_eq!(stats.missing, 0);
+
+        for (ms, x) in [(0u64, 1.0), (55, 2.0), (110, 3.0)] {
+            grid.push(stamp::ns_to_time(BASE + ms * MS), grid_with_x(x));
+        }
+        let p = select_grid(&grid, BASE + 60 * MS, 100 * MS, &mut stats, "fusion/radar").await;
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].center_x, 2.0);
+
+        let p = select_grid(&grid, BASE + 900 * MS, 100 * MS, &mut stats, "fusion/radar").await;
+        assert!(p.is_empty());
+        assert_eq!(stats.grid_too_far, 1);
+        assert_eq!(stats.too_far, 0);
+        assert_eq!(
+            stats.grid_delta_ns.summary().unwrap(),
+            "grid_delta p50=-5.0ms max=5.0ms"
+        );
+        assert!(stats.warned_grid_too_far);
+        assert!(!stats.warned_too_far);
+    }
 
     fn make_box<'a>(
         cx: f32,

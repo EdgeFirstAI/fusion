@@ -9,22 +9,16 @@ use ndarray::{
 use std::{
     f32::consts::E,
     io,
-    sync::Arc,
     thread::{self, JoinHandle},
 };
 use tflitec_sys::{LibloadingError, TfLiteError};
 use thiserror::Error;
-use tokio::sync::Mutex;
 use tracing::{info_span, instrument};
 use zenoh::Session;
 
-use crate::{args::Args, tflite_model::run_tflite_fusion_model, Grid};
+use crate::{args::Args, grid::SharedGrid, tflite_model::run_tflite_fusion_model};
 
-pub fn spawn_fusion_model_thread(
-    session: Session,
-    args: Args,
-    grid: Arc<Mutex<Option<Grid>>>,
-) -> JoinHandle<()> {
+pub fn spawn_fusion_model_thread(session: Session, args: Args, grid: SharedGrid) -> JoinHandle<()> {
     thread::Builder::new()
         .name("model".to_string())
         .spawn(move || {
@@ -37,7 +31,7 @@ pub fn spawn_fusion_model_thread(
         .unwrap()
 }
 
-pub async fn run_fusion_model(session: Session, args: Args, grid: Arc<Mutex<Option<Grid>>>) {
+pub async fn run_fusion_model(session: Session, args: Args, grid: SharedGrid) {
     if args.model.is_none() {
         return;
     }

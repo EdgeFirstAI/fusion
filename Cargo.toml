@@ -3,7 +3,7 @@ name = "edgefirst-fusion"
 description = "EdgeFirst Fusion"
 repository = "https://github.com/EdgeFirstAI/fusion"
 license = "Apache-2.0"
-version = "1.9.0"
+version = "1.10.0"
 edition = "2021"
 rust-version = "1.82"
 
@@ -55,6 +55,7 @@ tokio = { version = "1.53", features = [
     "time",
     "io-std",
     "tracing",
+    "macros",
 ] }
 tracing = "0.1.41"
 tracing-journald = "0.3.1"
