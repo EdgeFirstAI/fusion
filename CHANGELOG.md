@@ -26,7 +26,7 @@ Timestamp contract and temporal alignment: every fusion output carries its sourc
 - The grid tracker runs once per grid in the fusion-model thread (EDGEAI-1940)
 - `MAX_MODEL_AGE` warns when the newest model output was received more than the limit ago (EDGEAI-1940)
 - With a radar and camera model, a dedicated thread converts camera frames on arrival into a ring of `CAMERA_BUFFER_SIZE` frames, and each radar cube is paired with the nearest frame by stamp. Frames received more than 2 s ago are never paired (EDGEAI-1940)
-- Camera frames that arrive after their capture buffer may have been overwritten are skipped instead of converted. The limit is `(N - 1)` frame periods less a margin, with `N` learned from the distinct DMA-BUF descriptors in `CameraFrame` and the period from the stamp interval, so it follows the camera service's `CAMERA_BUFFERS` and frame rate (100 ms until learned) (EDGEAI-1940)
+- Camera frames that arrive after their capture buffer may have been overwritten are skipped instead of converted. The limit is `(N - 1)` frame periods less a margin, with `N` learned from the distinct DMA-BUF descriptors in `CameraFrame` and the period from the stamp interval, so it follows the camera service's `CAMERA_BUFFERS` and frame rate. While it is being learned the limit uses the buffers and shortest interval seen so far, so it never overstates the window (EDGEAI-1940)
 - Model-output pairing is skipped when `VISION_MODEL_TOPIC` is empty (EDGEAI-1940)
 
 ### Fixed

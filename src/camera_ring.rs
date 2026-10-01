@@ -18,8 +18,8 @@ use std::{
 };
 use tokio::sync::Notify;
 
-/// Window used until the camera's buffer pool and frame period are learned:
-/// 4 buffers at 30 FPS.
+/// Window for a stream whose descriptors do not identify its buffers (one
+/// fd for every frame): 4 buffers at 30 FPS.
 pub const DEFAULT_RECYCLE_WINDOW_NS: u64 = 100_000_000;
 
 /// Frames of history used to count the pool and estimate the period. Covers
@@ -110,22 +110,39 @@ impl RecycleWindow {
         if self.handles.len() < MIN_FRAMES || self.periods.len() < MIN_FRAMES / 2 {
             return None;
         }
-        let mut handles: Vec<i64> = self.handles.iter().copied().collect();
-        handles.sort_unstable();
-        handles.dedup();
         let mut periods: Vec<u64> = self.periods.iter().copied().collect();
         periods.sort_unstable();
         let pool = CameraPool {
-            buffers: handles.len(),
+            buffers: self.distinct_handles(),
             period_ns: periods[periods.len() / 2],
         };
         (pool.buffers >= 2).then_some(pool)
     }
 
-    /// Current window: learned, or `DEFAULT_RECYCLE_WINDOW_NS`.
+    fn distinct_handles(&self) -> usize {
+        let mut handles: Vec<i64> = self.handles.iter().copied().collect();
+        handles.sort_unstable();
+        handles.dedup();
+        handles.len()
+    }
+
+    /// Current window, once learned. While learning, the buffers and the
+    /// shortest interval seen so far, which can only understate the true
+    /// window, and zero (every frame is too old) until two buffers have been
+    /// seen. A stream that shows one descriptor for `MIN_FRAMES` frames gets
+    /// `DEFAULT_RECYCLE_WINDOW_NS`.
     pub fn window_ns(&self) -> u64 {
-        self.learned
-            .map_or(DEFAULT_RECYCLE_WINDOW_NS, |p| p.window_ns())
+        if let Some(pool) = self.learned {
+            return pool.window_ns();
+        }
+        let buffers = self.distinct_handles();
+        if buffers < 2 && self.handles.len() >= MIN_FRAMES {
+            return DEFAULT_RECYCLE_WINDOW_NS;
+        }
+        match self.periods.iter().copied().min() {
+            Some(period_ns) if buffers >= 2 => CameraPool { buffers, period_ns }.window_ns(),
+            _ => 0,
+        }
     }
 
     /// True when a frame stamped `stamp_ns` is too old at `now_ns` to read.
@@ -237,7 +254,9 @@ impl<I> SharedCameraRing<I> {
 
     /// Never hold the guard across `.await`.
     pub fn lock(&self) -> MutexGuard<'_, CameraRing<I>> {
-        self.ring.lock().unwrap_or_else(|e| e.into_inner())
+        self.ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Store a converted frame, wake waiters, and return the replaced image.
@@ -302,12 +321,25 @@ mod tests {
     }
 
     #[test]
-    fn default_window_until_learned() {
+    fn partial_window_while_learning_understates_the_pool() {
         let mut w = RecycleWindow::new();
-        assert!(feed(&mut w, 1, 4, (MIN_FRAMES - 1) as u64).is_none());
-        assert_eq!(w.window_ns(), DEFAULT_RECYCLE_WINDOW_NS);
-        assert!(w.is_stale(0, DEFAULT_RECYCLE_WINDOW_NS + 1));
-        assert!(!w.is_stale(0, DEFAULT_RECYCLE_WINDOW_NS));
+        w.observe(1, 40, 1_000 * MS);
+        assert_eq!(w.window_ns(), 0, "one buffer seen: every frame is too old");
+        assert!(w.is_stale(1_000 * MS, 1_000 * MS + 1));
+        w.observe(1, 41, 1_000 * MS + PERIOD);
+        assert_eq!(w.window_ns(), PERIOD - PERIOD / 4);
+        feed(&mut w, 1, 4, 4);
+        assert_eq!(w.window_ns(), 3 * PERIOD - PERIOD / 4);
+        assert!(w.learned.is_none());
+    }
+
+    #[test]
+    fn partial_window_uses_the_shortest_interval() {
+        let mut w = RecycleWindow::new();
+        w.observe(1, 40, 0);
+        w.observe(1, 41, 3 * PERIOD);
+        w.observe(1, 42, 4 * PERIOD);
+        assert_eq!(w.window_ns(), 2 * PERIOD - PERIOD / 4);
     }
 
     #[test]
@@ -342,7 +374,7 @@ mod tests {
         feed(&mut w, 1, 4, 64);
         assert!(w.observe(2, 99, 5_000 * MS).is_none());
         assert_eq!(w.learned, None);
-        assert_eq!(w.window_ns(), DEFAULT_RECYCLE_WINDOW_NS);
+        assert_eq!(w.window_ns(), 0);
         assert_eq!(feed(&mut w, 2, 8, 64).map(|p| p.buffers), Some(8));
     }
 
@@ -368,9 +400,11 @@ mod tests {
     }
 
     #[test]
-    fn single_buffer_keeps_default() {
+    fn single_descriptor_stream_gets_default_once_seen_long_enough() {
         let mut w = RecycleWindow::new();
-        assert!(feed(&mut w, 1, 1, 64).is_none());
+        assert!(feed(&mut w, 1, 1, (MIN_FRAMES - 1) as u64).is_none());
+        assert_eq!(w.window_ns(), 0);
+        assert!(feed(&mut w, 1, 1, 1).is_none());
         assert_eq!(w.window_ns(), DEFAULT_RECYCLE_WINDOW_NS);
     }
 

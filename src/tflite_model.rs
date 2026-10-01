@@ -253,7 +253,7 @@ pub async fn run_tflite_fusion_model(
                 .collect::<Result<Vec<_>, _>>()?;
             let scratch = alloc_camera_input_image(&camera_input_shape)?;
             let ring = Arc::new(SharedCameraRing::new(CameraRing::new(slots)));
-            spawn_camera_converter(
+            let converter = spawn_camera_converter(
                 session.clone(),
                 args.camera_topic.clone(),
                 ring.clone(),
@@ -262,6 +262,7 @@ pub async fn run_tflite_fusion_model(
             .await?;
             CameraInput::Paired(Box::new(PairedCamera {
                 ring,
+                _converter: converter,
                 cube_silence: SilenceWatch::new(args.radarcube_topic.clone()),
                 stats: PairStats::cube_camera(),
                 last_stats: Instant::now(),
@@ -376,6 +377,8 @@ enum CameraInput {
 /// Converted camera frames awaiting a radar cube, plus pairing statistics.
 struct PairedCamera {
     ring: Arc<SharedCameraRing<Image>>,
+    /// Dropped with this thread's state, which stops the converter thread.
+    _converter: ConverterHandle,
     cube_silence: SilenceWatch,
     stats: PairStats,
     last_stats: Instant,
@@ -394,13 +397,19 @@ impl PairedCamera {
 /// Start the thread that converts camera frames into `ring` as they arrive,
 /// so conversion never queues behind inference. Returns once its G2D context
 /// and subscriber are ready.
+/// Keeps the camera converter thread running; dropping it stops the thread.
+struct ConverterHandle {
+    _stop: tokio::sync::oneshot::Sender<()>,
+}
+
 async fn spawn_camera_converter(
     session: Session,
     topic: String,
     ring: Arc<SharedCameraRing<Image>>,
     scratch: Image,
-) -> Result<(), FusionError> {
+) -> Result<ConverterHandle, FusionError> {
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     thread::Builder::new()
         .name("camera".to_string())
         .spawn(move || {
@@ -415,14 +424,15 @@ async fn spawn_camera_converter(
                 }
             };
             rt.block_on(run_camera_converter(
-                session, topic, ring, scratch, ready_tx,
+                session, topic, ring, scratch, ready_tx, stop_rx,
             ));
         })
         .map_err(|e| FusionError::from(format!("spawn camera converter: {e}")))?;
     ready_rx
         .await
         .map_err(|_| FusionError::from("camera converter exited during startup"))?
-        .map_err(FusionError::from)
+        .map_err(FusionError::from)?;
+    Ok(ConverterHandle { _stop: stop_tx })
 }
 
 async fn run_camera_converter(
@@ -431,6 +441,7 @@ async fn run_camera_converter(
     ring: Arc<SharedCameraRing<Image>>,
     mut scratch: Image,
     ready: tokio::sync::oneshot::Sender<Result<(), String>>,
+    mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
     let img_mgr = match open_g2d() {
         Ok(v) => v,
@@ -453,7 +464,14 @@ async fn run_camera_converter(
     let mut recycle = RecycleWindow::new();
     let mut silence = SilenceWatch::new(topic.clone());
     loop {
-        let sample = match tokio::time::timeout(silence.timeout(), sub.recv_async()).await {
+        let received = tokio::select! {
+            r = tokio::time::timeout(silence.timeout(), sub.recv_async()) => r,
+            _ = &mut stop => {
+                info!("camera converter stopped: the fusion model has exited");
+                return;
+            }
+        };
+        let sample = match received {
             Ok(Ok(s)) => {
                 silence.heard();
                 s

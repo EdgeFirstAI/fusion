@@ -97,6 +97,10 @@ impl<T> StampedBuffer<T> {
             .iter()
             .min_by_key(|s| s.stamp_ns.abs_diff(target_ns))
         else {
+            // Entries are kept for `STALE_AFTER`, so an empty buffer means the
+            // producer has been silent at least that long (or a clock step
+            // just cleared it). Waiting would delay every output by the wait
+            // while the producer is down.
             return Selection::Empty;
         };
         let newest_ns = self.buf.iter().map(|s| s.stamp_ns).max().unwrap_or(0);
@@ -199,7 +203,9 @@ impl<T> SyncedTopic<T> {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, StampedBuffer<T>> {
-        self.buffer.lock().unwrap_or_else(|e| e.into_inner())
+        self.buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn push(&self, stamp: Time, data: T) {
