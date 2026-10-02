@@ -202,8 +202,21 @@ edgefirst-fusion --help
 
 **Vision & Instance Detection:**
 
-- `--max-model-age <SECS>` - Maximum age in seconds for model output data before warning (default: `0.5`, 0 = disabled)
+- `--max-model-age <SECS>` - Warn when the newest model output was received more than this long ago (default: `0.5`, 0 = disabled). A liveness check on receive time; it does not affect pairing.
 - `--background-index <INT>` - Semantic-segmentation background class (`-1` = last channel, default)
+
+**Temporal Pairing:**
+
+See [Timestamps and Temporal Alignment](ARCHITECTURE.md#timestamps-and-temporal-alignment) for how these are used. Values outside these ranges are rejected at startup: `SYNC_WAIT` 0-10, `MAX_TEMPORAL_DELTA` and `MAX_GRID_DELTA` 0-3600, `STATS_INTERVAL` 0-86400, the time offsets -10 to 10, and the buffer sizes >= 1.
+
+- `--sync-wait <SECS>` - Longest wait for a model output (or camera frame) stamped at or after the pairing target before using the nearest one available (default: `0.05`)
+- `--max-temporal-delta <SECS>` - Largest stamp difference allowed between a point cloud and the model output it is fused with, and between a radar cube and its camera frame. Larger differences skip that input. `0` disables the check and always uses the nearest (default: `0.1`)
+- `--max-grid-delta <SECS>` - Largest stamp difference allowed between a point cloud and the fusion-model grid it is fused with. The grid is paired on the point-cloud stamp without waiting, and is ready later than the point cloud, so the nearest grid lags by the model latency (about 145 ms on a Maivin). `0` disables the check (default: `0.3`)
+- `--model-buffer-size <N>` - Model outputs buffered for stamp pairing (default: `16`)
+- `--camera-buffer-size <N>` - Converted camera frames buffered for radar-cube pairing. A cube arrives 110-150 ms after its stamp, so its frame is several frames back (default: `8`)
+- `--radar-time-offset <SECS>` - Added to the radar point-cloud stamp to form the `model/output` pairing target. May be negative (default: `0.0`)
+- `--lidar-time-offset <SECS>` - Added to the LiDAR point-cloud stamp (start of sweep) to form the `model/output` pairing target. May be negative (default: `0.0`)
+- `--stats-interval <SECS>` - Seconds between pairing statistics log lines, 0 = disabled (default: `10.0`)
 
 **Tracking Configuration:**
 
