@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Documented the orientation contract fusion relies on: the camera image is
+  in its natural orientation, transforms and intrinsics are calibration only,
+  and point clouds are unmirrored (EDGEAI-2021).
+
 ## [1.10.0] - 2026-10-01
 
 Timestamp contract and temporal alignment: every fusion output carries its source acquisition stamp, and fusion pairs inputs by stamp instead of by arrival (EDGEAI-1940).
