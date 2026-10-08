@@ -156,6 +156,12 @@ graph TD
 
 **Thread Count:** 1 per enabled sensor source (radar, LiDAR)
 
+**Sensor orientation assumptions:**
+
+- **Camera image is in its natural orientation.** Fusion assumes the camera publishes an upright image. The camera's `MIRROR` setting exists only to undo the sensor mount; for example, Maivin and Raivin mount the camera upside down and use `MIRROR=both`. Fusion does not read `MIRROR` and applies no flip of its own.
+- **Transforms and intrinsics are calibration only.** The camera `tf_static` (base_link → camera_optical) and `camera/info` describe the natural image. The sensor transforms describe each sensor's real pose. None of them encode a mount flip or a display mirror.
+- **Point clouds are right-handed and unmirrored.** LiDAR and radar publish points in their own sensor frame. Display mirroring is a WebUI view option only.
+
 ---
 
 ### Fusion Model Thread
