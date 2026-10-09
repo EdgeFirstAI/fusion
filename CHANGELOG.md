@@ -8,9 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- CameraFrame `Tensor.format` is parsed with HAL's `PixelFormat::from_str_code`, so frames published under the HAL wire names (`rgb8`, `rgba8`, `YUYV`, `NV12`, ...) are accepted. The camera 2.x names `RGB3`, `RGBA` and `RGBX` remain accepted through one documented alias table; `RGBX` is read as `rgba8` (EDGEAI-2197).
+- Image buffer sizes come from HAL's `PixelFormat::allocation_shape` instead of a hand-written per-format table (EDGEAI-2197).
+- Minimum supported Rust version raised from 1.82 to 1.94, as required by `edgefirst-tensor` (EDGEAI-2197).
+- Added the `edgefirst-tensor` 0.34.1 dependency and removed the unused direct `four-char-code` dependency (EDGEAI-2197).
 - Documented the orientation contract fusion relies on: the camera image is
   in its natural orientation, transforms and intrinsics are calibration only,
   and point clouds are unmirrored (EDGEAI-2021).
+
+### Fixed
+- Imported CameraFrames keep the producer's row pitch (`TensorPlane.stride`) and plane offsets, and the G2D source surface uses them, so padded rows and offset planes are read correctly. NV12 takes its chroma plane from plane 1 when published, including a chroma plane in its own DMA-BUF (NV12M), and otherwise from after the luma rows as camera 2.x lays it out. Layouts G2D cannot address are rejected (EDGEAI-2197).
 
 ## [1.10.0] - 2026-10-01
 

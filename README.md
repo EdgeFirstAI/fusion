@@ -3,7 +3,7 @@
 **Multi-modal sensor fusion with ML inference, object tracking, and occupancy grid generation for edge AI platforms**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20ARM64%20%7C%20x86__64-lightgrey.svg)]()
 [![Build Status](https://github.com/EdgeFirstAI/fusion/actions/workflows/build.yml/badge.svg)](https://github.com/EdgeFirstAI/fusion/actions/workflows/build.yml)
 [![Test Status](https://github.com/EdgeFirstAI/fusion/actions/workflows/test.yml/badge.svg)](https://github.com/EdgeFirstAI/fusion/actions/workflows/test.yml)
@@ -96,7 +96,7 @@ graph LR
 **Software:**
 
 - Linux kernel 5.10+ with V4L2 support
-- Rust 1.82 or later (for building from source)
+- Rust 1.94 or later (for building from source)
 - EdgeFirst Camera, Radar, and/or LiDAR publisher services running
 - OR: Pre-built binaries from [GitHub Releases](https://github.com/EdgeFirstAI/fusion/releases)
 
