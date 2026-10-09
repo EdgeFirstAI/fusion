@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- CameraFrame `Tensor.format` is parsed with HAL's `PixelFormat::from_str_code`, so frames published under the HAL wire names (`rgb8`, `rgba8`, `YUYV`, `NV12`, ...) are accepted. The camera 2.x names `RGB3`, `RGBA` and `RGBX` remain accepted through one documented alias table; `RGBX` is read as `rgba8` (EDGEAI-2197).
+- Image buffer sizes come from HAL's `PixelFormat::allocation_shape` instead of a hand-written per-format table (EDGEAI-2197).
+- Minimum supported Rust version raised from 1.82 to 1.94, as required by `edgefirst-tensor` (EDGEAI-2197).
+- Added the `edgefirst-tensor` 0.34.1 dependency and removed the unused direct `four-char-code` dependency (EDGEAI-2197).
 - Documented the orientation contract fusion relies on: the camera image is
   in its natural orientation, transforms and intrinsics are calibration only,
   and point clouds are unmirrored (EDGEAI-2021).

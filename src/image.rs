@@ -5,11 +5,11 @@ use async_pidfd::PidFd;
 use core::fmt;
 use dma_heap::{Heap, HeapKind};
 use edgefirst_schemas::edgefirst_msgs::CameraFrame;
+pub use edgefirst_tensor::PixelFormat;
 use g2d_sys::{
     g2d_format, g2d_format_G2D_NV12, g2d_format_G2D_RGB888, g2d_format_G2D_RGBA8888,
-    g2d_format_G2D_RGBX8888, g2d_format_G2D_YUYV, g2d_rotation_G2D_ROTATION_0,
-    g2d_rotation_G2D_ROTATION_180, g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90,
-    G2DPhysical, G2DSurface, G2D,
+    g2d_format_G2D_YUYV, g2d_rotation_G2D_ROTATION_0, g2d_rotation_G2D_ROTATION_180,
+    g2d_rotation_G2D_ROTATION_270, g2d_rotation_G2D_ROTATION_90, G2DPhysical, G2DSurface, G2D,
 };
 use libc::{mmap, munmap, MAP_SHARED, PROT_READ, PROT_WRITE};
 use log::{debug, warn};
@@ -23,17 +23,18 @@ use std::{
     slice::from_raw_parts_mut,
 };
 
-/// HAL / V4L2 fourcc stored as four ASCII bytes in wire order (`b"YUYV"`).
-/// Matches the camera service (`videostream::fourcc::FourCC(*b"YUYV")`) and
-/// the CameraFrame tensor `format` string. Do not route these through
-/// `four-char-code` / `G2DFormat::try_from` — that path byte-swaps to VYUY.
-pub type FourCC = [u8; 4];
-
-pub const RGB3: FourCC = *b"RGB3";
-pub const RGBX: FourCC = *b"RGBX";
-pub const RGBA: FourCC = *b"RGBA";
-pub const YUYV: FourCC = *b"YUYV";
-pub const NV12: FourCC = *b"NV12";
+/// `Tensor.format` strings published by edgefirst-camera 2.x that are not
+/// HAL wire names, accepted for compatibility with camera 2.x.
+///
+/// Camera 2.x publishes the V4L2 fourcc of its capture buffer. `YUYV` and
+/// `NV12` already equal the HAL wire names and need no alias. `RGBX` maps to
+/// [`PixelFormat::Rgba`]: the byte layout is identical and fusion only reads
+/// these frames as an unblended G2D source, so the fourth byte is ignored.
+pub const LEGACY_FORMAT_ALIASES: &[(&str, PixelFormat)] = &[
+    ("RGB3", PixelFormat::Rgb),
+    ("RGBA", PixelFormat::Rgba),
+    ("RGBX", PixelFormat::Rgba),
+];
 
 pub struct Rect {
     pub x: i32,
@@ -94,32 +95,38 @@ impl ImageManager {
     }
 }
 
-/// Map a HAL fourcc (same table as `edgefirst-camera::image::fourcc_to_g2d_format`)
-/// to the G2D format constant. YUYV must not become VYUY; RGBA must not become ABGR.
-pub fn fourcc_to_g2d_format(fourcc: FourCC) -> Result<g2d_format, io::Error> {
-    match &fourcc {
-        b"RGB3" => Ok(g2d_format_G2D_RGB888),
-        b"RGBX" => Ok(g2d_format_G2D_RGBX8888),
-        b"RGBA" => Ok(g2d_format_G2D_RGBA8888),
-        b"YUYV" => Ok(g2d_format_G2D_YUYV),
-        b"NV12" => Ok(g2d_format_G2D_NV12),
+/// Map a HAL [`PixelFormat`] to the G2D format constant G2D can blit from or to.
+pub fn pixel_format_to_g2d_format(format: PixelFormat) -> Result<g2d_format, io::Error> {
+    match format {
+        PixelFormat::Rgb => Ok(g2d_format_G2D_RGB888),
+        PixelFormat::Rgba => Ok(g2d_format_G2D_RGBA8888),
+        PixelFormat::Yuyv => Ok(g2d_format_G2D_YUYV),
+        PixelFormat::Nv12 => Ok(g2d_format_G2D_NV12),
         _ => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("unsupported G2D pixel format: {}", fourcc_str(fourcc)),
+            format!("unsupported G2D pixel format: {}", format.as_str()),
         )),
     }
 }
 
-/// Parse the CameraFrame / HAL tensor `format` string as four ASCII bytes.
-pub fn fourcc_from_hal(format: &str) -> io::Result<FourCC> {
-    let bytes = format.as_bytes();
-    if bytes.len() != 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("HAL fourcc must be 4 characters, got {format:?}"),
-        ));
-    }
-    Ok([bytes[0], bytes[1], bytes[2], bytes[3]])
+/// Parse a CameraFrame `Tensor.format` string.
+///
+/// Accepts the HAL wire names ([`PixelFormat::as_str`]) and, for
+/// compatibility with camera 2.x, the names in [`LEGACY_FORMAT_ALIASES`].
+pub fn pixel_format_from_wire(format: &str) -> io::Result<PixelFormat> {
+    PixelFormat::from_str_code(format)
+        .or_else(|| {
+            LEGACY_FORMAT_ALIASES
+                .iter()
+                .find(|(name, _)| *name == format)
+                .map(|&(_, pf)| pf)
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown CameraFrame tensor format {format:?}"),
+            )
+        })
 }
 
 /// Build a [`G2DSurface`] from an [`Image`]'s DMA buffer (camera `surface_from_image`).
@@ -127,7 +134,7 @@ fn surface_from_image(img: &Image) -> Result<G2DSurface, Box<dyn Error>> {
     let phys = G2DPhysical::new(img.fd.as_raw_fd())?;
     let addr = phys.address();
     let planes = match img.format {
-        NV12 => {
+        PixelFormat::Nv12 => {
             let y_size = img.width as u64 * img.height as u64;
             [addr, addr + y_size, 0]
         }
@@ -135,7 +142,7 @@ fn surface_from_image(img: &Image) -> Result<G2DSurface, Box<dyn Error>> {
     };
     Ok(G2DSurface {
         planes,
-        format: fourcc_to_g2d_format(img.format)?,
+        format: pixel_format_to_g2d_format(img.format)?,
         left: 0,
         top: 0,
         right: img.width as i32,
@@ -154,7 +161,7 @@ pub struct Image {
     pub fd: OwnedFd,
     pub width: u32,
     pub height: u32,
-    pub format: FourCC,
+    pub format: PixelFormat,
 }
 
 impl fmt::Debug for Image {
@@ -163,33 +170,33 @@ impl fmt::Debug for Image {
             .field("fd", &self.fd)
             .field("width", &self.width)
             .field("height", &self.height)
-            .field("format", &fourcc_str(self.format))
+            .field("format", &self.format.as_str())
             .finish()
     }
 }
 
-/// Returns the average bytes per row for the given format, used to calculate
-/// total image buffer size. Note: for planar formats like NV12, this is NOT
-/// the actual row stride but rather total_size/height.
-const fn format_row_stride(format: FourCC, width: u32) -> usize {
-    match format {
-        RGB3 => 3 * width as usize,
-        RGBX => 4 * width as usize,
-        RGBA => 4 * width as usize,
-        YUYV => 2 * width as usize,
-        NV12 => width as usize / 2 + width as usize,
-        _ => todo!(),
-    }
-}
-
-const fn image_size(width: u32, height: u32, format: FourCC) -> usize {
-    format_row_stride(format, width) * height as usize
+/// Bytes needed to hold a `width`x`height` image of `format`, from HAL's
+/// allocation geometry. Every [`PixelFormat`] has one-byte samples, so the
+/// element count of the allocation shape is the byte count. Returns 0 when
+/// HAL has no allocation geometry for the format.
+fn image_size(width: u32, height: u32, format: PixelFormat) -> usize {
+    format
+        .allocation_shape(width as usize, height as usize)
+        .map_or(0, |shape| shape.iter().product())
 }
 
 impl Image {
-    pub fn new(width: u32, height: u32, format: FourCC) -> Result<Self, Box<dyn Error>> {
+    pub fn new(width: u32, height: u32, format: PixelFormat) -> Result<Self, Box<dyn Error>> {
+        let size = image_size(width, height, format);
+        if size == 0 {
+            return Err(format!(
+                "cannot allocate a {width}x{height} {} image",
+                format.as_str()
+            )
+            .into());
+        }
         let heap = Heap::new(HeapKind::Cma)?;
-        let fd = heap.allocate(image_size(width, height, format))?;
+        let fd = heap.allocate(size)?;
         Ok(Self {
             fd,
             width,
@@ -210,12 +217,12 @@ impl Image {
         self.height
     }
 
-    pub fn format(&self) -> FourCC {
+    pub fn format(&self) -> PixelFormat {
         self.format
     }
 
     pub fn size(&self) -> usize {
-        format_row_stride(self.format, self.width) * self.height as usize
+        image_size(self.width, self.height, self.format)
     }
 
     pub fn mmap(&mut self) -> MappedImage {
@@ -283,12 +290,12 @@ pub fn image_from_camera_frame(frame: &CameraFrame<Vec<u8>>) -> Result<Image, io
     let width = t
         .shape_at(1)
         .ok_or_else(|| camera_frame_invalid("CameraFrame tensor missing width (shape[1])"))?;
-    let fourcc = fourcc_from_hal(t.format())?;
+    let format = pixel_format_from_wire(t.format())?;
     Ok(Image {
         fd: fd.into(),
         width: camera_frame_nonzero_u32("width", width)?,
         height: camera_frame_nonzero_u32("height", height)?,
-        format: fourcc,
+        format,
     })
 }
 
@@ -300,11 +307,6 @@ impl TryFrom<&CameraFrame<Vec<u8>>> for Image {
     }
 }
 
-/// Format a HAL fourcc as a 4-character string for display purposes.
-fn fourcc_str(fcc: FourCC) -> String {
-    String::from_utf8_lossy(&fcc).into_owned()
-}
-
 impl fmt::Display for Image {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
@@ -312,7 +314,7 @@ impl fmt::Display for Image {
             "{}x{} {} fd:{:?}",
             self.width,
             self.height,
-            fourcc_str(self.format),
+            self.format.as_str(),
             self.fd
         )
     }
@@ -340,29 +342,91 @@ impl Drop for MappedImage {
 mod tests {
     use super::*;
 
+    /// Every HAL wire name parses to its own format.
     #[test]
-    fn fourcc_from_hal_keeps_wire_order() {
-        assert_eq!(fourcc_from_hal("YUYV").unwrap(), YUYV);
-        assert_eq!(fourcc_from_hal("RGBA").unwrap(), RGBA);
-        assert_eq!(fourcc_from_hal("NV12").unwrap(), NV12);
-        assert!(fourcc_from_hal("YUY").is_err());
-        assert!(fourcc_from_hal("ABGRX").is_err());
+    fn parses_every_hal_wire_name() {
+        for &pf in PixelFormat::all() {
+            assert_eq!(pixel_format_from_wire(pf.as_str()).unwrap(), pf);
+        }
+    }
+
+    /// The formats the camera publishes, by both their HAL and camera 2.x names.
+    #[test]
+    fn parses_camera_formats_by_hal_and_legacy_name() {
+        let cases = [
+            ("YUYV", "YUYV", PixelFormat::Yuyv),
+            ("NV12", "NV12", PixelFormat::Nv12),
+            ("rgb8", "RGB3", PixelFormat::Rgb),
+            ("rgba8", "RGBA", PixelFormat::Rgba),
+            ("rgba8", "RGBX", PixelFormat::Rgba),
+        ];
+        for (hal, legacy, expected) in cases {
+            assert_eq!(expected.as_str(), hal);
+            assert_eq!(pixel_format_from_wire(hal).unwrap(), expected);
+            assert_eq!(pixel_format_from_wire(legacy).unwrap(), expected);
+        }
+    }
+
+    /// The alias table holds only names HAL does not already define, each once.
+    #[test]
+    fn legacy_aliases_do_not_shadow_hal_names() {
+        for (i, &(name, pf)) in LEGACY_FORMAT_ALIASES.iter().enumerate() {
+            assert_eq!(PixelFormat::from_str_code(name), None, "{name}");
+            assert_eq!(pixel_format_from_wire(name).unwrap(), pf, "{name}");
+            assert!(
+                LEGACY_FORMAT_ALIASES[..i].iter().all(|&(n, _)| n != name),
+                "duplicate alias {name}"
+            );
+        }
     }
 
     #[test]
-    fn fourcc_to_g2d_does_not_byte_swap() {
-        assert_eq!(fourcc_to_g2d_format(YUYV).unwrap(), g2d_format_G2D_YUYV);
-        assert_eq!(fourcc_to_g2d_format(RGBA).unwrap(), g2d_format_G2D_RGBA8888);
-        assert_eq!(fourcc_to_g2d_format(RGB3).unwrap(), g2d_format_G2D_RGB888);
-        assert_eq!(fourcc_to_g2d_format(RGBX).unwrap(), g2d_format_G2D_RGBX8888);
-        assert_eq!(fourcc_to_g2d_format(NV12).unwrap(), g2d_format_G2D_NV12);
-        assert!(fourcc_to_g2d_format(*b"VYUY").is_err());
-        assert!(fourcc_to_g2d_format(*b"ABGR").is_err());
+    fn rejects_unknown_format_names() {
+        for name in [
+            "",
+            "RGB",
+            "Y800",
+            "yuyv",
+            "nv12",
+            "RGB8",
+            "Rgb",
+            "ABGR",
+            "rgb8_planar_nchw",
+        ] {
+            let err = pixel_format_from_wire(name).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{name}");
+        }
     }
 
     #[test]
-    fn fourcc_str_matches_hal() {
-        assert_eq!(fourcc_str(YUYV), "YUYV");
-        assert_eq!(fourcc_str(RGBA), "RGBA");
+    fn maps_pixel_formats_to_g2d() {
+        assert_eq!(
+            pixel_format_to_g2d_format(PixelFormat::Yuyv).unwrap(),
+            g2d_format_G2D_YUYV
+        );
+        assert_eq!(
+            pixel_format_to_g2d_format(PixelFormat::Rgba).unwrap(),
+            g2d_format_G2D_RGBA8888
+        );
+        assert_eq!(
+            pixel_format_to_g2d_format(PixelFormat::Rgb).unwrap(),
+            g2d_format_G2D_RGB888
+        );
+        assert_eq!(
+            pixel_format_to_g2d_format(PixelFormat::Nv12).unwrap(),
+            g2d_format_G2D_NV12
+        );
+        for pf in [PixelFormat::Vyuy, PixelFormat::Bgra, PixelFormat::Nv16] {
+            let err = pixel_format_to_g2d_format(pf).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{pf:?}");
+        }
+    }
+
+    #[test]
+    fn image_size_matches_format_geometry() {
+        assert_eq!(image_size(640, 480, PixelFormat::Rgb), 640 * 480 * 3);
+        assert_eq!(image_size(640, 480, PixelFormat::Rgba), 640 * 480 * 4);
+        assert_eq!(image_size(640, 480, PixelFormat::Yuyv), 640 * 480 * 2);
+        assert_eq!(image_size(640, 480, PixelFormat::Nv12), 640 * 480 * 3 / 2);
     }
 }

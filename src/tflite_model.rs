@@ -25,7 +25,7 @@ use crate::{
     drain_recv,
     fusion_model::{apply_sigmoid, identify_named_inputs, preprocess_cube, FusionError},
     grid::{GridFrame, GridTracker, SharedGrid},
-    image::{Image, ImageManager, Rotation, RGBA},
+    image::{Image, ImageManager, PixelFormat, Rotation},
     stamp::{now_stamp, ns_to_time, time_to_ns, Continuity, StampTimeline, STEP_THRESHOLD_NS},
     stats::PairStats,
     sync::SilenceWatch,
@@ -136,7 +136,7 @@ fn alloc_camera_input_image(camera_input_shape: &[usize]) -> Result<Image, Fusio
     match Image::new(
         camera_input_shape[2] as u32,
         camera_input_shape[1] as u32,
-        RGBA,
+        PixelFormat::Rgba,
     ) {
         Ok(v) => Ok(v),
         Err(e) => {
@@ -960,7 +960,7 @@ fn convert_camera_frame(
     frame: &CameraFrame<Vec<u8>>,
     dest: &mut Image,
 ) -> Result<(), FusionError> {
-    if dest.format() != RGBA {
+    if dest.format() != PixelFormat::Rgba {
         return Err("The format of destination buffer is not RGBA".into());
     }
     let input = Image::try_from(frame)?;
@@ -988,7 +988,7 @@ fn load_image_into_tensor(
             "The width of the destination buffer is not equal to the width of the tensor".into(),
         );
     }
-    if image.format() != RGBA {
+    if image.format() != PixelFormat::Rgba {
         return Err("The format of destination buffer is not RGBA".into());
     }
     const DATA_CHANNELS: usize = 4; // RGBA is 4 channels
