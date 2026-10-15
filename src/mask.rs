@@ -75,7 +75,7 @@ pub fn process_mask(mask: &mut ProcessedMask) -> usize {
         return 1;
     }
     let pixels = mask.width as usize * mask.height as usize;
-    if mask.mask.is_empty() || pixels == 0 || mask.mask.len() % pixels != 0 {
+    if mask.mask.is_empty() || pixels == 0 || !mask.mask.len().is_multiple_of(pixels) {
         mask.mask = vec![0; pixels];
         return 1;
     }
